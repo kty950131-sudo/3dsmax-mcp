@@ -109,6 +109,12 @@ and `capture_tyflow_editor` for foreign flows.
 - `assign_controller`, `inspect_controller`, `inspect_track_view`, `set_controller_props`, `add_controller_target`
 - `list_wireable_params`, `wire_params`, `get_wired_params`, `unwire_params`
 
+### Biped & BVH mocap
+- `import_bvh_to_biped` — creates a Biped and loads a BVH via `biped.loadMocapFile`, preprocessing the file first (kimodo/SMPL-X exports need it).
+- `biped.loadMocapFile` returns **false silently** (no dialog, no error) when it dislikes a file. Empirically on Max 2026 it rejects: a static dummy root above the hips (`ROOT Root` → `JOINT Hips`), joint names outside Character Studio's fixed vocabulary (`Spine`/`Spine1` are unknown — extra spine links must be `Chest`/`Chest2`/`Chest3`, necks `Neck`/`Neck1`, limbs `LeftCollar`/`LeftUpArm`/`LeftLowArm`/`LeftUpLeg`/`LeftLowLeg`/`LeftToe`), and it cannot map eyes/jaw/SMPL-X finger chains.
+- A BVH whose rest skeleton is not Y-up (bones laid along +X) loads but converts to mangled poses — always use the `*_tpose` export variant.
+- Wrap the load in `setQuietMode true/false`; delete the biped root node on failure to avoid clutter.
+
 ### Procedural graph systems
 
 For Data Channel or Max Creation Graph work, read [procedural-graphs.md](procedural-graphs.md) completely before acting. It contains the dedicated tool workflows, agentic compile/verify loop, safety gates, validation rules, and runtime pitfalls.

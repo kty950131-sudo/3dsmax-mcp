@@ -212,6 +212,7 @@ CORE_TOOL_MODULES = (
     "learning",
     "controllers",
     "keyframes",
+    "biped",
     "tool_test",
     "mainthread",
 )
