@@ -62,6 +62,35 @@ Frame Time: 0.03333333
 0.0 0.0 -179.0
 """
 
+# Golden output from pre-Task-2 code (commit a012cbb) with prepare_for_biped(KIMODO_STYLE, prune=("LeftEye",), speed=2.0)
+# This proves backward compatibility for existing MAXScript caller.
+PREPARE_GOLDEN_SPEED2 = """HIERARCHY
+ROOT Hips
+{
+  OFFSET 0.000000 100.000000 0.000000
+  CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+  JOINT Head
+  {
+    OFFSET 0.000000 20.000000 0.000000
+    CHANNELS 3 Zrotation Yrotation Xrotation
+    JOINT HeadEnd
+    {
+      OFFSET 0.000000 10.000000 0.000000
+      CHANNELS 3 Zrotation Yrotation Xrotation
+      End Site
+      {
+        OFFSET 0.000000 0.000000 0.000000
+      }
+    }
+  }
+}
+MOTION
+Frames: 2
+Frame Time: 0.01666667
+1.000000 99.000000 2.000000 89.000000 -4.900000 90.200000 1.000000 2.000000 3.000000 0.100000 0.200000 0.300000
+1.100000 99.100000 2.100000 89.100000 -4.800000 90.300000 1.100000 2.100000 3.100000 0.200000 0.300000 0.400000
+"""
+
 
 def test_parse_kimodo_style() -> None:
     bvh = parse_bvh(KIMODO_STYLE)
@@ -294,8 +323,14 @@ def test_warp_interpolates_rotation_crossing_180() -> None:
     assert out.frames[1][2] == pytest.approx(180.0)
 
 
-def test_prepare_without_time_map_is_unchanged() -> None:
-    # 회귀 방어: 기존 호출자(bvh_biped_ui.ms)의 출력이 바뀌면 안 된다
+def test_prepare_golden_backward_compat() -> None:
+    # 회귀 방어: 기존 호출자(bvh_biped_ui.ms)의 출력이 프리-Task2 코드의 바이트와 정확히 일치해야 한다.
+    out = prepare_for_biped(KIMODO_STYLE, prune=("LeftEye",), speed=2.0)
+    assert out == PREPARE_GOLDEN_SPEED2
+
+
+def test_prepare_without_time_map_is_deterministic() -> None:
+    # time_map=None 일 때 결정적(deterministic)이어야 한다.
     baseline = prepare_for_biped(KIMODO_STYLE, prune=("LeftEye",), speed=2.0)
     with_none = prepare_for_biped(
         KIMODO_STYLE, prune=("LeftEye",), speed=2.0, time_map=None
@@ -311,4 +346,4 @@ def test_prepare_with_time_map_resamples() -> None:
 def test_prepare_time_map_ignores_speed() -> None:
     # time_map 이 있으면 speed 는 적용되지 않는다 (frame_time 유지)
     out = prepare_for_biped(KIMODO_STYLE, speed=4.0, time_map=[0.0, 1.0])
-    assert "Frame Time: 0.033333" in out
+    assert "Frame Time: 0.03333333" in out
