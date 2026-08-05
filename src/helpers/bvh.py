@@ -372,10 +372,37 @@ def offset_root(bvh: BvhFile, offset: tuple[float, float, float]) -> BvhFile:
     return BvhFile(root=bvh.root, frame_time=bvh.frame_time, frames=new_frames)
 
 
+def retime(bvh: BvhFile, speed: float) -> BvhFile:
+    """Scale playback speed by stretching the frame time (Mixamo Overdrive)."""
+    if speed == 1.0:
+        return bvh
+    if speed <= 0:
+        raise ValueError(f"speed must be positive, got {speed}")
+    return BvhFile(
+        root=bvh.root, frame_time=bvh.frame_time / speed, frames=bvh.frames
+    )
+
+
+def trim(bvh: BvhFile, start_frac: float, end_frac: float) -> BvhFile:
+    """Keep only the [start_frac, end_frac] slice of the clip (Mixamo Trim)."""
+    if (start_frac, end_frac) == (0.0, 1.0):
+        return bvh
+    if not 0.0 <= start_frac < end_frac <= 1.0:
+        raise ValueError(f"invalid trim range: {start_frac}..{end_frac}")
+    n = len(bvh.frames)
+    start = int(n * start_frac)
+    end = max(start + 1, int(n * end_frac))
+    return BvhFile(
+        root=bvh.root, frame_time=bvh.frame_time, frames=bvh.frames[start:end]
+    )
+
+
 def prepare_for_biped(
     text: str,
     prune: tuple[str, ...] = (),
     offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    speed: float = 1.0,
+    trim_range: tuple[float, float] = (0.0, 1.0),
 ) -> str:
     """Rewrite BVH text so 3ds Max biped.loadMocapFile accepts it."""
     bvh = parse_bvh(text)
@@ -383,4 +410,6 @@ def prepare_for_biped(
     bvh = prune_joints(bvh, prune)
     bvh = rename_for_biped(bvh)
     bvh = offset_root(bvh, offset)
+    bvh = trim(bvh, trim_range[0], trim_range[1])
+    bvh = retime(bvh, speed)
     return serialize_bvh(bvh)

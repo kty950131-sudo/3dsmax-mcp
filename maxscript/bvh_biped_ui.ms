@@ -10,7 +10,7 @@
 --   * 팔 간격    — arm-space slider, uniform outward upper-arm rotation ("ArmSpace" layer)
 
 global BvhBipedUi
-global bvhUiOut, bvhUiUpright, bvhUiErr
+global bvhUiOut, bvhUiUpright, bvhUiErr, bvhUiSeconds
 
 struct BvhBipedUiStruct
 (
@@ -45,11 +45,12 @@ struct BvhBipedUiStruct
 	-- Convert srcPath for biped via the Python helper, baking an X placement
 	-- offset into the root position channels. Returns the path to load, or
 	-- undefined on error (bvhUiErr set).
-	fn convertClip srcPath xOffset:0 =
+	fn convertClip srcPath xOffset:0 speed:1.0 trimStart:0.0 trimEnd:1.0 =
 	(
 		bvhUiOut = ""
 		bvhUiErr = ""
 		bvhUiUpright = true
+		bvhUiSeconds = 0.0
 		local repo = substituteString repoRoot "\\" "/"
 		local src = substituteString srcPath "\\" "/"
 		local py = "import sys\n"
@@ -64,10 +65,12 @@ struct BvhBipedUiStruct
 		py += "    src = Path(r'" + src + "')\n"
 		py += "    text = src.read_text(encoding='utf-8')\n"
 		py += "    out = src.with_name(src.stem + '_biped.bvh')\n"
-		py += "    converted = prepare_for_biped(text, prune=DEFAULT_BIPED_PRUNE, offset=(" + (xOffset as string) + ", 0.0, 0.0))\n"
+		py += "    converted = prepare_for_biped(text, prune=DEFAULT_BIPED_PRUNE, offset=(" + (xOffset as string) + ", 0.0, 0.0), speed=" + (speed as string) + ", trim_range=(" + (trimStart as string) + ", " + (trimEnd as string) + "))\n"
 		py += "    out.write_text(converted, encoding='utf-8', newline='\\n')\n"
 		py += "    rt.bvhUiOut = str(out)\n"
 		py += "    rt.bvhUiUpright = has_upright_spine(text)\n"
+		py += "    _done = _bvh.parse_bvh(converted)\n"
+		py += "    rt.bvhUiSeconds = len(_done.frames) * _done.frame_time\n"
 		py += "except Exception as exc:\n"
 		py += "    rt.bvhUiErr = str(exc)\n"
 		python.Execute py
@@ -80,14 +83,14 @@ struct BvhBipedUiStruct
 		for o in objects where (classOf o.controller == Vertical_Horizontal_Turn) collect o
 	),
 
-	fn importClip srcPath bipName doConvert xOffset =
+	fn importClip srcPath bipName doConvert xOffset speed:1.0 trimStart:0.0 trimEnd:1.0 doMirror:false =
 	(
 		if not doesFileExist srcPath do return "ERROR: file not found: " + srcPath
 		local loadPath = srcPath
 		local upright = true
 		if doConvert do
 		(
-			loadPath = convertClip srcPath xOffset:xOffset
+			loadPath = convertClip srcPath xOffset:xOffset speed:speed trimStart:trimStart trimEnd:trimEnd
 			if loadPath == undefined do return "ERROR: convert failed: " + bvhUiErr
 			upright = bvhUiUpright
 		)
@@ -104,8 +107,13 @@ struct BvhBipedUiStruct
 			try ( delete bip ) catch ()
 			return "ERROR: loadMocapFile rejected " + loadPath
 		)
+		if doMirror do ( try ( biped.mirror c ) catch () )
 		importCount += 1
-		local msg = "OK: " + bip.name + " " + (animationRange as string)
+		local msg = "OK: " + bip.name
+		if doConvert and bvhUiSeconds > 0 then
+			msg += " ~" + (((bvhUiSeconds * frameRate) as integer) as string) + "f"
+		else
+			msg += " " + (animationRange as string)
 		if not upright do msg += " | 경고: T포즈 골격이 아님(_tpose 파일 권장) — 자세가 틀어질 수 있음"
 		msg
 	),
@@ -151,6 +159,15 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 	edittext etName "이름:" fieldWidth:200
 	checkbox cbConvert "kimodo 변환 (루트 제거·이름 매핑)" checked:true
 	spinner spSpacing "배치 간격 X:" range:[0, 2000, 120] type:#integer fieldWidth:60
+
+	group "클립 조정 (Mixamo식)"
+	(
+		spinner spSpeed "속도 %:" range:[25, 400, 100] type:#integer fieldWidth:50
+		spinner spTrimStart "시작 %:" range:[0, 99, 0] type:#integer fieldWidth:50 across:2
+		spinner spTrimEnd "끝 %:" range:[1, 100, 100] type:#integer fieldWidth:50
+		checkbox cbMirror "미러 (좌우 반전)"
+	)
+
 	button btImport "바이패드 생성 + 임포트" width:264 height:30
 	label lbStatus "" align:#left
 
@@ -199,11 +216,16 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 	on btImport pressed do
 	(
 		if lbClips.selection == 0 then lbStatus.text = "클립을 선택하세요"
+		else if spTrimStart.value >= spTrimEnd.value then lbStatus.text = "트림 범위가 잘못됨 (시작 < 끝)"
 		else
 		(
 			local src = etFolder.text + "\\" + lbClips.items[lbClips.selection] + ".bvh"
 			local xoff = BvhBipedUi.importCount * spSpacing.value
-			lbStatus.text = BvhBipedUi.importClip src etName.text cbConvert.checked xoff
+			lbStatus.text = BvhBipedUi.importClip src etName.text cbConvert.checked xoff \
+				speed:(spSpeed.value / 100.0) \
+				trimStart:(spTrimStart.value / 100.0) \
+				trimEnd:(spTrimEnd.value / 100.0) \
+				doMirror:cbMirror.checked
 			refreshBipeds()
 		)
 	)
@@ -227,5 +249,5 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 	else
 		BvhBipedUi.repoRoot = @"C:\work\Ai\3dsmax-mcp"
 	try ( destroyDialog roBvhBiped ) catch ()
-	createDialog roBvhBiped 300 480
+	createDialog roBvhBiped 300 610
 )

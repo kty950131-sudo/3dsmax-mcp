@@ -167,6 +167,31 @@ def test_offset_root_shifts_all_frames() -> None:
     assert bvh.frames[0][1] == pytest.approx(99.0)
 
 
+def test_retime_scales_frame_time() -> None:
+    out = prepare_for_biped(KIMODO_STYLE, speed=2.0)
+    bvh = parse_bvh(out)
+    assert bvh.frame_time == pytest.approx(0.03333333 / 2.0)
+    assert len(bvh.frames) == 2
+
+
+def test_retime_rejects_zero_speed() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        prepare_for_biped(KIMODO_STYLE, speed=0.0)
+
+
+def test_trim_slices_frames() -> None:
+    out = prepare_for_biped(KIMODO_STYLE, trim_range=(0.5, 1.0))
+    bvh = parse_bvh(out)
+    assert len(bvh.frames) == 1
+    # second source frame survives (root stripped: first value is Hips X 1.1)
+    assert bvh.frames[0][0] == pytest.approx(1.1)
+
+
+def test_trim_rejects_inverted_range() -> None:
+    with pytest.raises(ValueError, match="invalid trim"):
+        prepare_for_biped(KIMODO_STYLE, trim_range=(0.8, 0.2))
+
+
 def test_has_upright_spine() -> None:
     assert has_upright_spine(KIMODO_STYLE)  # Head offset is Y-major
     x_major = KIMODO_STYLE.replace(
