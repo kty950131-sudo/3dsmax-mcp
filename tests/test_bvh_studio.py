@@ -155,3 +155,49 @@ def test_below_range_clamp_when_points_not_at_zero() -> None:
     # _sample(points, 1.0): 1.0 >= 1.0? yes, return 1.0
     # result[-1] = 1.0 * 4 = 4.0
     assert out[-1] == pytest.approx(4.0)
+
+
+from src.ui.studio.library import Clip, cache_path, extract_tags, scan
+
+
+def test_extract_tags_splits_on_underscore() -> None:
+    assert extract_tags("artoke_spin-kick") == ("artoke", "spin-kick")
+
+
+def test_extract_tags_drops_numeric_suffix() -> None:
+    assert extract_tags("attack-combo_00") == ("attack-combo",)
+
+
+def test_extract_tags_single_token() -> None:
+    assert extract_tags("run2") == ("run2",)
+
+
+def test_scan_excludes_biped_conversions(tmp_path) -> None:
+    (tmp_path / "run2.bvh").write_text("x", encoding="utf-8")
+    (tmp_path / "run2_biped.bvh").write_text("x", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    clips = scan(str(tmp_path))
+    assert [c.stem for c in clips] == ["run2"]
+
+
+def test_scan_sorts_by_stem(tmp_path) -> None:
+    for name in ("zebra.bvh", "alpha.bvh"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    assert [c.stem for c in scan(str(tmp_path))] == ["alpha", "zebra"]
+
+
+def test_scan_missing_folder_returns_empty() -> None:
+    assert scan("Z:/definitely/not/here") == []
+
+
+def test_cache_path_is_outside_library(tmp_path) -> None:
+    clip = str(tmp_path / "run2.bvh")
+    out = cache_path(clip, str(tmp_path / "cache"))
+    assert out.endswith(".json")
+    assert "cache" in out
+
+
+def test_cache_path_differs_per_clip(tmp_path) -> None:
+    a = cache_path(str(tmp_path / "a.bvh"), "C:/cache")
+    b = cache_path(str(tmp_path / "b.bvh"), "C:/cache")
+    assert a != b
