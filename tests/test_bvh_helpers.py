@@ -9,6 +9,8 @@ from src.helpers.bvh import (
     rename_for_biped,
     serialize_bvh,
     strip_static_root,
+    unwrap_angles,
+    warp,
 )
 
 # kimodo-style: static wrapper root above a 6-channel Hips, extra eye joint.
@@ -198,3 +200,57 @@ def test_has_upright_spine() -> None:
         "OFFSET 0.0 20.0 0.0", "OFFSET 20.0 0.5 0.0"
     )
     assert not has_upright_spine(x_major)
+
+
+def test_unwrap_angles_crosses_180() -> None:
+    # 179 -> -179 는 -358 도 이동이 아니라 +2 도 이동이다
+    assert unwrap_angles([179.0, -179.0]) == pytest.approx([179.0, 181.0])
+
+
+def test_unwrap_angles_passes_through_smooth_run() -> None:
+    assert unwrap_angles([0.0, 10.0, 20.0]) == pytest.approx([0.0, 10.0, 20.0])
+
+
+def test_unwrap_angles_empty() -> None:
+    assert unwrap_angles([]) == []
+
+
+def test_warp_identity_returns_original_frames() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    out = warp(bvh, [0.0, 1.0])
+    assert out.frames == bvh.frames
+    assert out.frame_time == bvh.frame_time
+
+
+def test_warp_halves_frame_count() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    out = warp(bvh, [0.0])
+    assert len(out.frames) == 1
+    assert out.frames[0] == bvh.frames[0]
+
+
+def test_warp_interpolates_midpoint() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    out = warp(bvh, [0.0, 0.5, 1.0])
+    assert len(out.frames) == 3
+    # 6번 컬럼(Hips Xposition)은 1.0 -> 1.1 이므로 중간은 1.05
+    assert out.frames[1][6] == pytest.approx(1.05)
+
+
+def test_warp_rejects_decreasing_time_map() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    with pytest.raises(ValueError, match="non-decreasing"):
+        warp(bvh, [1.0, 0.0])
+
+
+def test_warp_rejects_empty_time_map() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    with pytest.raises(ValueError, match="empty"):
+        warp(bvh, [])
+
+
+def test_warp_clamps_out_of_range() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    out = warp(bvh, [-5.0, 99.0])
+    assert out.frames[0] == bvh.frames[0]
+    assert out.frames[1] == bvh.frames[-1]
