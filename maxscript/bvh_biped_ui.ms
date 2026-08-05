@@ -157,10 +157,15 @@ struct BvhBipedUiStruct
 	(
 		local c = bip.transform.controller
 		if classOf c != Vertical_Horizontal_Turn do return "ERROR: not a biped root: " + bip.name
+		if c.figureMode do return "ERROR: 피겨 모드를 먼저 해제하세요: " + bip.name
 		local dir = (defaultFolder()) + "\\clips"
 		makeDir dir all:true
 		local bipFile = dir + "\\" + bip.name + ".bip"
-		if not (biped.saveBipFile c bipFile) do return "ERROR: saveBipFile failed: " + bipFile
+		-- saveBipFile refuses while a biped mode (e.g. mixer) is active
+		if c.mixerMode do c.mixerMode = false
+		local saved = false
+		try ( saved = biped.saveBipFile c bipFile ) catch ()
+		if not saved do return "ERROR: saveBipFile failed: " + bipFile
 		c.mixerMode = true
 		local m = c.mixer
 		if m.numTrackgroups == 0 do appendTrackgroup m
