@@ -147,6 +147,32 @@ struct BvhBipedUiStruct
 			-- to the current one, so switching back to 0 would hide the offset
 		)
 		"OK: " + bip.name + " 팔 간격 " + (degrees as string) + "°"
+	),
+
+	-- Save the biped's current motion as a .bip clip and stage it in the
+	-- Motion Mixer, where speed/trim/loop/blending stay editable. Uses only
+	-- calls verified safe on Max 2026 — MXClip introspection (getClip)
+	-- hard-crashes, so clips are arranged in the Mixer window itself.
+	fn sendToMixer bip =
+	(
+		local c = bip.transform.controller
+		if classOf c != Vertical_Horizontal_Turn do return "ERROR: not a biped root: " + bip.name
+		local dir = (defaultFolder()) + "\\clips"
+		makeDir dir all:true
+		local bipFile = dir + "\\" + bip.name + ".bip"
+		if not (biped.saveBipFile c bipFile) do return "ERROR: saveBipFile failed: " + bipFile
+		c.mixerMode = true
+		local m = c.mixer
+		if m.numTrackgroups == 0 do appendTrackgroup m
+		local tr = getTrack (getTrackgroup m 1) 1
+		local ok = false
+		try ( ok = appendClip tr bipFile false 0f ) catch ()
+		if not ok do return "ERROR: appendClip failed: " + bipFile
+		theMixer.updateDisplay()
+		theMixer.showMixer()
+		local msg = "OK: " + bip.name + " → Mixer"
+		if tr.numClips > 1 do msg += " (클립 " + (tr.numClips as string) + "개 — 믹서 창에서 배치 조정)"
+		msg
 	)
 )
 
@@ -171,11 +197,12 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 	button btImport "바이패드 생성 + 임포트" width:264 height:30
 	label lbStatus "" align:#left
 
-	group "팔 간격 (Arm-Space)"
+	group "임포트 후 조절"
 	(
 		dropdownlist ddBiped "바이패드:"
-		spinner spArm "각도(°):" range:[0, 45, 10] type:#integer fieldWidth:50 across:2
+		spinner spArm "팔 간격(°):" range:[0, 45, 10] type:#integer fieldWidth:50 across:2
 		button btArm "적용" width:80 align:#right
+		button btMixer "Motion Mixer로 보내기" width:240
 	)
 
 	fn refreshClips =
@@ -239,6 +266,16 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 			else lbStatus.text = BvhBipedUi.applyArmSpace bip spArm.value
 		)
 	)
+	on btMixer pressed do
+	(
+		if ddBiped.selection == 0 then lbStatus.text = "바이패드를 선택하세요"
+		else
+		(
+			local bip = getNodeByName ddBiped.items[ddBiped.selection]
+			if bip == undefined then lbStatus.text = "ERROR: 바이패드를 찾을 수 없음"
+			else lbStatus.text = BvhBipedUi.sendToMixer bip
+		)
+	)
 )
 
 (
@@ -249,5 +286,5 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 	else
 		BvhBipedUi.repoRoot = @"C:\work\Ai\3dsmax-mcp"
 	try ( destroyDialog roBvhBiped ) catch ()
-	createDialog roBvhBiped 300 610
+	createDialog roBvhBiped 300 650
 )

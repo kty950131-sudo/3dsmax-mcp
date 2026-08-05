@@ -116,7 +116,8 @@ and `capture_tyflow_editor` for foreign flows.
 - Wrap the load in `setQuietMode true/false`; delete the biped root node on failure to avoid clutter.
 - Biped animation layers: a pose offset only holds across the clip with an explicit key (`animate on` + `biped.addNewKey <subctrl> 0`), and the biped only composites layers **up to the current layer** — switching `biped.setCurrentLayer` back to 0 hides upper-layer offsets (`setLayerActive` does not help).
 - The COM/root ignores generic `move` inside a layer and `biped.setTransform #pos … true` errors there; to place a mocap biped, bake the offset into the BVH root position channels before loading instead.
-- `maxscript/bvh_biped_ui.ms` is the artist-facing rollout for the BVH library workflow (import, placement spacing, Mixamo-style arm-space slider).
+- `maxscript/bvh_biped_ui.ms` is the artist-facing rollout for the BVH library workflow (import, placement spacing, Mixamo-style speed/trim/mirror, arm-space slider, send-to-Mixer).
+- Motion Mixer scripting (Max 2026): `appendClip <MXTrack> <file.bip> false 0f` is the working signature; `getTrackgroup <mixer> <i>` / `getTrack <tg> <i>` / `deleteTrackgroup <mixer> <i>` / `appendTrackgroup <mixer>` work. **`getClip` hard-crashes Max (ACCESS_VIOLATION)** — never introspect MXClip from script; arrange clips in the Mixer window instead. Argument-count errors from these generics mislabel the function name (e.g. appendClip errors mention getTrack). Enable `<biped_ctrl>.mixerMode = true` for mixer playback; `theMixer.showMixer()` opens the window.
 
 ### Procedural graph systems
 
