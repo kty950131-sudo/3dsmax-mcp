@@ -114,6 +114,9 @@ and `capture_tyflow_editor` for foreign flows.
 - `biped.loadMocapFile` returns **false silently** (no dialog, no error) when it dislikes a file. Empirically on Max 2026 it rejects: a static dummy root above the hips (`ROOT Root` → `JOINT Hips`), joint names outside Character Studio's fixed vocabulary (`Spine`/`Spine1` are unknown — extra spine links must be `Chest`/`Chest2`/`Chest3`, necks `Neck`/`Neck1`, limbs `LeftCollar`/`LeftUpArm`/`LeftLowArm`/`LeftUpLeg`/`LeftLowLeg`/`LeftToe`), and it cannot map eyes/jaw/SMPL-X finger chains.
 - A BVH whose rest skeleton is not Y-up (bones laid along +X) loads but converts to mangled poses — always use the `*_tpose` export variant.
 - Wrap the load in `setQuietMode true/false`; delete the biped root node on failure to avoid clutter.
+- Biped animation layers: a pose offset only holds across the clip with an explicit key (`animate on` + `biped.addNewKey <subctrl> 0`), and the biped only composites layers **up to the current layer** — switching `biped.setCurrentLayer` back to 0 hides upper-layer offsets (`setLayerActive` does not help).
+- The COM/root ignores generic `move` inside a layer and `biped.setTransform #pos … true` errors there; to place a mocap biped, bake the offset into the BVH root position channels before loading instead.
+- `maxscript/bvh_biped_ui.ms` is the artist-facing rollout for the BVH library workflow (import, placement spacing, Mixamo-style arm-space slider).
 
 ### Procedural graph systems
 

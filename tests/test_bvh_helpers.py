@@ -157,6 +157,16 @@ def test_rename_for_biped_rewrites_tree() -> None:
     assert len(bvh.frames[0]) == 15
 
 
+def test_offset_root_shifts_all_frames() -> None:
+    out = prepare_for_biped(KIMODO_STYLE, offset=(240.0, 0.0, 0.0))
+    bvh = parse_bvh(out)
+    # root Xposition is channel 0; original values 1.0 / 1.1
+    assert bvh.frames[0][0] == pytest.approx(241.0)
+    assert bvh.frames[1][0] == pytest.approx(241.1)
+    # Y/Z untouched
+    assert bvh.frames[0][1] == pytest.approx(99.0)
+
+
 def test_has_upright_spine() -> None:
     assert has_upright_spine(KIMODO_STYLE)  # Head offset is Y-major
     x_major = KIMODO_STYLE.replace(

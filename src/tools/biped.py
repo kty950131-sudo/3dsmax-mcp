@@ -2,20 +2,14 @@
 
 from pathlib import Path
 
-from src.helpers.bvh import has_upright_spine, prepare_for_biped
+from src.helpers.bvh import (
+    DEFAULT_BIPED_PRUNE,
+    has_upright_spine,
+    prepare_for_biped,
+)
 from src.helpers.maxscript import safe_string
 
 from ..server import mcp, client
-
-# Joints Character Studio has no slot for; SMPL-X style exports carry them.
-_DEFAULT_PRUNE = (
-    "Jaw", "LeftEye", "RightEye", "HeadEnd",
-    "LeftHandThumb1", "LeftHandIndex1", "LeftHandMiddle1",
-    "LeftHandRing1", "LeftHandPinky1",
-    "RightHandThumb1", "RightHandIndex1", "RightHandMiddle1",
-    "RightHandRing1", "RightHandPinky1",
-    "LeftToeEnd", "RightToeEnd",
-)
 
 
 @mcp.tool()
@@ -50,7 +44,7 @@ def import_bvh_to_biped(
     if convert:
         text = src.read_text(encoding="utf-8")
         try:
-            converted = prepare_for_biped(text, prune=_DEFAULT_PRUNE)
+            converted = prepare_for_biped(text, prune=DEFAULT_BIPED_PRUNE)
             if not has_upright_spine(text):
                 warning = (
                     " | WARNING: rest skeleton is not Y-up; poses will be "

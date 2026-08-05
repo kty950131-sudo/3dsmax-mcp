@@ -25,6 +25,16 @@ from typing import Optional
 
 _STATIC_EPS = 1e-4
 
+# Joints Character Studio has no slot for; SMPL-X style exports carry them.
+DEFAULT_BIPED_PRUNE = (
+    "Jaw", "LeftEye", "RightEye", "HeadEnd",
+    "LeftHandThumb1", "LeftHandIndex1", "LeftHandMiddle1",
+    "LeftHandRing1", "LeftHandPinky1",
+    "RightHandThumb1", "RightHandIndex1", "RightHandMiddle1",
+    "RightHandRing1", "RightHandPinky1",
+    "LeftToeEnd", "RightToeEnd",
+)
+
 
 @dataclass
 class BvhJoint:
@@ -340,10 +350,37 @@ def has_upright_spine(text: str) -> bool:
     return abs(spine.offset[1]) >= abs(spine.offset[0])
 
 
-def prepare_for_biped(text: str, prune: tuple[str, ...] = ()) -> str:
+def offset_root(bvh: BvhFile, offset: tuple[float, float, float]) -> BvhFile:
+    """Add a constant world offset to the root's position channels (all frames)."""
+    if offset == (0.0, 0.0, 0.0):
+        return bvh
+    axis_col = {}
+    for i, ch in enumerate(bvh.root.channels):
+        low = ch.lower()
+        if low == "xposition":
+            axis_col[0] = i
+        elif low == "yposition":
+            axis_col[1] = i
+        elif low == "zposition":
+            axis_col[2] = i
+    new_frames = []
+    for row in bvh.frames:
+        new_row = list(row)
+        for axis, col in axis_col.items():
+            new_row[col] += offset[axis]
+        new_frames.append(new_row)
+    return BvhFile(root=bvh.root, frame_time=bvh.frame_time, frames=new_frames)
+
+
+def prepare_for_biped(
+    text: str,
+    prune: tuple[str, ...] = (),
+    offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> str:
     """Rewrite BVH text so 3ds Max biped.loadMocapFile accepts it."""
     bvh = parse_bvh(text)
     bvh = strip_static_root(bvh)
     bvh = prune_joints(bvh, prune)
     bvh = rename_for_biped(bvh)
+    bvh = offset_root(bvh, offset)
     return serialize_bvh(bvh)
