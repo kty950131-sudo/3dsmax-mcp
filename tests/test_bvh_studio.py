@@ -216,3 +216,122 @@ def test_compat_raises_clear_error_without_pyside() -> None:
                 importlib.import_module("src.ui.studio.compat")
             return
     pytest.skip("PySide 가 있는 환경 — Max 내부에서 확인한다")
+
+
+# Tests for _pick_max_window helper
+class FakeWidget:
+    """Duck-type widget for testing widget selection."""
+
+    def __init__(
+        self,
+        class_name: str | None = None,
+        parent_obj: "FakeWidget | None" = None,
+        is_window_val: bool = True,
+        inherits_qmainwindow: bool = False,
+        raise_on_meta: bool = False,
+    ) -> None:
+        self.class_name = class_name
+        self.parent_obj = parent_obj
+        self.is_window_val = is_window_val
+        self.inherits_qmainwindow = inherits_qmainwindow
+        self.raise_on_meta = raise_on_meta
+
+    def parent(self) -> "FakeWidget | None":
+        return self.parent_obj
+
+    def metaObject(self) -> "FakeMetaObject":
+        if self.raise_on_meta:
+            raise RuntimeError("Deleted C++ object")
+        return FakeMetaObject(self.class_name)
+
+    def isWindow(self) -> bool:
+        return self.is_window_val
+
+    def inherits(self, class_name: str) -> bool:
+        if class_name == "QMainWindow":
+            return self.inherits_qmainwindow
+        return False
+
+
+class FakeMetaObject:
+    """Duck-type metaObject for testing."""
+
+    def __init__(self, class_name: str | None) -> None:
+        self.class_name = class_name
+
+    def className(self) -> str:
+        if self.class_name is None:
+            raise RuntimeError("Null metaObject")
+        return self.class_name
+
+
+def test_pick_max_window_finds_qmax_application_window() -> None:
+    from src.ui.studio.winpick import _pick_max_window
+
+    widgets = [
+        FakeWidget(class_name="QmaxApplicationWindow"),
+    ]
+    result = _pick_max_window(widgets)
+    assert result is widgets[0]
+
+
+def test_pick_max_window_finds_plain_qmainwindow_when_qmax_absent() -> None:
+    from src.ui.studio.winpick import _pick_max_window
+
+    widgets = [
+        FakeWidget(class_name="SomeOtherWindow"),
+        FakeWidget(class_name="QMainWindow", inherits_qmainwindow=True),
+    ]
+    result = _pick_max_window(widgets)
+    assert result is widgets[1]
+
+
+def test_pick_max_window_returns_none_when_neither_present() -> None:
+    from src.ui.studio.winpick import _pick_max_window
+
+    widgets = [
+        FakeWidget(class_name="SomeDialog"),
+        FakeWidget(class_name="AnotherDialog"),
+    ]
+    result = _pick_max_window(widgets)
+    assert result is None
+
+
+def test_pick_max_window_skips_widget_with_parent() -> None:
+    from src.ui.studio.winpick import _pick_max_window
+
+    parent = FakeWidget(class_name="Parent")
+    widgets = [
+        FakeWidget(class_name="QmaxApplicationWindow", parent_obj=parent),
+        FakeWidget(class_name="QMainWindow", inherits_qmainwindow=True),
+    ]
+    result = _pick_max_window(widgets)
+    assert result is widgets[1]
+
+
+def test_pick_max_window_handles_deleted_c_object() -> None:
+    from src.ui.studio.winpick import _pick_max_window
+
+    widgets = [
+        FakeWidget(raise_on_meta=True),  # Will raise on metaObject()
+        FakeWidget(class_name="QMainWindow", inherits_qmainwindow=True),
+    ]
+    result = _pick_max_window(widgets)
+    assert result is widgets[1]
+
+
+def test_pick_max_window_prefers_qmax_over_qmainwindow() -> None:
+    from src.ui.studio.winpick import _pick_max_window
+
+    qmax_window = FakeWidget(class_name="QmaxApplicationWindow")
+    qmain_window = FakeWidget(class_name="QMainWindow", inherits_qmainwindow=True)
+    widgets = [qmax_window, qmain_window]
+    result = _pick_max_window(widgets)
+    assert result is qmax_window
+
+
+def test_pick_max_window_empty_list_returns_none() -> None:
+    from src.ui.studio.winpick import _pick_max_window
+
+    result = _pick_max_window([])
+    assert result is None

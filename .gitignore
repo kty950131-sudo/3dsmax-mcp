@@ -40,3 +40,5 @@ bundle/Contents/scripts/
 dev.bat
 native/dev.bat
 native/deploy.bat
+.omc/
+.superpowers/
