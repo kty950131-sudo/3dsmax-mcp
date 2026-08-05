@@ -271,11 +271,14 @@ def test_warp_clamps_out_of_range() -> None:
     assert out.frames[1] == bvh.frames[-1]
 
 
-def test_unwrap_angles_multi_wrap_repeated_direction() -> None:
-    # Verify accumulated offset over multiple wraps in the same direction.
-    # [10, -180, 10, -180] wraps twice, accumulating offset each time.
-    assert unwrap_angles([10.0, -180.0, 10.0, -180.0]) == pytest.approx(
-        [10.0, 180.0, 10.0, 180.0]
+def test_unwrap_angles_multi_wrap_same_direction() -> None:
+    # Verify accumulated offset exceeds 360° with repeated wraps in same direction.
+    # Raw deltas: +170 (no wrap), -190 (wrap, offset +=360), +170 (no wrap),
+    # -190 (wrap, offset +=360). Accumulated offset reaches 720 by the end.
+    # Input: [0, 170, -20, 150, -40]
+    # Expected: [0, 170, 340, 510, 680] (each value offset by accumulated 360k)
+    assert unwrap_angles([0.0, 170.0, -20.0, 150.0, -40.0]) == pytest.approx(
+        [0.0, 170.0, 340.0, 510.0, 680.0]
     )
 
 
