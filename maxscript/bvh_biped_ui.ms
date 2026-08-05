@@ -11,6 +11,7 @@
 
 global BvhBipedUi
 global bvhUiOut, bvhUiUpright, bvhUiErr, bvhUiSeconds
+global bvhUiSyncOut, bvhUiSyncErr
 
 struct BvhBipedUiStruct
 (
@@ -75,6 +76,31 @@ struct BvhBipedUiStruct
 		py += "    rt.bvhUiErr = str(exc)\n"
 		python.Execute py
 		if bvhUiErr != "" then undefined else bvhUiOut
+	),
+
+	-- Pull new/changed .bvh clips from the artoke GitHub repo into folder
+	-- (src/helpers/github_sync.py via gh CLI). Returns a status string.
+	fn syncFromGithub folder =
+	(
+		bvhUiSyncOut = ""
+		bvhUiSyncErr = ""
+		local repo = substituteString repoRoot "\\" "/"
+		local dst = substituteString folder "\\" "/"
+		local py = "import sys\n"
+		py += "from pymxs import runtime as rt\n"
+		py += "sys.path.insert(0, r'" + repo + "')\n"
+		py += "try:\n"
+		py += "    import importlib\n"
+		py += "    import src.helpers.github_sync as _gs\n"
+		py += "    importlib.reload(_gs)\n"
+		py += "    res = _gs.sync_motions(r'" + dst + "')\n"
+		py += "    rt.bvhUiSyncOut = ', '.join(res['downloaded'])\n"
+		py += "except Exception as exc:\n"
+		py += "    rt.bvhUiSyncErr = str(exc)\n"
+		python.Execute py
+		if bvhUiSyncErr != "" then "ERROR: " + bvhUiSyncErr
+		else if bvhUiSyncOut == "" then "최신 상태 — 새 모션 없음"
+		else "다운로드: " + bvhUiSyncOut
 	),
 
 	-- Scene bipeds = nodes whose transform controller is the biped COM.
@@ -185,7 +211,8 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 (
 	edittext etFolder "폴더:" fieldWidth:220 across:2
 	button btBrowse "..." width:24 align:#right
-	button btRefresh "새로고침" width:264
+	button btRefresh "새로고침" width:130 across:2
+	button btSync "GitHub에서 가져오기" width:130 align:#right
 	listbox lbClips "클립:" height:14
 	edittext etName "이름:" fieldWidth:200
 	checkbox cbConvert "kimodo 변환 (루트 제거·이름 매핑)" checked:true
@@ -240,6 +267,12 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 	(
 		refreshClips()
 		refreshBipeds()
+	)
+	on btSync pressed do
+	(
+		lbStatus.text = "GitHub 동기화 중..."
+		lbStatus.text = BvhBipedUi.syncFromGithub etFolder.text
+		refreshClips()
 	)
 	on lbClips selected idx do
 	(
