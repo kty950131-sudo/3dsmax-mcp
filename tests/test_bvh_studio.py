@@ -201,3 +201,18 @@ def test_cache_path_differs_per_clip(tmp_path) -> None:
     a = cache_path(str(tmp_path / "a.bvh"), "C:/cache")
     b = cache_path(str(tmp_path / "b.bvh"), "C:/cache")
     assert a != b
+
+
+def test_compat_raises_clear_error_without_pyside() -> None:
+    import importlib
+
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            with pytest.raises(ImportError, match="3ds Max"):
+                importlib.import_module("src.ui.studio.compat")
+            return
+    pytest.skip("PySide 가 있는 환경 — Max 내부에서 확인한다")
