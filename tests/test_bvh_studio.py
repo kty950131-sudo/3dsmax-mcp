@@ -1,7 +1,12 @@
+import json
+import os
+
 import pytest
 
 from src.helpers.bvh import parse_bvh
+from src.ui.studio.library import cache_path
 from src.ui.studio.skeleton import bones, fk, project
+from src.ui.studio.thumb import build_pose_data, load_pose_data, sample_indices
 from src.ui.studio.timemap import build_time_map
 
 TWO_JOINT = """HIERARCHY
@@ -75,6 +80,74 @@ def test_fk_composes_rotation_channels_in_declaration_order() -> None:
 def test_bones_lists_parent_child_pairs() -> None:
     bvh = parse_bvh(TWO_JOINT)
     assert bones(bvh.root) == [("Hips", "Head")]
+
+
+# Hips branches into two independent arms, each with its own child joint and
+# its own 3 rotation channels. Only LeftArm carries a rotation, so a broken
+# traversal that misaligns sibling subtrees with the motion-row column order
+# (Task 4 review finding: fk() was never tested against branching data) would
+# make LeftHand miss its rotation, or make either hand read the wrong
+# sibling's channels entirely.
+BRANCHING = """HIERARCHY
+ROOT Hips
+{
+  OFFSET 0.0 0.0 0.0
+  CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+  JOINT LeftArm
+  {
+    OFFSET -5.0 0.0 0.0
+    CHANNELS 3 Zrotation Yrotation Xrotation
+    JOINT LeftHand
+    {
+      OFFSET -3.0 0.0 0.0
+      CHANNELS 3 Zrotation Yrotation Xrotation
+      End Site
+      {
+        OFFSET -1.0 0.0 0.0
+      }
+    }
+  }
+  JOINT RightArm
+  {
+    OFFSET 5.0 0.0 0.0
+    CHANNELS 3 Zrotation Yrotation Xrotation
+    JOINT RightHand
+    {
+      OFFSET 3.0 0.0 0.0
+      CHANNELS 3 Zrotation Yrotation Xrotation
+      End Site
+      {
+        OFFSET 1.0 0.0 0.0
+      }
+    }
+  }
+}
+MOTION
+Frames: 1
+Frame Time: 0.033333
+0.0 0.0 0.0 0.0 0.0 0.0 90.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+"""
+
+
+def test_fk_handles_branching_hierarchy() -> None:
+    # Column order (pre-order, children in list order):
+    #   Hips[0:6] LeftArm[6:9] LeftHand[9:12] RightArm[12:15] RightHand[15:18]
+    # Hand-derived by walking fk()'s own algorithm:
+    #   Hips: identity rotation, zero translation -> (0, 0, 0)
+    #   LeftArm: offset (-5,0,0) under Hips's identity rotation -> (-5, 0, 0)
+    #     (a joint's own rotation channels affect its CHILDREN, not itself)
+    #   LeftHand: offset (-3,0,0) rotated 90deg about Z (LeftArm's channel):
+    #     Rz(90) . (-3,0,0) = (0*-3 + -1*0, 1*-3 + 0*0, 0) = (0, -3, 0)
+    #     plus LeftArm's world pos (-5,0,0) -> (-5, -3, 0)
+    #   RightArm: offset (5,0,0), no rotation anywhere above it -> (5, 0, 0)
+    #   RightHand: offset (3,0,0), unrotated -> (5,0,0)+(3,0,0) = (8, 0, 0)
+    bvh = parse_bvh(BRANCHING)
+    pos = fk(bvh, 0)
+    assert pos["Hips"] == pytest.approx((0.0, 0.0, 0.0))
+    assert pos["LeftArm"] == pytest.approx((-5.0, 0.0, 0.0))
+    assert pos["LeftHand"] == pytest.approx((-5.0, -3.0, 0.0))
+    assert pos["RightArm"] == pytest.approx((5.0, 0.0, 0.0))
+    assert pos["RightHand"] == pytest.approx((8.0, 0.0, 0.0))
 
 
 def test_project_front_view_keeps_x_and_y() -> None:
@@ -335,3 +408,99 @@ def test_pick_max_window_empty_list_returns_none() -> None:
 
     result = _pick_max_window([])
     assert result is None
+
+
+def test_sample_indices_spreads_evenly() -> None:
+    assert sample_indices(12, 12) == list(range(12))
+
+
+def test_sample_indices_downsamples() -> None:
+    out = sample_indices(100, 12)
+    assert len(out) == 12
+    assert out[0] == 0
+    assert out[-1] == 99
+    assert all(b > a for a, b in zip(out, out[1:]))
+
+
+def test_sample_indices_short_clip() -> None:
+    assert sample_indices(3, 12) == [0, 1, 2]
+
+
+def test_sample_indices_single_frame() -> None:
+    assert sample_indices(1, 12) == [0]
+
+
+def test_sample_indices_rejects_non_positive_total() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        sample_indices(0, 12)
+
+
+def test_build_pose_data_returns_expected_shape(tmp_path) -> None:
+    clip = tmp_path / "two_joint.bvh"
+    clip.write_text(TWO_JOINT, encoding="utf-8")
+    data = build_pose_data(str(clip))
+    assert data["frames"] == 2
+    assert data["frame_time"] == pytest.approx(0.033333)
+    assert list(data["bones"]) == [("Hips", "Head")]
+    assert len(data["poses"]) == 2  # sample_indices(2, 12) == [0, 1]
+    assert data["poses"][0]["Hips"] == pytest.approx([0.0, 0.0, 0.0])
+    assert data["poses"][1]["Hips"] == pytest.approx([0.0, 100.0, 0.0])
+    assert len(data["bounds"]) == 4
+
+
+def test_build_pose_data_survives_json_roundtrip(tmp_path) -> None:
+    # The cache stores this dict via json.dump / json.load. Tuples (bones
+    # pairs) become lists on the way back out, so nothing downstream may
+    # depend on tuple identity or a tuple/list type distinction.
+    clip = tmp_path / "two_joint.bvh"
+    clip.write_text(TWO_JOINT, encoding="utf-8")
+    data = build_pose_data(str(clip))
+    reloaded = json.loads(json.dumps(data))
+    assert reloaded["bones"] == [list(pair) for pair in data["bones"]]
+    assert reloaded["poses"] == data["poses"]
+    assert reloaded["bounds"] == data["bounds"]
+    assert reloaded["frames"] == data["frames"]
+
+
+def test_load_pose_data_writes_cache_file(tmp_path) -> None:
+    clip = tmp_path / "two_joint.bvh"
+    clip.write_text(TWO_JOINT, encoding="utf-8")
+    cache_dir = tmp_path / "cache"
+    data = load_pose_data(str(clip), str(cache_dir))
+    assert os.path.exists(cache_path(str(clip), str(cache_dir)))
+    assert data["frames"] == 2
+
+
+def test_load_pose_data_reuses_cache_when_clip_unchanged(tmp_path) -> None:
+    clip = tmp_path / "two_joint.bvh"
+    clip.write_text(TWO_JOINT, encoding="utf-8")
+    cache_dir = tmp_path / "cache"
+    load_pose_data(str(clip), str(cache_dir))
+    stored = cache_path(str(clip), str(cache_dir))
+    # Tamper with the cache file directly. If the second call reuses the
+    # cache verbatim (rather than recomputing), this sentinel comes back.
+    with open(stored, encoding="utf-8") as handle:
+        cached = json.load(handle)
+    cached["frames"] = 999
+    with open(stored, "w", encoding="utf-8") as handle:
+        json.dump(cached, handle)
+    data = load_pose_data(str(clip), str(cache_dir))
+    assert data["frames"] == 999
+
+
+def test_load_pose_data_recomputes_when_clip_mtime_changes(tmp_path) -> None:
+    clip = tmp_path / "two_joint.bvh"
+    clip.write_text(TWO_JOINT, encoding="utf-8")
+    cache_dir = tmp_path / "cache"
+    load_pose_data(str(clip), str(cache_dir))
+    stored = cache_path(str(clip), str(cache_dir))
+    with open(stored, encoding="utf-8") as handle:
+        cached = json.load(handle)
+    cached["frames"] = 999
+    with open(stored, "w", encoding="utf-8") as handle:
+        json.dump(cached, handle)
+    # Bump the clip's mtime so the stale cache is rejected.
+    future = os.path.getmtime(str(clip)) + 5
+    os.utime(str(clip), (future, future))
+    data = load_pose_data(str(clip), str(cache_dir))
+    assert data["frames"] == 2
