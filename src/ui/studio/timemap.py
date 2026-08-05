@@ -22,6 +22,8 @@ def build_time_map(
     for (ax, ay), (bx, by) in zip(points, points[1:]):
         if bx < ax or by < ay:
             raise ValueError(f"control points must be non-decreasing: {(ax, ay)} -> {(bx, by)}")
+    if points[-1][0] <= points[0][0]:
+        raise ValueError(f"curve must advance in output time: first x={points[0][0]}, last x={points[-1][0]}")
 
     last_frame = float(src_frames - 1)
     out_frames = max(1, int(round(points[-1][0] * last_frame)) + 1)
@@ -44,4 +46,6 @@ def _sample(points: Sequence[tuple[float, float]], x: float) -> float:
             if bx == ax:
                 return by
             return ay + (by - ay) * (x - ax) / (bx - ax)
+    # Unreachable: for any x in (points[0][0], points[-1][0]), one of the loop conditions
+    # must match due to monotone non-decreasing points. This line is a safety fallback only.
     return points[-1][1]

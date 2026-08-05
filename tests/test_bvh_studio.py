@@ -36,3 +36,38 @@ def test_rejects_fewer_than_two_points() -> None:
 def test_rejects_empty_source() -> None:
     with pytest.raises(ValueError, match="src_frames"):
         build_time_map([(0.0, 0.0), (1.0, 1.0)], 0)
+
+
+def test_rejects_degenerate_curve_no_horizontal_span() -> None:
+    # FINDING 1: Curve with no horizontal span produces frozen clip
+    # All points share the same x, so _sample always returns points[0][1]
+    with pytest.raises(ValueError, match="advance in output time"):
+        build_time_map([(0.5, 0.0), (0.5, 1.0)], 5)
+
+
+def test_single_frame_source() -> None:
+    # FINDING 2: src_frames == 1 produces [0.0]
+    # When last_frame == 0, out_ratio is clamped to 0.0, and result * 0 = 0.0
+    out = build_time_map([(0.0, 0.0), (1.0, 1.0)], 1)
+    assert len(out) == 1
+    assert out[0] == pytest.approx(0.0)
+
+
+def test_rejects_x_going_backwards() -> None:
+    # MINOR A: Validate bx < ax (x-axis decreasing)
+    with pytest.raises(ValueError, match="non-decreasing"):
+        build_time_map([(0.0, 0.0), (1.0, 0.5), (0.5, 1.0)], 5)
+
+
+def test_below_range_clamp_when_points_not_at_zero() -> None:
+    # MINOR B: Control points don't start at x=0
+    # When _sample is called with x < points[0][0], it returns points[0][1]
+    out = build_time_map([(0.5, 0.25), (1.0, 1.0)], 5)
+    # For first frame (i=0), out_ratio = 0/4 = 0.0
+    # _sample(points, 0.0): 0.0 <= 0.5? yes, return 0.25
+    # result[0] = 0.25 * 4 = 1.0
+    assert out[0] == pytest.approx(1.0)
+    # For last frame, out_ratio = 4/4 = 1.0
+    # _sample(points, 1.0): 1.0 >= 1.0? yes, return 1.0
+    # result[-1] = 1.0 * 4 = 4.0
+    assert out[-1] == pytest.approx(4.0)
