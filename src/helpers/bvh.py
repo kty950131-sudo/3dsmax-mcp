@@ -475,13 +475,21 @@ def prepare_for_biped(
     offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
     speed: float = 1.0,
     trim_range: tuple[float, float] = (0.0, 1.0),
+    time_map: Optional[Sequence[float]] = None,
 ) -> str:
-    """Rewrite BVH text so 3ds Max biped.loadMocapFile accepts it."""
+    """Rewrite BVH text so 3ds Max biped.loadMocapFile accepts it.
+
+    ``time_map`` 을 주면 균일 ``speed`` 대신 비균일 타임워프를 적용한다.
+    인덱스는 트림된 뒤 클립 기준이다. 주지 않으면 기존 경로 그대로다.
+    """
     bvh = parse_bvh(text)
     bvh = strip_static_root(bvh)
     bvh = prune_joints(bvh, prune)
     bvh = rename_for_biped(bvh)
     bvh = offset_root(bvh, offset)
     bvh = trim(bvh, trim_range[0], trim_range[1])
-    bvh = retime(bvh, speed)
+    if time_map is None:
+        bvh = retime(bvh, speed)
+    else:
+        bvh = warp(bvh, time_map)
     return serialize_bvh(bvh)

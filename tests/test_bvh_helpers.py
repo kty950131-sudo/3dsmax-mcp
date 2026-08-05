@@ -292,3 +292,23 @@ def test_warp_interpolates_rotation_crossing_180() -> None:
     # Column 2 is Zrotation; at t=0.5 it should interpolate the unwrapped
     # value (179 + 181) / 2 = 180, NOT the raw (179 + (-179)) / 2 = 0.
     assert out.frames[1][2] == pytest.approx(180.0)
+
+
+def test_prepare_without_time_map_is_unchanged() -> None:
+    # 회귀 방어: 기존 호출자(bvh_biped_ui.ms)의 출력이 바뀌면 안 된다
+    baseline = prepare_for_biped(KIMODO_STYLE, prune=("LeftEye",), speed=2.0)
+    with_none = prepare_for_biped(
+        KIMODO_STYLE, prune=("LeftEye",), speed=2.0, time_map=None
+    )
+    assert with_none == baseline
+
+
+def test_prepare_with_time_map_resamples() -> None:
+    out = prepare_for_biped(KIMODO_STYLE, time_map=[0.0, 0.5, 1.0])
+    assert "Frames: 3" in out
+
+
+def test_prepare_time_map_ignores_speed() -> None:
+    # time_map 이 있으면 speed 는 적용되지 않는다 (frame_time 유지)
+    out = prepare_for_biped(KIMODO_STYLE, speed=4.0, time_map=[0.0, 1.0])
+    assert "Frame Time: 0.033333" in out
