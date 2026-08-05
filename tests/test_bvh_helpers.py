@@ -47,6 +47,21 @@ Frame Time: 0.03333333
 0.0 0.0 0.0 0.0 -0.0 0.0 1.1 99.1 2.1 89.1 -4.8 90.3 1.1 2.1 3.1 0.6 0.6 0.6 0.2 0.3 0.4
 """
 
+# Fixture for rotation channel crossing: Zrotation goes 179 -> -179 between frames.
+# Used to test unwrap + interpolation integration in warp().
+ROTATION_CROSSING = """HIERARCHY
+ROOT Hips
+{
+  OFFSET 0.0 0.0 0.0
+  CHANNELS 3 Xposition Yposition Zrotation
+}
+MOTION
+Frames: 2
+Frame Time: 0.03333333
+0.0 0.0 179.0
+0.0 0.0 -179.0
+"""
+
 
 def test_parse_kimodo_style() -> None:
     bvh = parse_bvh(KIMODO_STYLE)
@@ -254,3 +269,23 @@ def test_warp_clamps_out_of_range() -> None:
     out = warp(bvh, [-5.0, 99.0])
     assert out.frames[0] == bvh.frames[0]
     assert out.frames[1] == bvh.frames[-1]
+
+
+def test_unwrap_angles_multi_wrap_repeated_direction() -> None:
+    # Verify accumulated offset over multiple wraps in the same direction.
+    # [10, -180, 10, -180] wraps twice, accumulating offset each time.
+    assert unwrap_angles([10.0, -180.0, 10.0, -180.0]) == pytest.approx(
+        [10.0, 180.0, 10.0, 180.0]
+    )
+
+
+def test_warp_interpolates_rotation_crossing_180() -> None:
+    # Rotation channel crossing ±180° must unwrap before interpolation.
+    # Zrotation goes 179 -> -179 (short path is +2°, not -358°).
+    # Midpoint of unwrapped [179, 181] at t=0.5 is 180° (continuous).
+    bvh = parse_bvh(ROTATION_CROSSING)
+    out = warp(bvh, [0.0, 0.5, 1.0])
+    assert len(out.frames) == 3
+    # Column 2 is Zrotation; at t=0.5 it should interpolate the unwrapped
+    # value (179 + 181) / 2 = 180, NOT the raw (179 + (-179)) / 2 = 0.
+    assert out.frames[1][2] == pytest.approx(180.0)
