@@ -1309,9 +1309,22 @@ UI 를 다 만들기 전에 "Max 안에서 웹뷰가 뜨고 JS↔파이썬이 �
    읽어 `QWebEngineScript` 로 주입하는 방식은 **동작한다**
    (`qwebchannel_present: true`).
 
-**남은 검증** — 3번 수정 이후의 `bridge.ping` 왕복은 아직 확인 못 했다. 4번 크래시로
-Max 가 재시작됐고 MCP 브리지가 꺼졌다. **새 Max 세션에서 게이트를 한 번만 돌려
-`verdict: PASS` 를 확인해야 이 태스크가 끝난다.**
+#### 게이트 통과 (2026-08-06)
+
+새 Max 2026 세션에서 게이트를 한 번 돌려 **`verdict: PASS`** 를 받았다.
+
+```
+load_finished_ok : true
+image            : distinct_colors 21, dominant_share 0.882, looks_blank false
+page             : page_ran / qwebchannel_present / channel_connected
+                   / ping_ok / canvas_drawn = 전부 true, qt_version "6.5.3"
+```
+
+`qt_version` 이 채워졌다는 것은 **파이썬 슬롯의 반환값이 JS 까지 실제로 돌아왔다**는
+뜻이다 — 3번 소유권 수정이 효과가 있었음을 확인한다. 캡처(`.smoke/view.png`)에서
+한글 렌더와 canvas 드로잉도 정상이다. Max 는 살아남았다.
+
+**결론: 웹 UI 경로로 진행해도 된다.** Task 10 을 시작할 수 있다.
 
 **Files:**
 - Create: `src/ui/studio/bridge.py`
