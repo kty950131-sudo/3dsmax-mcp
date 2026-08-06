@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>BVH Studio — smoke</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1e1e20; color: #e4e4e8;
+               font: 14px/1.6 "Segoe UI", system-ui, sans-serif; }
+  main { padding: 24px; display: flex; gap: 24px; align-items: flex-start; }
+  h1 { font-size: 16px; margin: 0 0 12px; color: #f08c3c; }
+  pre { background: #26262a; border: 1px solid #37373d; border-radius: 6px;
+        padding: 12px; margin: 0; min-width: 420px; white-space: pre-wrap; }
+  canvas { border: 1px solid #37373d; border-radius: 6px; background: #232326; }
+  .ok { color: #7fc98a; } .bad { color: #e2765e; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>QWebEngineView 스모크</h1>
+    <pre id="out">시작…</pre>
+  </div>
+  <div>
+    <h1>canvas 렌더 확인</h1>
+    <canvas id="c" width="240" height="240"></canvas>
+  </div>
+</main>
+
+<script>
+/* 결과는 window.__smokeResult 에 JSON 문자열로 남긴다.
+   파이썬(smoke.py)이 runJavaScript 로 읽어 보고서에 넣는다. */
+const out = document.getElementById("out");
+const result = {
+  page_ran: true,
+  qwebchannel_present: typeof QWebChannel !== "undefined",
+  channel_connected: false,
+  ping_ok: false,
+  ping_error: null,
+  canvas_drawn: false,
+  qt_version: null,
+};
+
+function show(extra) {
+  const lines = [
+    `페이지 실행        : ${result.page_ran ? "OK" : "실패"}`,
+    `qwebchannel.js     : ${result.qwebchannel_present ? "OK (주입됨)" : "없음"}`,
+    `채널 연결          : ${result.channel_connected ? "OK" : "아직"}`,
+    `bridge.ping 왕복   : ${result.ping_ok ? "OK" : (result.ping_error || "아직")}`,
+    `Qt 버전            : ${result.qt_version || "-"}`,
+    `canvas 그리기      : ${result.canvas_drawn ? "OK" : "실패"}`,
+  ];
+  out.textContent = lines.join("\n") + (extra ? "\n\n" + extra : "");
+  window.__smokeResult = JSON.stringify(result);
+}
+
+/* canvas 는 GPU 렌더 경로가 사는지 보는 용도다. 흰 화면이면 여기도 안 나온다. */
+try {
+  const ctx = document.getElementById("c").getContext("2d");
+  ctx.fillStyle = "#232326"; ctx.fillRect(0, 0, 240, 240);
+  ctx.strokeStyle = "#e0e0e4"; ctx.lineWidth = 6; ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(120, 40); ctx.lineTo(120, 150);
+  ctx.moveTo(120, 70); ctx.lineTo(70, 110);
+  ctx.moveTo(120, 70); ctx.lineTo(170, 110);
+  ctx.moveTo(120, 150); ctx.lineTo(85, 205);
+  ctx.moveTo(120, 150); ctx.lineTo(155, 205);
+  ctx.stroke();
+  ctx.fillStyle = "#f08c3c";
+  ctx.beginPath(); ctx.arc(120, 28, 14, 0, Math.PI * 2); ctx.fill();
+  result.canvas_drawn = true;
+} catch (e) {
+  result.canvas_drawn = false;
+}
+show();
+
+if (result.qwebchannel_present) {
+  new QWebChannel(qt.webChannelTransport, (channel) => {
+    result.channel_connected = true;
+    const bridge = channel.objects.bridge;
+    show();
+    if (!bridge) { result.ping_error = "bridge 객체가 등록되지 않음"; show(); return; }
+    bridge.ping("hello", (raw) => {
+      try {
+        const res = JSON.parse(raw);
+        result.ping_ok = res.ok === true;
+        result.qt_version = res.data && res.data.qt;
+        if (!res.ok) result.ping_error = res.error;
+        show(res.ok ? "echo: " + res.data.echo : "");
+      } catch (e) {
+        result.ping_error = "응답 파싱 실패: " + e;
+        show();
+      }
+    });
+  });
+} else {
+  result.ping_error = "qwebchannel.js 가 주입되지 않음";
+  show();
+}
+</script>
+</body>
+</html>

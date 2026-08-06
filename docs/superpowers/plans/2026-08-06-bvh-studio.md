@@ -1277,6 +1277,42 @@ UI 를 다 만들기 전에 "Max 안에서 웹뷰가 뜨고 JS↔파이썬이 �
 깨지거나, 최악은 Max 가 죽는다. **작은 스모크 페이지로 먼저 확인하고, 통과해야 Task 10
 으로 간다.**
 
+#### 실측 결과 (2026-08-06, Max 2026 빌드 28000 / PySide6 6.5.3)
+
+게이트를 실제로 돌려서 알아낸 것들이다. **추측이 아니라 측정값이다.**
+
+1. **`AA_ShareOpenGLContexts` 는 이미 켜져 있다** (`share_gl_contexts: true`).
+   걱정했던 그 문제는 Max 2026 에서 해당 없음.
+
+2. **런타임은 있는데 Qt 가 못 찾는다.** Max 2026 은 `QtWebEngineProcess.exe` 와
+   `Qt6WebEngine*.dll` 을 **설치 루트**에, 리소스를 `resources\`, 로케일을
+   `qt\translations\qtwebengine_locales\` 에 둔다. 그런데 Qt 의
+   `LibraryExecutablesPath` 는 `bin\` 을 가리킨다. 그래서 기본 탐색이 실패하고
+   **창은 뜨지만 `loadFinished` 가 영영 오지 않는다** (38초간 확인).
+   → `webhost.configure_webengine_paths()` 가 `QTWEBENGINEPROCESS_PATH`,
+   `QTWEBENGINE_RESOURCES_PATH`, `QTWEBENGINE_LOCALES_PATH` 를 잡아준다.
+   이걸 넣으면 **페이지가 로드되고 실제로 그려진다** (캡처 색 21종, 빈 화면 아님).
+
+3. **`QWebChannel.registerObject` 는 소유권을 가져가지 않는다.** 브리지를 지역
+   변수로만 들고 있으면 파이썬이 수거하며 C++ QObject 까지 파괴한다. 증상이
+   고약하다 — 채널은 `connected` 이고 JS 쪽 `bridge` 객체도 truthy 인데 **슬롯
+   호출 콜백이 영영 안 불린다.** 에러도 안 난다.
+   → `WebHost` 가 `bridge.setParent(self)` 로 붙든다.
+
+4. **한 Max 세션에서 웹뷰를 반복 생성/파괴하면 Max 가 죽는다.** 세 번째 시도에서
+   프로세스가 종료됐다 (PID 4612 -> 35060).
+   → **웹뷰는 세션당 한 번만 만든다.** 다시 열 때는 새로 만들지 말고 기존 창을
+   `show()` 하고 `load_page()` 로 페이지만 갈아끼운다. Task 11 의 `launch()` 도
+   이 규칙을 따라야 한다 — 닫고 다시 만들면 안 된다.
+
+5. `qrc:///qtwebchannel/qwebchannel.js` 를 `<script src>` 로 부르는 대신 리소스를
+   읽어 `QWebEngineScript` 로 주입하는 방식은 **동작한다**
+   (`qwebchannel_present: true`).
+
+**남은 검증** — 3번 수정 이후의 `bridge.ping` 왕복은 아직 확인 못 했다. 4번 크래시로
+Max 가 재시작됐고 MCP 브리지가 꺼졌다. **새 Max 세션에서 게이트를 한 번만 돌려
+`verdict: PASS` 를 확인해야 이 태스크가 끝난다.**
+
 **Files:**
 - Create: `src/ui/studio/bridge.py`
 - Create: `src/ui/studio/webhost.py`
