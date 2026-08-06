@@ -7,11 +7,12 @@ from src.helpers.bvh import parse_bvh
 from src.ui.studio.library import cache_path
 from src.ui.studio.skeleton import bones, fk, project
 from src.ui.studio.thumb import (
+    PLAYBACK_FRAMES,
     build_pose_data,
-    key_pose_indices,
     load_pose_data,
     pose_distance,
     pose_vector,
+    poster_index,
 )
 from src.ui.studio.timemap import build_time_map
 
@@ -467,55 +468,37 @@ def test_pose_distance_is_squared_euclidean() -> None:
     assert pose_distance((0.0, 0.0), (3.0, 4.0)) == pytest.approx(25.0)
 
 
-def test_key_pose_indices_short_clip_returns_all() -> None:
-    bvh = parse_bvh(TWO_JOINT)  # 2 프레임
-    assert key_pose_indices(bvh, count=12) == [0, 1]
+def test_poster_index_picks_the_outlier_pose() -> None:
+    # 0,1 번은 거의 같고 2 번만 크게 다르다 -> 정지 썸네일은 2 번이어야 한다
+    rest = {"Hips": (0.0, 0.0, 0.0), "Head": (0.0, 10.0, 0.0)}
+    near = {"Hips": (0.0, 0.0, 0.0), "Head": (0.1, 10.0, 0.0)}
+    far = {"Hips": (0.0, 0.0, 0.0), "Head": (0.0, 0.0, 10.0)}
+    assert poster_index([rest, near, far]) == 2
 
 
-def test_key_pose_indices_are_sorted_and_unique() -> None:
-    bvh = parse_bvh(THREE_FRAME_ONE_EXTREME)
-    out = key_pose_indices(bvh, count=2)
-    assert out == sorted(out)
-    assert len(set(out)) == len(out)
+def test_poster_index_empty() -> None:
+    assert poster_index([]) == 0
 
 
-def test_key_pose_picks_the_extreme_frame() -> None:
-    # 균등 간격이면 [0, 1] 이 나온다. 최원점 표집이라야 [0, 2] 가 나온다.
-    bvh = parse_bvh(THREE_FRAME_ONE_EXTREME)
-    assert key_pose_indices(bvh, count=2) == [0, 2]
+def test_poster_index_single_pose() -> None:
+    assert poster_index([{"Hips": (0.0, 0.0, 0.0)}]) == 0
 
 
-def test_key_pose_indices_rejects_empty_clip() -> None:
-    bvh = parse_bvh(THREE_FRAME_ONE_EXTREME)
-    empty = type(bvh)(root=bvh.root, frame_time=bvh.frame_time, frames=[])
-    with pytest.raises(ValueError, match="positive"):
-        key_pose_indices(empty, count=12)
+def test_poster_index_ignores_translation() -> None:
+    # 같은 자세가 멀리 이동한 것뿐이면 대표 프레임이 되지 않는다
+    rest = {"Hips": (0.0, 0.0, 0.0), "Head": (0.0, 10.0, 0.0)}
+    moved = {"Hips": (500.0, 0.0, 0.0), "Head": (500.0, 10.0, 0.0)}
+    bent = {"Hips": (0.0, 0.0, 0.0), "Head": (0.0, 0.0, 10.0)}
+    assert poster_index([rest, moved, bent]) == 2
 
 
-def test_key_pose_indices_stops_when_all_poses_identical() -> None:
-    # 전부 같은 포즈면 더 고를 것이 없다 — 중복을 채우지 않는다
-    static = THREE_FRAME_ONE_EXTREME.replace(
-        "0.0 0.0 0.0 0.0 0.0 2.0 0.0 0.0 0.0\n"
-        "0.0 0.0 0.0 0.0 0.0 90.0 0.0 0.0 0.0\n",
-        "0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0\n"
-        "0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0\n",
-    )
-    bvh = parse_bvh(static)
-    assert key_pose_indices(bvh, count=2) == [0]
-
-
-def test_key_pose_indices_caps_candidates(monkeypatch) -> None:
-    # 긴 클립에서 FK 호출이 max_candidates 로 묶이는지 확인한다
-    bvh = parse_bvh(THREE_FRAME_ONE_EXTREME)
-    calls = []
-    import src.ui.studio.thumb as thumb_mod
-
-    real_fk = thumb_mod.fk
-    monkeypatch.setattr(
-        thumb_mod, "fk", lambda b, i: (calls.append(i), real_fk(b, i))[1]
-    )
-    key_pose_indices(bvh, count=2, max_candidates=2)
-    assert len(calls) == 2
+def test_playback_frames_are_evenly_spaced(tmp_path) -> None:
+    # 재생이 부드러우려면 균등 간격이어야 한다 (극점 표집이면 튄다)
+    clip = tmp_path / "three.bvh"
+    clip.write_text(THREE_FRAME_ONE_EXTREME, encoding="utf-8")
+    data = build_pose_data(str(clip))
+    assert len(data["poses"]) == 3  # 3 프레임 클립은 전부 쓴다
+    assert 0 <= data["poster"] < len(data["poses"])
 
 
 def test_build_pose_data_returns_expected_shape(tmp_path) -> None:
