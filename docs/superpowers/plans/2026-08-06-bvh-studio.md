@@ -1395,6 +1395,9 @@ git commit -m "feat: add qwebchannel bridge and webengine host with smoke page"
 - 파싱에 실패한 클립은 **목록에서 빼지 말고** `.is-broken` 을 붙이고 사유를 `title` 에
   넣는다. 클립 하나가 목록 전체를 죽이면 안 된다
 - canvas 는 `devicePixelRatio` 를 곱해 백킹 스토어를 잡는다. 안 하면 흐릿하게 나온다
+- **하이브리드 썸네일**: 브리지가 그 클립의 렌더된 PNG 경로를 주면 canvas 대신 `<img>`
+  를 쓴다 (Task 13). 없으면 canvas 로 그린다. **PNG 가 없다고 빈칸을 만들지 않는다** —
+  라이브러리는 Max 없이도 즉시 열려야 한다
 
 - [ ] **Step 2: 타임라인**
 
@@ -1558,6 +1561,151 @@ Expected: 전체 통과
 ```bash
 git add src/ui/studio/window.py src/ui/studio/launch.py maxscript/bvh_studio.ms
 git commit -m "feat: assemble bvh studio window and maxscript launcher"
+```
+
+---
+
+### Task 12: 핵심 포즈 자동 선택
+
+**추가 배경 (2026-08-06)** — 지금 `sample_indices` 는 균등 간격으로 프레임을 고른다.
+걷기처럼 주기적인 동작에서는 12장이 거의 같은 포즈로 나온다. 포즈 변화가 큰 프레임
+(극점)을 골라야 썸네일 12장이 실제로 동작을 설명한다.
+
+Max 가 필요 없다. FK 는 이미 있다 (Task 4).
+
+**Files:**
+- Modify: `src/ui/studio/thumb.py`
+- Test: `tests/test_bvh_studio.py` (추가)
+
+**Interfaces:**
+- Consumes: `fk` (Task 4)
+- Produces:
+  - `pose_vector(pose: dict[str, tuple[float, float, float]]) -> tuple[float, ...]`
+    — 루트 상대 좌표를 조인트 이름 정렬 순으로 편 벡터. 이동 성분을 빼야 제자리
+      동작과 이동 동작이 같은 기준으로 비교된다
+  - `pose_distance(a: Sequence[float], b: Sequence[float]) -> float` — 제곱 거리
+  - `key_pose_indices(bvh: BvhFile, count: int = SAMPLE_FRAMES, max_candidates: int = 200) -> list[int]`
+    — 최원점 표집(greedy farthest-point). 오름차순 정렬해서 돌려준다
+
+**알고리즘** — 후보 프레임을 `max_candidates` 개로 균등 축소한 뒤(긴 클립에서 FK 비용을
+묶는다), 0번 프레임에서 시작해 "이미 고른 것들과의 최소 거리가 최대인 프레임" 을 반복해
+추가한다. 마지막에 인덱스를 오름차순 정렬해 재생 순서를 유지한다.
+
+- `build_pose_data` 가 `sample_indices` 대신 이걸 쓴다
+- **`_CACHE_VERSION` 을 2 로 올린다.** 안 올리면 예전 캐시가 그대로 살아 새 선택이 안 보인다
+- `sample_indices` 는 지운다. 유일한 호출자가 `build_pose_data` 였고, 남기면 죽은 코드다
+
+- [ ] **Step 1: 실패하는 테스트를 쓴다**
+
+```python
+def test_pose_vector_is_root_relative() -> None:
+    a = {"Hips": (0.0, 0.0, 0.0), "Head": (0.0, 10.0, 0.0)}
+    b = {"Hips": (100.0, 0.0, 0.0), "Head": (100.0, 10.0, 0.0)}
+    assert pose_vector(a) == pytest.approx(pose_vector(b))
+
+
+def test_pose_distance_zero_for_same_pose() -> None:
+    v = pose_vector({"Hips": (0.0, 0.0, 0.0), "Head": (0.0, 10.0, 0.0)})
+    assert pose_distance(v, v) == pytest.approx(0.0)
+
+
+def test_key_pose_indices_are_sorted_and_unique() -> None:
+    bvh = parse_bvh(TWO_JOINT)
+    out = key_pose_indices(bvh, count=2)
+    assert out == sorted(out)
+    assert len(set(out)) == len(out)
+
+
+def test_key_pose_indices_short_clip_returns_all() -> None:
+    bvh = parse_bvh(TWO_JOINT)          # 2 프레임
+    assert key_pose_indices(bvh, count=12) == [0, 1]
+
+
+def test_key_pose_picks_the_extreme_frame() -> None:
+    # 3 프레임 중 1번은 0번과 거의 같고 2번만 크게 다르다 -> 2번이 뽑혀야 한다
+    bvh = parse_bvh(THREE_FRAME_ONE_EXTREME)
+    assert key_pose_indices(bvh, count=2) == [0, 2]
+```
+
+- [ ] **Step 2: 실패를 확인한다** — `ImportError: cannot import name 'key_pose_indices'`
+- [ ] **Step 3: 구현**
+- [ ] **Step 4: 통과를 확인한다**
+
+Run: `python -m pytest tests/test_bvh_helpers.py tests/test_bvh_studio.py -q`
+
+- [ ] **Step 5: 커밋**
+
+```bash
+git add src/ui/studio/thumb.py tests/test_bvh_studio.py
+git commit -m "feat: pick key poses by farthest-point sampling"
+```
+
+---
+
+### Task 13: Max 뷰포트 썸네일 배치 (하이브리드)
+
+**결정 (2026-08-06)** — 썸네일을 **하이브리드**로 간다. 캔버스 계산 썸네일이 기본값이고,
+Max 배치가 만든 PNG 가 캐시에 있으면 그걸 우선 보여준다. 라이브러리는 Max 없이도 즉시
+열리고, 배치를 한 번 돌리면 썸네일이 업그레이드된다.
+
+**찍는 대상은 기본 바이패드다.** 캐릭터 메시 스키닝은 클립마다 리타게팅이 필요해 이번
+범위에서 뺐다.
+
+**Files:**
+- Create: `src/ui/studio/maxthumb.py`
+- Reference: `src/ui/studio/maxbridge.py` (Task 8), `library.cache_path` (Task 5)
+
+**Interfaces:**
+- Produces:
+  - `thumb_png_path(clip_path: str, cache_dir: str, index: int) -> str`
+  - `has_rendered_thumbs(clip_path: str, cache_dir: str) -> bool`
+  - `render_clip_thumbs(clip_path: str, cache_dir: str, frames: Sequence[int]) -> list[str]`
+  - `batch_render(folder: str, cache_dir: str) -> dict` — `{"ok": [...], "failed": {...}}`
+
+- [ ] **Step 1: 안전장치를 먼저 만든다**
+
+배치는 바이패드를 만들고 지우며 **씬을 휘젓는다.** 작업 중인 씬에서 돌면 안 된다.
+
+- 시작 전 `rt.getSaveRequired()` 가 참이면 **거부한다** (강제 플래그를 받았을 때만 진행)
+- 배치는 `rt.resetMaxFile(rt.Name("noPrompt"))` 로 빈 씬에서 시작한다
+- 클립마다 끝나면 만든 바이패드를 지운다. 실패해도 지운다 (`try/finally`)
+
+- [ ] **Step 2: 캡처**
+
+`rt.viewport.getViewportDib()` 로 활성 뷰포트를 받아 PNG 로 저장한다.
+
+- **알려진 함정: 뷰포트가 다른 창에 가려지면 캡처가 실패하거나 검게 나온다.** 배치 시작
+  시 Max 를 전면으로 올리고, 캡처 결과가 전부 같은 색이면 실패로 처리해 `failed` 에 넣는다
+- 캡처 전에 격자를 끄고(`rt.viewport.setGridVisibility`), 바이패드가 화면에 꽉 차게
+  `rt.actionMan.executeAction(0, "310")` (Zoom Extents Selected) 를 쓴다
+- 프레임 목록은 `key_pose_indices` (Task 12) 가 고른 것을 그대로 받는다
+
+- [ ] **Step 3: 캐시 규약**
+
+PNG 는 포즈 JSON 과 같은 캐시 폴더에 둔다. 라이브러리 폴더에는 **아무것도 쓰지 않는다.**
+
+- 이름: `<clip 해시>_<index>.png` — 해시는 `library.cache_path` 와 같은 방식
+- 원본 클립의 `mtime` 이 PNG 보다 새로우면 무효로 보고 다시 찍는다
+
+- [ ] **Step 4: 문법 확인**
+
+Max 밖에서는 `pymxs` 가 없어 실행할 수 없다. 문법만 본다.
+
+Run: `python -c "import ast;ast.parse(open('src/ui/studio/maxthumb.py',encoding='utf-8').read());print('syntax ok')"`
+
+- [ ] **Step 5: Max 안에서 검증한다**
+
+1. 작업 중인 씬이 열려 있으면 배치가 거부한다
+2. 빈 씬에서 28개 클립이 전부 처리된다
+3. 캐시 폴더에 PNG 가 생기고 **라이브러리 폴더는 그대로다**
+4. 검게 나온 PNG 가 없다 (가림 실패 검출이 동작한다)
+5. 배치 후 UI 를 열면 계산 썸네일 대신 PNG 가 보인다
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add src/ui/studio/maxthumb.py
+git commit -m "feat: batch-render biped viewport thumbnails into the pose cache"
 ```
 
 ---
