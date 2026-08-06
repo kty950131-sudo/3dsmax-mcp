@@ -6,7 +6,13 @@ import pytest
 from src.helpers.bvh import parse_bvh
 from src.ui.studio.library import cache_path
 from src.ui.studio.skeleton import bones, fk, project
-from src.ui.studio.thumb import build_pose_data, load_pose_data, sample_indices
+from src.ui.studio.thumb import (
+    build_pose_data,
+    key_pose_indices,
+    load_pose_data,
+    pose_distance,
+    pose_vector,
+)
 from src.ui.studio.timemap import build_time_map
 
 TWO_JOINT = """HIERARCHY
@@ -29,6 +35,31 @@ Frames: 2
 Frame Time: 0.033333
 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
 0.0 100.0 0.0 0.0 0.0 0.0 0.0 0.0 90.0
+"""
+
+# 핵심 포즈 선택용. 1번 프레임은 0번과 거의 같고(Xrot 2도) 2번만 크게 다르다(Xrot 90도).
+# 균등 간격이면 1번이 뽑히지만, 최원점 표집이면 2번이 뽑혀야 한다.
+THREE_FRAME_ONE_EXTREME = """HIERARCHY
+ROOT Hips
+{
+  OFFSET 0.0 0.0 0.0
+  CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+  JOINT Head
+  {
+    OFFSET 0.0 10.0 0.0
+    CHANNELS 3 Zrotation Yrotation Xrotation
+    End Site
+    {
+      OFFSET 0.0 5.0 0.0
+    }
+  }
+}
+MOTION
+Frames: 3
+Frame Time: 0.033333
+0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+0.0 0.0 0.0 0.0 0.0 2.0 0.0 0.0 0.0
+0.0 0.0 0.0 0.0 0.0 90.0 0.0 0.0 0.0
 """
 
 # 부모 회전이 자식 위치에 실제로 반영되는지, 그리고 여러 축 회전이
@@ -410,29 +441,81 @@ def test_pick_max_window_empty_list_returns_none() -> None:
     assert result is None
 
 
-def test_sample_indices_spreads_evenly() -> None:
-    assert sample_indices(12, 12) == list(range(12))
+def test_pose_vector_is_root_relative() -> None:
+    # 같은 자세를 100 만큼 옮겨도 벡터는 같아야 한다 (이동 성분 제거)
+    a = {"Hips": (0.0, 0.0, 0.0), "Head": (0.0, 10.0, 0.0)}
+    b = {"Hips": (100.0, 0.0, 0.0), "Head": (100.0, 10.0, 0.0)}
+    assert pose_vector(a) == pytest.approx(pose_vector(b))
 
 
-def test_sample_indices_downsamples() -> None:
-    out = sample_indices(100, 12)
-    assert len(out) == 12
-    assert out[0] == 0
-    assert out[-1] == 99
-    assert all(b > a for a, b in zip(out, out[1:]))
+def test_pose_vector_orders_joints_by_name() -> None:
+    # 삽입 순서가 달라도 같은 벡터가 나와야 한다
+    a = {"Hips": (0.0, 0.0, 0.0), "Aaa": (1.0, 2.0, 3.0)}
+    assert pose_vector(a) == pytest.approx((1.0, 2.0, 3.0, 0.0, 0.0, 0.0))
 
 
-def test_sample_indices_short_clip() -> None:
-    assert sample_indices(3, 12) == [0, 1, 2]
+def test_pose_vector_empty() -> None:
+    assert pose_vector({}) == ()
 
 
-def test_sample_indices_single_frame() -> None:
-    assert sample_indices(1, 12) == [0]
+def test_pose_distance_zero_for_same_pose() -> None:
+    v = pose_vector({"Hips": (0.0, 0.0, 0.0), "Head": (0.0, 10.0, 0.0)})
+    assert pose_distance(v, v) == pytest.approx(0.0)
 
 
-def test_sample_indices_rejects_non_positive_total() -> None:
+def test_pose_distance_is_squared_euclidean() -> None:
+    assert pose_distance((0.0, 0.0), (3.0, 4.0)) == pytest.approx(25.0)
+
+
+def test_key_pose_indices_short_clip_returns_all() -> None:
+    bvh = parse_bvh(TWO_JOINT)  # 2 프레임
+    assert key_pose_indices(bvh, count=12) == [0, 1]
+
+
+def test_key_pose_indices_are_sorted_and_unique() -> None:
+    bvh = parse_bvh(THREE_FRAME_ONE_EXTREME)
+    out = key_pose_indices(bvh, count=2)
+    assert out == sorted(out)
+    assert len(set(out)) == len(out)
+
+
+def test_key_pose_picks_the_extreme_frame() -> None:
+    # 균등 간격이면 [0, 1] 이 나온다. 최원점 표집이라야 [0, 2] 가 나온다.
+    bvh = parse_bvh(THREE_FRAME_ONE_EXTREME)
+    assert key_pose_indices(bvh, count=2) == [0, 2]
+
+
+def test_key_pose_indices_rejects_empty_clip() -> None:
+    bvh = parse_bvh(THREE_FRAME_ONE_EXTREME)
+    empty = type(bvh)(root=bvh.root, frame_time=bvh.frame_time, frames=[])
     with pytest.raises(ValueError, match="positive"):
-        sample_indices(0, 12)
+        key_pose_indices(empty, count=12)
+
+
+def test_key_pose_indices_stops_when_all_poses_identical() -> None:
+    # 전부 같은 포즈면 더 고를 것이 없다 — 중복을 채우지 않는다
+    static = THREE_FRAME_ONE_EXTREME.replace(
+        "0.0 0.0 0.0 0.0 0.0 2.0 0.0 0.0 0.0\n"
+        "0.0 0.0 0.0 0.0 0.0 90.0 0.0 0.0 0.0\n",
+        "0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0\n"
+        "0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0\n",
+    )
+    bvh = parse_bvh(static)
+    assert key_pose_indices(bvh, count=2) == [0]
+
+
+def test_key_pose_indices_caps_candidates(monkeypatch) -> None:
+    # 긴 클립에서 FK 호출이 max_candidates 로 묶이는지 확인한다
+    bvh = parse_bvh(THREE_FRAME_ONE_EXTREME)
+    calls = []
+    import src.ui.studio.thumb as thumb_mod
+
+    real_fk = thumb_mod.fk
+    monkeypatch.setattr(
+        thumb_mod, "fk", lambda b, i: (calls.append(i), real_fk(b, i))[1]
+    )
+    key_pose_indices(bvh, count=2, max_candidates=2)
+    assert len(calls) == 2
 
 
 def test_build_pose_data_returns_expected_shape(tmp_path) -> None:
@@ -442,7 +525,7 @@ def test_build_pose_data_returns_expected_shape(tmp_path) -> None:
     assert data["frames"] == 2
     assert data["frame_time"] == pytest.approx(0.033333)
     assert list(data["bones"]) == [("Hips", "Head")]
-    assert len(data["poses"]) == 2  # sample_indices(2, 12) == [0, 1]
+    assert len(data["poses"]) == 2  # key_pose_indices(2 프레임) == [0, 1]
     assert data["poses"][0]["Hips"] == pytest.approx([0.0, 0.0, 0.0])
     assert data["poses"][1]["Hips"] == pytest.approx([0.0, 100.0, 0.0])
     assert len(data["bounds"]) == 4
