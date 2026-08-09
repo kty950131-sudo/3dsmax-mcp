@@ -4,7 +4,8 @@ from src.ui.studio import launch
 
 class ExistingWindow:
     def __init__(self):
-        self.bridge = object()
+        self.bridge = OldBridge()
+        self._channel = Channel()
         self.calls = []
 
     def show(self):
@@ -13,18 +14,36 @@ class ExistingWindow:
     def raise_(self):
         self.calls.append("raise")
 
-    def replace_bridge(self, bridge):
-        self.bridge = bridge
-        self.calls.append("replace_bridge")
-
     def load_page(self, page):
         self.calls.append(("load_page", page))
+
+
+class OldBridge:
+    def __init__(self):
+        self.deleted = False
+
+    def deleteLater(self):
+        self.deleted = True
+
+
+class Channel:
+    def __init__(self):
+        self.calls = []
+
+    def deregisterObject(self, bridge):
+        self.calls.append(("deregister", bridge))
+
+    def registerObject(self, name, bridge):
+        self.calls.append(("register", name, bridge))
 
 
 def test_relaunch_replaces_stale_bridge_before_loading_page(monkeypatch):
     class FreshBridge:
         def __init__(self, cache_dir):
             self.cache_dir = cache_dir
+
+        def setParent(self, parent):
+            self.parent = parent
 
     window = ExistingWindow()
     monkeypatch.setattr(_session, "window", window)
@@ -34,9 +53,10 @@ def test_relaunch_replaces_stale_bridge_before_loading_page(monkeypatch):
 
     assert result is window
     assert isinstance(window.bridge, FreshBridge)
+    assert window.bridge.parent is window
     assert window.calls == [
         "show",
         "raise",
-        "replace_bridge",
         ("load_page", launch.PAGE),
     ]
+    assert [call[0] for call in window._channel.calls] == ["deregister", "register"]
