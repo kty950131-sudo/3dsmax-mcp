@@ -224,7 +224,30 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
        frames: int, frame_time: float }
    ================================================================== */
 
-const HAS_BRIDGE = typeof window.bridge !== "undefined";
+/* Max 안에서는 QWebChannel 로 파이썬 브리지가 붙는다. 밖(브라우저)에서는
+   더미 데이터로 돈다 — 디자인 반복을 Max 재시작 없이 돌리기 위한 것이다. */
+const BRIDGE = { obj: null };
+
+function bcall(method, arg, cb) {
+  /* 브리지 슬롯은 항상 {ok, data|error} JSON 문자열을 돌려준다 */
+  const done = (raw) => {
+    let res;
+    try { res = JSON.parse(raw); } catch (e) { res = { ok: false, error: "응답 파싱 실패: " + raw }; }
+    cb(res);
+  };
+  if (arg === null) BRIDGE.obj[method](done);
+  else BRIDGE.obj[method](arg, done);
+}
+
+function connectBridge() {
+  if (typeof QWebChannel === "undefined" || !(window.qt && qt.webChannelTransport)) return false;
+  new QWebChannel(qt.webChannelTransport, (channel) => {
+    BRIDGE.obj = channel.objects.bridge;
+    if (!BRIDGE.obj) { setStatus("bridge 객체가 등록되지 않았습니다", "error"); return; }
+    loadClipsFromBridge();
+  });
+  return true;
+}
 
 /* ---------- 더미 클립 목록 ---------- */
 const DUMMY_CLIPS = [
@@ -364,7 +387,8 @@ function drawPose(canvas, data, index, azimuth) {
     ctx.fillStyle = "#5a5a62";
     ctx.font = "12px system-ui";
     ctx.textAlign = "center";
-    ctx.fillText("파싱 실패", w / 2, h / 2);
+    /* undefined = 브리지 응답 대기(로딩), null = 파싱 실패 */
+    ctx.fillText(data === undefined ? "…" : "파싱 실패", w / 2, h / 2);
     return;
   }
   const pose = data.poses[((index % data.poses.length) + data.poses.length) % data.poses.length];
@@ -404,6 +428,8 @@ function drawPose(canvas, data, index, azimuth) {
 const state = {
   clips: [],
   poseCache: new Map(),
+  pending: new Set(),      // 브리지에 포즈를 요청해 놓고 기다리는 클립
+  importCount: 0,          // 배치 간격 = importCount x spacing (원본 .ms 와 같은 규칙)
   selected: null,
   hovered: null,
   azimuth: 0,
@@ -422,11 +448,83 @@ function setStatus(msg, kind) {
 }
 
 function poseFor(stem) {
-  if (!state.poseCache.has(stem)) {
-    const clip = state.clips.find((c) => c.stem === stem);
-    state.poseCache.set(stem, dummyPoseData(clip ? clip.kind : null));
+  if (state.poseCache.has(stem)) return state.poseCache.get(stem);
+  const clip = state.clips.find((c) => c.stem === stem);
+
+  /* 브리지가 있고 실제 파일 경로가 있으면 파이썬에서 FK 좌표를 받아온다.
+     비동기라 도착 전에는 undefined(로딩)를 돌려주고, 도착하면 그 카드만 다시 그린다. */
+  if (BRIDGE.obj && clip && clip.path) {
+    if (!state.pending.has(stem)) {
+      state.pending.add(stem);
+      bcall("pose_data", clip.path, (res) => {
+        state.pending.delete(stem);
+        state.poseCache.set(stem, res.ok ? res.data : null);
+        const card = grid.querySelector('.clip-card[data-stem="' + CSS.escape(stem) + '"]');
+        if (card) {
+          if (!res.ok) { card.classList.add("is-broken"); card.title = res.error; }
+          drawPose(card.querySelector("canvas"), state.poseCache.get(stem), posterOf(stem), 0);
+        }
+      });
+    }
+    return undefined;                          // 로딩 중
   }
+
+  state.poseCache.set(stem, dummyPoseData(clip ? clip.kind : null));
   return state.poseCache.get(stem);
+}
+
+function loadClipsFromBridge() {
+  const folder = document.querySelector('[data-field="folder"]').value;
+  bcall("list_clips", folder, (res) => {
+    if (res.ok && res.data.length) {
+      state.clips = res.data;
+      state.poseCache.clear();
+      state.pending.clear();
+      renderGrid();
+      setStatus("라이브러리 " + res.data.length + "개 클립 (실제 데이터)", "ok");
+      refreshBipeds();
+    } else {
+      setStatus(res.ok ? "폴더에 .bvh 가 없습니다: " + folder : res.error, "error");
+    }
+  });
+}
+
+function refreshBipeds() {
+  if (!BRIDGE.obj) return;
+  bcall("scene_bipeds", null, (res) => {
+    if (!res.ok) return;
+    const sel = document.querySelector('[data-field="biped"]');
+    sel.innerHTML = "";
+    for (const name of res.data) {
+      const opt = document.createElement("option");
+      opt.textContent = name;
+      sel.appendChild(opt);
+    }
+  });
+}
+
+/* 속도 곡선이 항등이 아니면 (출력비율, 원본비율) 제어점을 프레임 단위 time_map 으로
+   편다. 파이썬 build_time_map 과 같은 선형 보간 — 인덱스는 트림된 뒤 기준이다. */
+function timeMapFromCurve(data) {
+  const pts = state.speedPoints;
+  const identity =
+    pts.length === 2 &&
+    pts[0][0] === 0 && pts[0][1] === 0 &&
+    pts[1][0] === 1 && pts[1][1] === 1;
+  if (identity || !data || !data.frames) return null;
+  const nSrc = Math.max(1, Math.round(data.frames * (state.trim[1] - state.trim[0])));
+  const last = nSrc - 1;
+  const sample = (x) => {
+    if (x <= pts[0][0]) return pts[0][1];
+    if (x >= pts[pts.length - 1][0]) return pts[pts.length - 1][1];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const [ax, ay] = pts[i], [bx, by] = pts[i + 1];
+      if (ax <= x && x <= bx) return bx === ax ? by : ay + (by - ay) * (x - ax) / (bx - ax);
+    }
+    return pts[pts.length - 1][1];
+  };
+  const outFrames = Math.max(1, Math.round(pts[pts.length - 1][0] * last) + 1);
+  return Array.from({ length: outFrames }, (_, i) => sample(last ? i / last : 0) * last);
 }
 
 /* 호버가 끝나면 0번이 아니라 대표 프레임으로 되돌아간다 */
@@ -450,9 +548,14 @@ function renderGrid() {
     const card = document.createElement("div");
     card.className = "clip-card";
     card.dataset.stem = clip.stem;
-    if (!clip.kind) {
+    /* 브리지 클립(path 있음)은 포즈 요청이 실패했을 때만 is-broken 이 붙는다
+       (poseFor 콜백). 더미 클립은 kind 가 없으면 파싱 실패 시나리오다. */
+    if (!clip.path && !clip.kind) {
       card.classList.add("is-broken");
       card.title = "BVH 파싱 실패 — 목록에서 빼지 않고 사유를 표시한다";
+    }
+    if (state.poseCache.get(clip.stem) === null && clip.path) {
+      card.classList.add("is-broken");
     }
     if (clip.stem === state.selected) card.classList.add("is-selected");
     // Max 배치가 찍은 PNG 가 있으면 그걸 쓰고, 없으면 canvas 로 계산해 그린다.
@@ -510,7 +613,8 @@ grid.addEventListener("click", (e) => {
   document.querySelector('[data-field="name"]').value = "Bip_" + state.selected;
   renderGrid();
   const data = poseFor(state.selected);
-  setStatus(state.selected + " — " + data.frames + "프레임 / " + (data.frames * data.frame_time).toFixed(1) + "초");
+  if (data) setStatus(state.selected + " — " + data.frames + "프레임 / " + (data.frames * data.frame_time).toFixed(1) + "초");
+  else setStatus(state.selected + " — 포즈 로딩 중…");
 });
 
 /* ---------- 타임라인 ---------- */
@@ -642,21 +746,53 @@ document.addEventListener("click", (e) => {
     state.azimuth = Number(btn.dataset.deg);
     setStatus("방위각 " + state.azimuth + "°");
   } else if (action === "refresh") {
-    state.poseCache.clear(); renderGrid(); setStatus("새로고침했습니다.");
+    state.poseCache.clear();
+    if (BRIDGE.obj) loadClipsFromBridge();
+    else { renderGrid(); setStatus("새로고침했습니다."); }
   } else if (action === "sync") {
-    setStatus("(목업) GitHub 동기화는 실제 툴에서 동작합니다.");
+    if (!BRIDGE.obj) { setStatus("(목업) 동기화는 Max 안에서 동작합니다."); return; }
+    setStatus("Artoke 모션 동기화 중…");
+    bcall("sync_from_github", document.querySelector('[data-field="folder"]').value, (res) => {
+      if (!res.ok) { setStatus(res.error, "error"); return; }
+      const got = res.data.downloaded;
+      setStatus(got.length ? "다운로드: " + got.join(", ") : "최신 상태 — 새 모션 없음", "ok");
+      if (got.length) loadClipsFromBridge();
+    });
   } else if (action === "import") {
     if (!state.selected) { setStatus("클립을 먼저 고르세요.", "error"); return; }
-    const flat = state.speedPoints.length === 2 &&
-                 state.speedPoints[0][1] === 0 && state.speedPoints[1][1] === 1;
-    setStatus("(목업) 임포트 — " + state.selected +
-              " / 트림 " + Math.round(state.trim[0] * 100) + "–" + Math.round(state.trim[1] * 100) + "%" +
-              " / " + (flat ? "speed 경로(무손실)" : "time_map 경로"), "ok");
-    const sel = document.querySelector('[data-field="biped"]');
-    const name = document.querySelector('[data-field="name"]').value || state.selected;
-    const opt = document.createElement("option"); opt.textContent = name; sel.appendChild(opt);
+    const clip = state.clips.find((c) => c.stem === state.selected);
+    if (!BRIDGE.obj || !clip || !clip.path) {
+      setStatus("(목업) 임포트는 Max 안에서 동작합니다 — 브라우저에서는 미리보기만.", "error");
+      return;
+    }
+    const data = poseFor(state.selected);
+    const payload = {
+      path: clip.path,
+      name: document.querySelector('[data-field="name"]').value || ("Bip_" + clip.stem),
+      convert: document.querySelector('[data-field="convert"]').checked,
+      mirror: document.querySelector('[data-field="mirror"]').checked,
+      x_offset: state.importCount * Number(document.querySelector('[data-field="spacing"]').value || 0),
+      trim_start: state.trim[0],
+      trim_end: state.trim[1],
+    };
+    const timeMap = timeMapFromCurve(data);
+    if (timeMap) payload.time_map = timeMap;
+    setStatus("임포트 중… (" + clip.stem + ")");
+    bcall("import_clip", JSON.stringify(payload), (res) => {
+      if (res.ok) {
+        state.importCount++;
+        setStatus(res.data.message, "ok");
+        refreshBipeds();
+      } else setStatus(res.error, "error");
+    });
   } else if (action === "mixer") {
-    setStatus("(목업) Motion Mixer 전송");
+    if (!BRIDGE.obj) { setStatus("(목업) Motion Mixer 전송"); return; }
+    const sel = document.querySelector('[data-field="biped"]');
+    if (!sel.value) { setStatus("바이패드를 선택하세요", "error"); return; }
+    const clipsDir = document.querySelector('[data-field="folder"]').value + "\\clips";
+    bcall("send_to_mixer", JSON.stringify({ biped: sel.value, clips_dir: clipsDir }), (res) => {
+      setStatus(res.ok ? res.data.message : res.error, res.ok ? "ok" : "error");
+    });
   }
 });
 
@@ -669,7 +805,8 @@ renderTimeline();
 drawSpeed();
 drawArm();
 window.addEventListener("resize", () => { renderTimeline(); drawSpeed(); drawArm(); });
-if (!HAS_BRIDGE) setStatus("더미 데이터로 동작 중입니다 — Max 브리지 없음. 클립을 고르세요.");
+if (!connectBridge())
+  setStatus("더미 데이터로 동작 중입니다 — Max 브리지 없음. 클립을 고르세요.");
 </script>
 </body>
 </html>

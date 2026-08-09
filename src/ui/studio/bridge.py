@@ -53,3 +53,77 @@ class StudioBridge(QtCore.QObject):
     def pose_data(self, clip_path: str) -> str:
         """포즈 좌표와 뼈대. 첫 호출만 느리고 이후는 캐시다."""
         return reply(lambda: load_pose_data(clip_path, self._cache_dir))
+
+    # ---- 아래부터는 Max 안에서만 동작한다 (pymxs 필요) ----
+
+    @QtCore.Slot(str, result=str)
+    def import_clip(self, payload_json: str) -> str:
+        """바이패드 생성 + 클립 임포트. payload 는 JS 쪽 상태를 dict 하나로 받는다."""
+
+        def run() -> dict:
+            from src.ui.studio.maxbridge import import_clip
+
+            p = json.loads(payload_json)
+            msg = import_clip(
+                p["path"],
+                p.get("name", ""),
+                bool(p.get("convert", True)),
+                float(p.get("x_offset", 0.0)),
+                speed=float(p.get("speed", 1.0)),
+                trim=(float(p.get("trim_start", 0.0)), float(p.get("trim_end", 1.0))),
+                time_map=p.get("time_map"),
+                mirror=bool(p.get("mirror", False)),
+            )
+            if msg.startswith("ERROR"):
+                raise RuntimeError(msg)
+            return {"message": msg}
+
+        return reply(run)
+
+    @QtCore.Slot(result=str)
+    def scene_bipeds(self) -> str:
+        def run() -> list[str]:
+            from src.ui.studio.maxbridge import scene_bipeds
+
+            return scene_bipeds()
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def apply_arm_space(self, payload_json: str) -> str:
+        def run() -> dict:
+            from src.ui.studio.maxbridge import apply_arm_space
+
+            p = json.loads(payload_json)
+            msg = apply_arm_space(
+                p["biped"], [(int(f), float(d)) for f, d in p.get("points", [])]
+            )
+            if msg.startswith("ERROR"):
+                raise RuntimeError(msg)
+            return {"message": msg}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def send_to_mixer(self, payload_json: str) -> str:
+        def run() -> dict:
+            from src.ui.studio.maxbridge import send_to_mixer
+
+            p = json.loads(payload_json)
+            msg = send_to_mixer(p["biped"], p["clips_dir"])
+            if msg.startswith("ERROR"):
+                raise RuntimeError(msg)
+            return {"message": msg}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def sync_from_github(self, folder: str) -> str:
+        """artoke 모션 동기화 (현재 gh CLI 경로 — 판매 배포에선 Task 14 API 로 교체)."""
+
+        def run() -> dict:
+            from src.helpers.github_sync import sync_motions
+
+            return sync_motions(folder)
+
+        return reply(run)
