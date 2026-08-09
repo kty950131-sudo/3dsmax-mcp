@@ -131,6 +131,15 @@ class WebHost(QtWidgets.QWidget):
         self._channel.registerObject("bridge", bridge)
         self.view.page().setWebChannel(self._channel)
 
+    def replace_bridge(self, bridge: QtCore.QObject) -> None:
+        """웹뷰를 재생성하지 않고 실행 중인 Python 브리지만 교체한다."""
+        old_bridge = self.bridge
+        self._channel.deregisterObject(old_bridge)
+        bridge.setParent(self)
+        self.bridge = bridge
+        self._channel.registerObject("bridge", bridge)
+        old_bridge.deleteLater()
+
     def load_page(self, filename: str) -> None:
         path = os.path.join(WEB_DIR, filename)
         if not os.path.isfile(path):

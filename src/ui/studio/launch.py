@@ -5,6 +5,7 @@
 창을 앞으로 올리고 페이지만 새로 읽는다.
 """
 
+import importlib
 import os
 from typing import Any
 
@@ -24,18 +25,25 @@ def _cache_dir() -> str:
         return os.path.join(tempfile.gettempdir(), "bvh_studio_cache")
 
 
+def _new_bridge() -> Any:
+    from src.ui.studio import bridge as bridge_module
+
+    importlib.reload(bridge_module)
+    return bridge_module.StudioBridge(_cache_dir())
+
+
 def launch() -> Any:
     if _session.window is not None:
         _session.window.show()
         _session.window.raise_()
+        _session.window.replace_bridge(_new_bridge())
         _session.window.load_page(PAGE)  # 코드가 바뀌었을 수 있으니 페이지는 새로 읽는다
         return _session.window
 
-    from src.ui.studio.bridge import StudioBridge
     from src.ui.studio.compat import max_main_window
     from src.ui.studio.webhost import WebHost
 
-    bridge = StudioBridge(_cache_dir())
+    bridge = _new_bridge()
     host = WebHost(bridge, title="BVH Studio", parent=max_main_window())
     host.show()
     host.raise_()

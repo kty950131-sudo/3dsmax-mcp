@@ -1,6 +1,3 @@
-import sys
-import types
-
 from src.ui.studio import _session
 from src.ui.studio import launch
 
@@ -31,12 +28,7 @@ def test_relaunch_replaces_stale_bridge_before_loading_page(monkeypatch):
 
     window = ExistingWindow()
     monkeypatch.setattr(_session, "window", window)
-    monkeypatch.setattr(launch, "_cache_dir", lambda: "cache")
-    monkeypatch.setitem(
-        sys.modules,
-        "src.ui.studio.bridge",
-        types.SimpleNamespace(StudioBridge=FreshBridge),
-    )
+    monkeypatch.setattr(launch, "_new_bridge", lambda: FreshBridge("cache"))
 
     result = launch.launch()
 
