@@ -2,6 +2,7 @@ import json
 import os
 
 import pytest
+from pathlib import Path
 
 from src.helpers.bvh import parse_bvh
 from src.ui.studio.library import cache_path
@@ -15,6 +16,16 @@ from src.ui.studio.thumb import (
     poster_index,
 )
 from src.ui.studio.timemap import build_time_map
+
+STUDIO_PAGE = Path(__file__).parents[1] / "src" / "ui" / "studio" / "web" / "studio_draft.html"
+
+
+def test_studio_page_exposes_video_import_controls() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-action="add-video"' in html
+    assert 'class="video-job-card"' in html
+    assert "start_video_job" in html
+    assert "video_job_status" in html
 
 TWO_JOINT = """HIERARCHY
 ROOT Hips

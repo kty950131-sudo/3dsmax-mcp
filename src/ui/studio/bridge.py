@@ -9,9 +9,10 @@ import json
 import traceback
 from typing import Any, Callable, Optional
 
-from src.ui.studio.compat import QtCore
+from src.ui.studio.compat import QtCore, QtWidgets
 from src.ui.studio.library import scan
 from src.ui.studio.thumb import load_pose_data
+from src.ui.studio.video_jobs import VideoJobController
 
 
 def reply(fn: Callable[[], Any]) -> str:
@@ -34,6 +35,7 @@ class StudioBridge(QtCore.QObject):
     def __init__(self, cache_dir: str, parent: Optional[QtCore.QObject] = None) -> None:
         super().__init__(parent)
         self._cache_dir = cache_dir
+        self._video_jobs = VideoJobController()
 
     @QtCore.Slot(str, result=str)
     def ping(self, text: str) -> str:
@@ -53,6 +55,28 @@ class StudioBridge(QtCore.QObject):
     def pose_data(self, clip_path: str) -> str:
         """포즈 좌표와 뼈대. 첫 호출만 느리고 이후는 캐시다."""
         return reply(lambda: load_pose_data(clip_path, self._cache_dir))
+
+    @QtCore.Slot(result=str)
+    def choose_video(self) -> str:
+        def run() -> dict:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                None, "영상 추가", "", "Video (*.mp4 *.mov *.mkv *.avi *.webm)"
+            )
+            return {"cancelled": not bool(path), "path": path}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def start_video_job(self, payload_json: str) -> str:
+        return reply(lambda: self._video_jobs.start(json.loads(payload_json)))
+
+    @QtCore.Slot(str, result=str)
+    def video_job_status(self, job_id: str) -> str:
+        return reply(lambda: self._video_jobs.status(job_id))
+
+    @QtCore.Slot(str, result=str)
+    def cancel_video_job(self, job_id: str) -> str:
+        return reply(lambda: self._video_jobs.cancel(job_id))
 
     # ---- 아래부터는 Max 안에서만 동작한다 (pymxs 필요) ----
 

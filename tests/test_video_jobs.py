@@ -1,0 +1,109 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from src.nvidia.maxine import MaxineReadiness
+from src.ui.studio.video_jobs import VideoJobController
+
+
+def _readiness(root: Path, ready: bool) -> MaxineReadiness:
+    return MaxineReadiness(ready, root, () if ready else ("include/nvAR.h",), () if ready else ("nvarbodyposeestimation",))
+
+
+def test_job_blocks_when_maxine_is_missing(tmp_path: Path) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    controller = VideoJobController(readiness=lambda: _readiness(tmp_path, False))
+
+    job = controller.start({"video": str(video), "library": str(tmp_path / "library")})
+
+    assert job["status"] == "blocked"
+    assert job["stage"] == "sdk_check"
+    assert "nvarbodyposeestimation" in job["missing_features"]
+
+
+def test_rejects_unsupported_video_extension(tmp_path: Path) -> None:
+    video = tmp_path / "clip.txt"
+    video.write_text("x", encoding="utf-8")
+    controller = VideoJobController(readiness=lambda: _readiness(tmp_path, True))
+
+    with pytest.raises(ValueError, match="지원하지 않는 영상"):
+        controller.start({"video": str(video), "library": str(tmp_path)})
+
+
+def test_completed_job_writes_bvh_and_trace(tmp_path: Path) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    class FinishedProcess:
+        returncode = 0
+
+        def communicate(self):
+            body = {
+                "schema": "artoke.nvidia-body34.v1",
+                "source_video": str(video),
+                "fps": 30,
+                "reference_pose": {},
+                "frames": [],
+            }
+            Path(command[-1]).write_text(json.dumps(body), encoding="utf-8")
+            return "", ""
+
+        def terminate(self):
+            pass
+
+    command: list[str] = []
+
+    def process_factory(args, **_kwargs):
+        command[:] = args
+        return FinishedProcess()
+
+    def converter(source: Path, target: Path) -> int:
+        assert source.name == "clip_body34.json"
+        target.write_text("HIERARCHY\nMOTION\n", encoding="utf-8")
+        return 12
+
+    controller = VideoJobController(
+        readiness=lambda: _readiness(tmp_path, True),
+        process_factory=process_factory,
+        converter=converter,
+    )
+    started = controller.start({"video": str(video), "library": str(library)})
+    controller.wait(2)
+    job = controller.status(started["id"])
+
+    assert job["status"] == "complete"
+    assert Path(job["bvh_path"]).name == "clip_nvidia_tpose.bvh"
+    assert Path(job["trace_path"]).is_file()
+    assert job["frame_count"] == 12
+
+
+def test_second_running_job_is_rejected(tmp_path: Path) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+
+    class WaitingProcess:
+        returncode = None
+
+        def communicate(self):
+            gate.wait(2)
+            self.returncode = 1
+            return "", "stopped"
+
+        def terminate(self):
+            gate.set()
+
+    import threading
+    gate = threading.Event()
+    controller = VideoJobController(
+        readiness=lambda: _readiness(tmp_path, True),
+        process_factory=lambda *_args, **_kwargs: WaitingProcess(),
+    )
+    payload = {"video": str(video), "library": str(tmp_path / "library")}
+    controller.start(payload)
+
+    with pytest.raises(RuntimeError, match="실행 중"):
+        controller.start(payload)
+    controller.cancel(controller.current_id)
