@@ -1777,6 +1777,71 @@ git commit -m "feat: batch-render biped viewport thumbnails into the pose cache"
 
 ---
 
+### Task 14: Artoke 모션 연동 — 실시간 + 판매 배포 (기획, 2026-08-06)
+
+**요구** — (a) artoke.com 에 올린 모션을 스튜디오가 가져온다, (b) 새 모션이 올라오면
+열려 있는 스튜디오에 "실시간" 으로 나타난다, (c) 이 툴을 나중에 다른 사람에게 판매한다.
+
+**지금 상태** — `github_sync.py` 가 gh CLI 로 `kty950131-sudo/script-market` 리포의
+`public/motions` 를 받는다. **본인 전용이다**: 구매자는 gh CLI 도, 리포 접근권도 없다.
+판매하려면 이 경로를 공개 API 로 바꿔야 한다.
+
+#### 아키텍처
+
+```
+artoke.com (script-market, Next.js + Supabase)
+  GET  /api/motions            → [{name, size, sha, updated_at}]  (ETag 지원)
+  GET  /api/motions/<name>     → BVH 원문 (Content-Type: text/plain)
+  POST /api/license/verify     → {valid, tier}                    (판매 단계)
+
+3dsmax-mcp (구매자 PC)
+  src/helpers/artoke_sync.py   → 표준 urllib 만 사용. gh CLI 의존 제거
+  bridge.sync_from_artoke      → 기존 sync_from_github 슬롯과 같은 모양
+  app.js 폴링 루프             → 60초마다 목록 ETag 확인, 변경 시에만 재동기화
+```
+
+- **서버 쪽**: 모션 파일은 이미 `public/motions` 에 있으므로 목록 API 는 그 폴더를
+  읽으면 된다. Supabase 테이블은 판매 단계(구매자별 권한)에서만 필요하다.
+- **주의 — 라이브 브랜치**: artoke.com 라이브는 `master` 가 아니라
+  `worktree-viewer-attack-motion` 브랜치다 (21커밋 앞, 미머지). API 라우트는 **라이브
+  브랜치에** 넣어야 실제 사이트에 뜬다. master 에 넣으면 배포되지 않는다.
+- **클라이언트 쪽**: `plan_sync`(크기 비교 동기화 계획)는 전송 수단과 무관하므로
+  `github_sync.py` 에서 그대로 재사용한다. gh 경로는 개발용으로 남긴다.
+
+#### "실시간" 의 실체
+
+DCC 툴에서 실시간 연동은 **폴링이면 충분하다**. 스튜디오 창이 열려 있는 동안
+`GET /api/motions` 를 60초마다 ETag 로 확인하고, 바뀌었을 때만 새 파일을 받아
+그리드에 "NEW" 배지로 띄운다. 트래픽은 ETag 304 응답이라 무시할 수준이다.
+
+Supabase Realtime / SSE 푸시는 가능하지만 **지금은 안 한다** — 연결 유지·재접속
+처리가 늘어나는 데 비해, 모션 업로드 빈도(하루 몇 건)에서 60초 폴링과 체감 차이가
+없다. 업로드 즉시(1초 내) 반영이 정말 필요해지면 그때 올린다.
+
+#### 판매 배포 단계
+
+1. **무료 공개** (선행): `/api/motions` 를 인증 없이 연다. 툴은 zip + `install.py` 로
+   배포. 이 단계까지는 위 아키텍처만으로 끝난다.
+2. **유료 게이팅**: 구매 시 라이선스 키 발급(Supabase 테이블), 다운로드 API 가
+   `Authorization: Bearer <key>` 를 검사. **집행은 전적으로 서버가 한다** — 클라이언트
+   검사는 편의일 뿐이고, DRM 은 시도하지 않는다 (BVH 는 어차피 평문이다).
+3. **결제**: 결제 수단은 이 계획 밖이다. Lemon Squeezy 심사가 진행 중이므로 특정
+   프로세서를 전제하지 않고, 키 발급만 표준화해 둔다.
+
+#### 구현 순서 (착수 시)
+
+- [ ] **Step 1**: script-market **라이브 브랜치**에 `/api/motions` 목록·다운로드
+  라우트 추가 (ETag 포함). 로컬 `next dev` 로 확인 후 배포
+- [ ] **Step 2**: `src/helpers/artoke_sync.py` — urllib 기반, `plan_sync` 재사용,
+  단위 테스트는 로컬 HTTP 서버 픽스처로
+- [ ] **Step 3**: `bridge.sync_from_artoke` 슬롯 + 버튼 라벨을 "Artoke에서 가져오기"
+  로 변경 (gh 경로는 남긴다)
+- [ ] **Step 4**: app.js 에 ETag 폴링 루프 (60초, 창이 보일 때만 — `document.hidden`
+  이면 쉰다) + NEW 배지
+- [ ] **Step 5**: Max 안에서 확인 — 사이트에 모션 업로드 후 60초 내 그리드에 나타나는가
+
+---
+
 ## 자체 검토 결과
 
 **스펙 커버리지** — 스펙 각 절이 어느 태스크에 대응하는지:
