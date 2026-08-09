@@ -1802,9 +1802,13 @@ artoke.com (script-market, Next.js + Supabase)
 
 - **서버 쪽**: 모션 파일은 이미 `public/motions` 에 있으므로 목록 API 는 그 폴더를
   읽으면 된다. Supabase 테이블은 판매 단계(구매자별 권한)에서만 필요하다.
-- **주의 — 라이브 브랜치**: artoke.com 라이브는 `master` 가 아니라
-  `worktree-viewer-attack-motion` 브랜치다 (21커밋 앞, 미머지). API 라우트는 **라이브
-  브랜치에** 넣어야 실제 사이트에 뜬다. master 에 넣으면 배포되지 않는다.
+- **브랜치 — master 에서 작업한다 (2026-08-09 갱신)**: 브랜치 대청소로 로컬
+  `master` 가 라이브 브랜치(`origin/worktree-viewer-attack-motion`)와 동일 커밋이
+  됐다 (eb760af, 0/0 차이). API 라우트는 **master 에** 넣는다. 단 라이브 반영에는
+  두 단계가 더 필요하다: ① `origin/master` 가 22커밋 뒤이므로 master 를 push,
+  ② Vercel 프로덕션 브랜치를 `worktree-viewer-attack-motion` → `master` 로 변경.
+  이 둘을 하기 전까지는 master 에 넣어도 사이트에 뜨지 않는다.
+  (② 이후 옛 worktree-* 원격 브랜치들은 정리해도 된다.)
 - **클라이언트 쪽**: `plan_sync`(크기 비교 동기화 계획)는 전송 수단과 무관하므로
   `github_sync.py` 에서 그대로 재사용한다. gh 경로는 개발용으로 남긴다.
 
