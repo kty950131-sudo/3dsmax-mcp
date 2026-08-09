@@ -26,11 +26,13 @@
 **Files:**
 - Create: `src/nvidia/maxine.py`
 - Create: `scripts/install-maxine-body-pose.ps1`
+- Create: `native/maxine_body34/CMakeLists.txt`
+- Create: `native/maxine_body34/main.cpp`
 - Create: `tests/test_maxine.py`
 - Modify: `docs/MAXINE_BODY_POSE.md`
 
 **Interfaces:**
-- Produces: `MaxineReadiness`, `check_maxine(root: Path) -> MaxineReadiness`, `build_bodytrack_command(video: Path, output: Path, sdk_root: Path) -> list[str]`
+- Produces: `MaxineReadiness`, `check_maxine(root: Path) -> MaxineReadiness`, `build_bodytrack_command(video: Path, output: Path, sdk_root: Path) -> list[str]`, native `maxine_body34.exe`
 - Consumes: NVIDIA AR SDK feature names `nvarbodyposeestimation,nvarbodydetection`
 
 - [ ] **Step 1: Write failing readiness and command tests**
@@ -45,7 +47,10 @@ def test_bodytrack_command_keeps_paths_as_arguments(tmp_path):
     command = build_bodytrack_command(
         tmp_path / "clip one.mp4", tmp_path / "body.json", tmp_path / "sdk"
     )
-    assert command[-2:] == ["--output_json", str(tmp_path / "body.json")]
+    assert command[-4:] == [
+        "--input", str(tmp_path / "clip one.mp4"),
+        "--output", str(tmp_path / "body.json"),
+    ]
 ```
 
 - [ ] **Step 2: Run tests and verify RED**
@@ -65,10 +70,17 @@ class MaxineReadiness:
 
 def build_bodytrack_command(video: Path, output: Path, sdk_root: Path) -> list[str]:
     return [
-        str(sdk_root / "samples" / "BodyTrack" / "BodyTrack.exe"),
-        "--offline_mode", str(video), "--output_json", str(output),
+        str(sdk_root / "artoke" / "maxine_body34.exe"),
+        "--input", str(video), "--output", str(output),
     ]
 ```
+
+The official NVIDIA `BodyTrack.exe` accepts offline input and rendered output video but
+does not expose a 34-joint JSON output option. `native/maxine_body34` therefore calls the
+documented `NvAR_Parameter_Output(KeyPoints3D)`, `JointAngles`, and
+`KeyPointsConfidence` APIs for every decoded frame and writes
+`artoke.nvidia-body34.v1` JSON. It links only against the officially installed AR SDK and
+does not copy NVIDIA model binaries into the repository.
 
 - [ ] **Step 4: Add PowerShell installer with NGC credential gate**
 
@@ -90,7 +102,7 @@ Expected on current PC before SDK installation: structured `blocked` result nami
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/nvidia/maxine.py scripts/install-maxine-body-pose.ps1 tests/test_maxine.py docs/MAXINE_BODY_POSE.md
+git add src/nvidia/maxine.py scripts/install-maxine-body-pose.ps1 native/maxine_body34 tests/test_maxine.py docs/MAXINE_BODY_POSE.md
 git commit -m "feat: add Maxine body pose readiness and installer"
 ```
 
@@ -353,4 +365,3 @@ Run the existing `write-obsidian` command for source 1. Update the dev-task note
 git add src/ui/studio/video_jobs.py src/ui/studio/bridge.py tests/test_video_jobs.py
 git commit -m "feat: persist NVIDIA BVH provenance and review handoff"
 ```
-
