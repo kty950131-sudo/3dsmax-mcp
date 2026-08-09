@@ -17,6 +17,17 @@ def _rt():
     return runtime
 
 
+def _tm_controller(rt, node):
+    """노드의 트랜스폼 컨트롤러.
+
+    MAXScript 의 ``node.transform.controller`` 를 pymxs 로 직역하면 안 된다 —
+    pymxs 의 ``node.transform`` 은 Matrix3 **값**을 돌려주므로 그 위의
+    ``.controller`` 는 AttributeError 다 (실측: 임포트가 바이패드만 만들고
+    모션 없이 죽었다). ``getTMController`` 가 pymxs 의 올바른 경로다.
+    """
+    return rt.getTMController(node)
+
+
 def scene_bipeds() -> list[str]:
     """씬의 바이패드 루트 노드 이름 목록.
 
@@ -28,7 +39,7 @@ def scene_bipeds() -> list[str]:
     names: list[str] = []
     for obj in rt.objects:
         try:
-            if rt.classOf(obj.transform.controller) == rt.Vertical_Horizontal_Turn:
+            if rt.classOf(_tm_controller(rt, obj)) == rt.Vertical_Horizontal_Turn:
                 names.append(obj.name)
         except Exception:
             continue
@@ -88,7 +99,7 @@ def import_clip(
     if bip_name:
         bip.name = bip_name
 
-    controller = bip.transform.controller
+    controller = _tm_controller(rt, bip)
     old_quiet = rt.setQuietMode(True)
     ok = False
     try:
@@ -141,7 +152,7 @@ def apply_arm_space(bip_name: str, points: Sequence[tuple[int, float]]) -> str:
     bip = rt.getNodeByName(bip_name)
     if bip is None:
         return f"ERROR: 바이패드를 찾을 수 없음: {bip_name}"
-    controller = bip.transform.controller
+    controller = _tm_controller(rt, bip)
     if rt.classOf(controller) != rt.Vertical_Horizontal_Turn:
         return f"ERROR: not a biped root: {bip_name}"
 
@@ -177,7 +188,7 @@ def send_to_mixer(bip_name: str, clips_dir: str) -> str:
     bip = rt.getNodeByName(bip_name)
     if bip is None:
         return f"ERROR: 바이패드를 찾을 수 없음: {bip_name}"
-    controller = bip.transform.controller
+    controller = _tm_controller(rt, bip)
     if rt.classOf(controller) != rt.Vertical_Horizontal_Turn:
         return f"ERROR: not a biped root: {bip_name}"
     if controller.figureMode:
