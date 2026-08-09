@@ -1,4 +1,4 @@
-"""Single-worker NVIDIA video-to-BVH jobs for BVH Studio."""
+"""Single-worker RTMW3D video-to-BVH jobs for BVH Studio."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import threading
 import uuid
 from typing import Any, Callable
 
-from src.nvidia.body34 import convert_body34_file
-from src.nvidia.maxine import MaxineReadiness, build_bodytrack_command, check_maxine
+from src.rtmw3d.motion import convert_rtmw3d_file
+from src.rtmw3d.runtime import Rtmw3dReadiness, build_rtmw3d_command, default_readiness
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 TERMINAL_STATES = {"blocked", "failed", "cancelled", "complete"}
@@ -30,9 +30,9 @@ class VideoJobController:
 
     def __init__(
         self,
-        readiness: Callable[[], MaxineReadiness] = check_maxine,
+        readiness: Callable[[], Rtmw3dReadiness] = default_readiness,
         process_factory: Callable[..., Any] = subprocess.Popen,
-        converter: Callable[[Path, Path], int] = convert_body34_file,
+        converter: Callable[[Path, Path], int] = convert_rtmw3d_file,
     ) -> None:
         self._readiness = readiness
         self._process_factory = process_factory
@@ -69,10 +69,10 @@ class VideoJobController:
         }
         if not report.ready:
             job.update(
-                sdk_root=str(report.sdk_root),
+                environment=str(report.environment),
+                repository=str(report.repository),
                 missing_files=list(report.missing_files),
-                missing_features=list(report.missing_features),
-                help_path=str(Path(__file__).resolve().parents[3] / "docs" / "MAXINE_BODY_POSE.md"),
+                help_path=str(Path(__file__).resolve().parents[3] / "docs" / "RTMW3D.md"),
             )
         with self._lock:
             self._job = job
@@ -113,17 +113,17 @@ class VideoJobController:
             self._job.update(values)
             return True
 
-    def _run(self, report: MaxineReadiness) -> None:
+    def _run(self, report: Rtmw3dReadiness) -> None:
         try:
             with self._lock:
                 assert self._job is not None
                 video = Path(self._job["video"])
                 library = Path(self._job["library"])
             library.mkdir(parents=True, exist_ok=True)
-            body_path = library / f"{video.stem}_body34.json"
-            bvh_path = library / f"{video.stem}_nvidia_tpose.bvh"
-            trace_path = library / f"{video.stem}_nvidia_trace.json"
-            command = build_bodytrack_command(video, body_path, report.sdk_root)
+            body_path = library / f"{video.stem}_rtmw3d.json"
+            bvh_path = library / f"{video.stem}_rtmw3d_tpose.bvh"
+            trace_path = library / f"{video.stem}_rtmw3d_trace.json"
+            command = build_rtmw3d_command(video, body_path, report)
             if not self._set(status="extracting", stage="extracting", progress=15):
                 return
             process = self._process_factory(
@@ -142,9 +142,9 @@ class VideoJobController:
             if cancelled:
                 return
             if process.returncode != 0:
-                raise RuntimeError((stderr or stdout or "Maxine extractor failed").strip())
+                raise RuntimeError((stderr or stdout or "RTMW3D extractor failed").strip())
             if not body_path.is_file():
-                raise RuntimeError("Maxine extractor가 Body34 JSON을 만들지 않았습니다")
+                raise RuntimeError("RTMW3D 추출기가 관절 JSON을 만들지 않았습니다")
             if not self._set(status="converting", stage="converting", progress=65):
                 return
             frame_count = self._converter(body_path, bvh_path)
@@ -152,20 +152,20 @@ class VideoJobController:
                 raise RuntimeError("BVH 변환 결과가 없습니다")
             self._set(status="validating", stage="validating", progress=85)
             trace = {
-                "backend": "NVIDIA Maxine AR SDK Body Pose",
+                "backend": "OpenMMLab RTMW3D-L",
                 "source_video": str(video),
-                "body34_json": str(body_path),
+                "rtmw3d_json": str(body_path),
                 "bvh": str(bvh_path),
                 "frame_count": frame_count,
                 "command": command,
                 "sha256": {
-                    "video": _sha256(video), "body34": _sha256(body_path), "bvh": _sha256(bvh_path)
+                    "video": _sha256(video), "rtmw3d": _sha256(body_path), "bvh": _sha256(bvh_path)
                 },
             }
             trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
             self._set(
                 status="complete", stage="complete", progress=100,
-                body34_path=str(body_path), bvh_path=str(bvh_path),
+                rtmw3d_path=str(body_path), bvh_path=str(bvh_path),
                 trace_path=str(trace_path), frame_count=frame_count,
             )
         except Exception as exc:

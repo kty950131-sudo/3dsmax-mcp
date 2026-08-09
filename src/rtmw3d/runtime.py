@@ -31,10 +31,6 @@ def check_rtmw3d(environment: Path, repository: Path) -> Rtmw3dReadiness:
             checkpoint_dir / "rtmw3d-l_8xb64_cocktail14-384x288-794dbc78_20240626.pth",
             "rtmw3d-l checkpoint",
         ),
-        (
-            checkpoint_dir / "rtmdet_m_8xb32-100e_coco-obj365-person-235e8209.pth",
-            "rtmdet checkpoint",
-        ),
     )
     missing = tuple(label for path, label in required if not path.is_file())
     return Rtmw3dReadiness(not missing, environment, repository, checkpoint_dir, missing)

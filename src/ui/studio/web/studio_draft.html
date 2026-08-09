@@ -17,7 +17,7 @@
   --text: #e4e4e8;
   --dim: #8e8e98;
   --accent: #f08c3c;
-  --nvidia: #76b900;
+  --pose: #48a9c5;
   --gap: 12px;
 }
 * { box-sizing: border-box; }
@@ -69,8 +69,8 @@ button.video-add { min-height: 44px; border-radius: 2px; }
 .video-job-copy { flex: 1; min-width: 180px; }
 .video-job-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .video-progress { height: 4px; margin-top: 5px; background: #161619; border-radius: 2px; overflow: hidden; }
-.video-progress > span { display: block; width: 0; height: 100%; background: var(--nvidia); transition: width .2s ease; }
-.video-job-state { color: var(--nvidia); font-size: 11px; }
+.video-progress > span { display: block; width: 0; height: 100%; background: var(--pose); transition: width .2s ease; }
+.video-job-state { color: var(--pose); font-size: 11px; }
 
 label.check { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
 
@@ -547,7 +547,7 @@ function pollVideoJob(jobId) {
       setStatus("BVH 생성 완료: " + job.bvh_path, "ok");
       loadClipsFromBridge(job.bvh_path);
     } else if (job.status === "blocked") {
-      setStatus("Maxine 설치가 필요합니다: " + job.help_path, "error");
+      setStatus("RTMW3D 설치가 필요합니다: " + job.help_path, "error");
     } else if (job.status === "failed") {
       setStatus(job.error || "영상 변환 실패", "error");
     } else {
@@ -565,7 +565,7 @@ function addVideo() {
       video: picked.data.path,
       library: document.querySelector('[data-field="folder"]').value
     };
-    setStatus("NVIDIA 관절 추정 준비 중…");
+    setStatus("RTMW3D 관절 추정 준비 중…");
     bcall("start_video_job", JSON.stringify(payload), (started) => {
       if (!started.ok) { setStatus(started.error, "error"); return; }
       showVideoJob(started.data);

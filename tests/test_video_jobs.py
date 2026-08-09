@@ -45,7 +45,7 @@ def test_completed_job_writes_bvh_and_trace(tmp_path: Path) -> None:
 
         def communicate(self):
             body = {
-                "schema": "artoke.nvidia-body34.v1",
+                    "schema": "artoke.rtmw3d.v1",
                 "source_video": str(video),
                 "fps": 30,
                 "reference_pose": {},
@@ -78,7 +78,7 @@ def test_completed_job_writes_bvh_and_trace(tmp_path: Path) -> None:
     job = controller.status(started["id"])
 
     assert job["status"] == "complete"
-    assert Path(job["bvh_path"]).name == "clip_nvidia_tpose.bvh"
+    assert Path(job["bvh_path"]).name == "clip_rtmw3d_tpose.bvh"
     assert Path(job["trace_path"]).is_file()
     assert job["frame_count"] == 12
     trace = json.loads(Path(job["trace_path"]).read_text(encoding="utf-8"))
