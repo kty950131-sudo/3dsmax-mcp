@@ -20,6 +20,7 @@ BODY23_NAMES = (
 )
 
 Vector = tuple[float, float, float]
+ImagePoint = tuple[float, float]
 Quaternion = tuple[float, float, float, float]
 
 
@@ -28,6 +29,7 @@ class Rtmw3dFrame:
     index: int
     keypoints: tuple[Vector, ...]
     scores: tuple[float, ...]
+    image_keypoints: tuple[ImagePoint, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -35,11 +37,21 @@ class Rtmw3dMotion:
     source_video: str
     fps: float
     frames: tuple[Rtmw3dFrame, ...]
+    image_size: tuple[int, int] | None = None
 
 
 def _vector(value: Any, label: str) -> Vector:
     if not isinstance(value, list) or len(value) != 3:
         raise ValueError(f"{label} must contain three numbers")
+    result = tuple(float(item) for item in value)
+    if not all(math.isfinite(item) for item in result):
+        raise ValueError(f"{label} contains a non-finite number")
+    return result
+
+
+def _image_point(value: Any, label: str) -> ImagePoint:
+    if not isinstance(value, list) or len(value) != 2:
+        raise ValueError(f"{label} must contain two numbers")
     result = tuple(float(item) for item in value)
     if not all(math.isfinite(item) for item in result):
         raise ValueError(f"{label} contains a non-finite number")
@@ -61,15 +73,38 @@ def load_rtmw3d(path: str | Path) -> Rtmw3dMotion:
         raise ValueError("frames must be a non-empty list")
     frames: list[Rtmw3dFrame] = []
     required = set(BODY23_NAMES)
+    raw_image_size = data.get("image_size")
+    if raw_image_size is None:
+        image_size = None
+    elif (
+        isinstance(raw_image_size, dict)
+        and isinstance(raw_image_size.get("width"), int)
+        and isinstance(raw_image_size.get("height"), int)
+        and raw_image_size["width"] > 0
+        and raw_image_size["height"] > 0
+    ):
+        image_size = (raw_image_size["width"], raw_image_size["height"])
+    else:
+        raise ValueError("image_size must contain positive integer width and height")
+    has_image_points = ["image_keypoints" in raw for raw in raw_frames if isinstance(raw, dict)]
+    if any(has_image_points) and not all(has_image_points):
+        raise ValueError("image_keypoints must be present in every frame")
+    if any(has_image_points) and image_size is None:
+        raise ValueError("image_size is required with image_keypoints")
     for index, raw in enumerate(raw_frames):
         if not isinstance(raw, dict) or raw.get("index") != index:
             raise ValueError("frame indexes must be consecutive and start at zero")
         points = raw.get("keypoints")
+        image_points = raw.get("image_keypoints")
         scores = raw.get("scores")
         if not isinstance(points, dict) or set(points) != required:
             raise ValueError(f"frame {index} must contain exactly 23 keypoints")
         if not isinstance(scores, dict) or set(scores) != required:
             raise ValueError(f"frame {index} must contain exactly 23 scores")
+        if image_points is not None and (
+            not isinstance(image_points, dict) or set(image_points) != required
+        ):
+            raise ValueError(f"frame {index} must contain exactly 23 image keypoints")
         score_values = tuple(float(scores[name]) for name in BODY23_NAMES)
         if not all(math.isfinite(score) and 0 <= score <= 1 for score in score_values):
             raise ValueError(f"frame {index} scores must be within 0..1")
@@ -77,8 +112,12 @@ def load_rtmw3d(path: str | Path) -> Rtmw3dMotion:
             index,
             tuple(_vector(points[name], f"frame {index}.{name}") for name in BODY23_NAMES),
             score_values,
+            None if image_points is None else tuple(
+                _image_point(image_points[name], f"frame {index}.{name}.image")
+                for name in BODY23_NAMES
+            ),
         ))
-    return Rtmw3dMotion(source_video, fps, tuple(frames))
+    return Rtmw3dMotion(source_video, fps, tuple(frames), image_size)
 
 
 def _add(a: Vector, b: Vector) -> Vector:

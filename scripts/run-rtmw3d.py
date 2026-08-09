@@ -18,6 +18,28 @@ BODY23_NAMES = (
 )
 
 
+def build_frame_record(index, raw_points, raw_scores, smoothed_points) -> dict:
+    keypoints = {}
+    image_keypoints = {}
+    scores = {}
+    for point_index, name in enumerate(BODY23_NAMES):
+        raw = raw_points[point_index]
+        smoothed = smoothed_points[point_index]
+        keypoints[name] = [
+            float(smoothed[0]),
+            -float(smoothed[1]),
+            -float(smoothed[2]),
+        ]
+        image_keypoints[name] = [float(raw[0]), float(raw[1])]
+        scores[name] = float(max(0.0, min(1.0, raw_scores[point_index])))
+    return {
+        "index": index,
+        "keypoints": keypoints,
+        "image_keypoints": image_keypoints,
+        "scores": scores,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mmpose-repo", type=Path, required=True)
@@ -62,26 +84,24 @@ def main() -> None:
     frames = []
     previous = None
     index = 0
+    image_size = None
     while True:
         ok, image = capture.read()
         if not ok:
             break
         height, width = image.shape[:2]
+        image_size = {"width": int(width), "height": int(height)}
         bbox = np.array([[0.0, 0.0, float(width), float(height)]], dtype=np.float32)
         result = inference_topdown(model, image, bbox)[0].pred_instances
         raw_points = result.keypoints[0, :23]
         raw_scores = result.keypoint_scores[0, :23]
-        current = np.stack((raw_points[:, 0], -raw_points[:, 1], -raw_points[:, 2]), axis=1)
+        current = raw_points.copy()
         if previous is not None:
             reliable = raw_scores[:, None] >= 0.2
             smoothed = previous * 0.35 + current * 0.65
             current = np.where(reliable, smoothed, previous)
         previous = current
-        frames.append({
-            "index": index,
-            "keypoints": {name: current[i].astype(float).tolist() for i, name in enumerate(BODY23_NAMES)},
-            "scores": {name: float(max(0.0, min(1.0, raw_scores[i]))) for i, name in enumerate(BODY23_NAMES)},
-        })
+        frames.append(build_frame_record(index, raw_points, raw_scores, current))
         index += 1
     capture.release()
     if not frames:
@@ -94,6 +114,7 @@ def main() -> None:
         "source_video": str(args.input.resolve()),
         "fps": fps,
         "coordinate_system": "right-handed Y-up metres",
+        "image_size": image_size,
         "frames": frames,
     }, ensure_ascii=False), encoding="utf-8")
 
