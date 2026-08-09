@@ -34,6 +34,17 @@ def _payload() -> dict:
     }
 
 
+def _payload_with_image_points() -> dict:
+    payload = _payload()
+    payload["image_size"] = {"width": 1920, "height": 1080}
+    for frame in payload["frames"]:
+        frame["image_keypoints"] = {
+            name: [float(index * 10), float(index * 5)]
+            for index, name in enumerate(BODY23_NAMES)
+        }
+    return payload
+
+
 def test_identity_pose_exports_biped_bvh(tmp_path: Path) -> None:
     source = tmp_path / "motion.json"
     source.write_text(json.dumps(_payload()), encoding="utf-8")
@@ -53,3 +64,24 @@ def test_converter_writes_valid_bvh(tmp_path: Path) -> None:
 
     assert convert_rtmw3d_file(source, output) == 2
     assert parse_bvh(output.read_text(encoding="utf-8")).root.name == "Hips"
+
+
+def test_loader_retains_image_space_keypoints(tmp_path: Path) -> None:
+    source = tmp_path / "motion.json"
+    source.write_text(json.dumps(_payload_with_image_points()), encoding="utf-8")
+
+    motion = load_rtmw3d(source)
+
+    assert motion.image_size == (1920, 1080)
+    assert motion.frames[0].image_keypoints is not None
+    assert motion.frames[0].image_keypoints[0] == (0.0, 0.0)
+
+
+def test_loader_rejects_partial_image_space_data(tmp_path: Path) -> None:
+    payload = _payload_with_image_points()
+    del payload["frames"][1]["image_keypoints"]
+    source = tmp_path / "motion.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="every frame"):
+        load_rtmw3d(source)
