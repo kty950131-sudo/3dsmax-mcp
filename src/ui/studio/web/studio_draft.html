@@ -150,7 +150,7 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 <div class="topbar">
   <input type="text" data-field="folder" value="C:\work\Ai\bvh-library" spellcheck="false">
   <button data-action="refresh">새로고침</button>
-  <button data-action="sync">GitHub에서 가져오기</button>
+  <button data-action="sync">Artoke에서 가져오기</button>
   <input type="text" data-field="search" placeholder="검색 / 태그">
 </div>
 
@@ -752,10 +752,10 @@ document.addEventListener("click", (e) => {
   } else if (action === "sync") {
     if (!BRIDGE.obj) { setStatus("(목업) 동기화는 Max 안에서 동작합니다."); return; }
     setStatus("Artoke 모션 동기화 중…");
-    bcall("sync_from_github", document.querySelector('[data-field="folder"]').value, (res) => {
+    bcall("sync_from_artoke", document.querySelector('[data-field="folder"]').value, (res) => {
       if (!res.ok) { setStatus(res.error, "error"); return; }
       const got = res.data.downloaded;
-      setStatus(got.length ? "다운로드: " + got.join(", ") : "최신 상태 — 새 모션 없음", "ok");
+      setStatus(got.length ? "Artoke 다운로드: " + got.join(", ") : "최신 상태 — 새 모션 없음", "ok");
       if (got.length) loadClipsFromBridge();
     });
   } else if (action === "import") {

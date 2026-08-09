@@ -118,8 +118,19 @@ class StudioBridge(QtCore.QObject):
         return reply(run)
 
     @QtCore.Slot(str, result=str)
+    def sync_from_artoke(self, folder: str) -> str:
+        """artoke.com 공개 manifest 로 모션 동기화. 인증 불필요 — 판매 배포 경로."""
+
+        def run() -> dict:
+            from src.helpers.artoke_sync import sync_motions
+
+            return sync_motions(folder)
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
     def sync_from_github(self, folder: str) -> str:
-        """artoke 모션 동기화 (현재 gh CLI 경로 — 판매 배포에선 Task 14 API 로 교체)."""
+        """gh CLI 경로 (개발자 전용 폴백 — gh auth 가 있는 PC 에서만 동작)."""
 
         def run() -> dict:
             from src.helpers.github_sync import sync_motions

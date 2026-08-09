@@ -87,19 +87,24 @@ def run(settle_ms: int = 2500) -> Any:
     try:
         # 창을 닫고 새로 만들지 않는다. QWebEngineView 를 한 Max 세션에서 반복
         # 생성/파괴하면 Max 가 죽는다(실측: 세 번째 시도에서 프로세스 종료).
-        # 이미 있으면 그대로 다시 띄우고 페이지만 새로 읽는다.
-        if _HOST is not None:
-            _HOST.show()
-            _HOST.raise_()
-            _HOST.load_page("smoke.html")
+        # 스튜디오(launch.py)가 만든 창도 _session 으로 공유한다 — 세션에 창은 하나다.
+        from src.ui.studio import _session
+
+        existing = _HOST or _session.window
+        if existing is not None:
+            _HOST = existing
+            existing.show()
+            existing.raise_()
+            existing.load_page("smoke.html")
             report["stage"] = "reused_existing_host"
             _write(report)
-            return _HOST
+            return existing
 
         cache_dir = os.path.join(REPORT_DIR, "cache")
         bridge = StudioBridge(cache_dir)
         host = WebHost(bridge, title="BVH Studio — smoke", parent=max_main_window())
         _HOST = host
+        _session.window = host
         report["runtime_paths"] = getattr(host, "runtime_paths", None)
         _write(report)
 
