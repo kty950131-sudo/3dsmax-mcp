@@ -32,11 +32,21 @@ def _new_bridge() -> Any:
     return bridge_module.StudioBridge(_cache_dir())
 
 
+def _replace_bridge(host: Any, bridge: Any) -> None:
+    """새 메서드가 없는 이전 세션의 WebHost에서도 브리지를 교체한다."""
+    old_bridge = host.bridge
+    host._channel.deregisterObject(old_bridge)
+    bridge.setParent(host)
+    host.bridge = bridge
+    host._channel.registerObject("bridge", bridge)
+    old_bridge.deleteLater()
+
+
 def launch() -> Any:
     if _session.window is not None:
         _session.window.show()
         _session.window.raise_()
-        _session.window.replace_bridge(_new_bridge())
+        _replace_bridge(_session.window, _new_bridge())
         _session.window.load_page(PAGE)  # 코드가 바뀌었을 수 있으니 페이지는 새로 읽는다
         return _session.window
 
