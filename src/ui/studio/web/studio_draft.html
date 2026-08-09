@@ -198,11 +198,11 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 
 <div class="curves">
   <div class="curve" data-kind="speed">
-    <h2>속도 곡선 <span class="hint">가로 출력시간 · 세로 원본시간</span></h2>
+    <h2>속도 곡선 <span class="hint">클릭=추가 · 우클릭=삭제 · 드래그=이동</span></h2>
     <canvas></canvas>
   </div>
   <div class="curve" data-kind="armspace">
-    <h2>팔 간격 곡선 <span class="hint">0–45°</span></h2>
+    <h2>팔 간격 곡선 <span class="hint">0–45° · 클릭=추가 · 우클릭=삭제</span></h2>
     <canvas></canvas>
   </div>
 </div>
@@ -514,17 +514,18 @@ function timeMapFromCurve(data) {
   if (identity || !data || !data.frames) return null;
   const nSrc = Math.max(1, Math.round(data.frames * (state.trim[1] - state.trim[0])));
   const last = nSrc - 1;
-  const sample = (x) => {
-    if (x <= pts[0][0]) return pts[0][1];
-    if (x >= pts[pts.length - 1][0]) return pts[pts.length - 1][1];
-    for (let i = 0; i < pts.length - 1; i++) {
-      const [ax, ay] = pts[i], [bx, by] = pts[i + 1];
-      if (ax <= x && x <= bx) return bx === ax ? by : ay + (by - ay) * (x - ax) / (bx - ax);
-    }
-    return pts[pts.length - 1][1];
-  };
   const outFrames = Math.max(1, Math.round(pts[pts.length - 1][0] * last) + 1);
-  return Array.from({ length: outFrames }, (_, i) => sample(last ? i / last : 0) * last);
+  /* 화면과 같은 PCHIP 스플라인으로 샘플한다. 이론상 단조가 보장되지만
+     부동소수 오차 방지로 누적 최댓값 클램프를 한 번 더 건다 (warp 의 감소 금지). */
+  const map = [];
+  let prev = 0;
+  for (let i = 0; i < outFrames; i++) {
+    let v = sampleCurve(pts, last ? i / last : 0) * last;
+    if (v < prev) v = prev;
+    map.push(v);
+    prev = v;
+  }
+  return map;
 }
 
 /* 호버가 끝나면 0번이 아니라 대표 프레임으로 되돌아간다 */
@@ -661,6 +662,42 @@ trackEl.addEventListener("pointerdown", (e) => {
   handle.addEventListener("pointerup", onUp);
 });
 
+/* ---------- 곡선 보간 ----------
+   제어점 사이를 직선이 아니라 모노톤 3차 스플라인(Fritsch–Butland PCHIP)으로
+   잇는다. 베지어 핸들 없이도 DCC 곡선처럼 부드럽고, 제어점이 단조이면 곡선도
+   단조가 수학적으로 보장된다 — 속도 곡선이 time_map 의 "감소 금지" 요구를
+   오버슈트 없이 항상 만족한다는 뜻이다 (일반 캣멀롬은 여기서 튀어나온다). */
+function pchipTangents(pts) {
+  const n = pts.length, h = [], d = [];
+  for (let i = 0; i < n - 1; i++) {
+    h[i] = pts[i + 1][0] - pts[i][0];
+    d[i] = h[i] ? (pts[i + 1][1] - pts[i][1]) / h[i] : 0;
+  }
+  const m = new Array(n);
+  m[0] = d[0] || 0; m[n - 1] = d[n - 2] || 0;
+  for (let i = 1; i < n - 1; i++) {
+    if (d[i - 1] * d[i] <= 0) m[i] = 0;      // 극점에서는 접선 0 (오버슈트 방지)
+    else {
+      const w1 = 2 * h[i] + h[i - 1], w2 = h[i] + 2 * h[i - 1];
+      m[i] = (w1 + w2) / (w1 / d[i - 1] + w2 / d[i]);
+    }
+  }
+  return m;
+}
+
+function sampleCurve(pts, x) {
+  if (pts.length < 2 || x <= pts[0][0]) return pts[0][1];
+  if (x >= pts[pts.length - 1][0]) return pts[pts.length - 1][1];
+  const m = pchipTangents(pts);
+  let i = 0;
+  while (x > pts[i + 1][0]) i++;
+  const h = pts[i + 1][0] - pts[i][0];
+  if (!h) return pts[i + 1][1];
+  const t = (x - pts[i][0]) / h, t2 = t * t, t3 = t2 * t;
+  return (2 * t3 - 3 * t2 + 1) * pts[i][1] + (t3 - 2 * t2 + t) * h * m[i]
+       + (-2 * t3 + 3 * t2) * pts[i + 1][1] + (t3 - t2) * h * m[i + 1];
+}
+
 /* ---------- 곡선 ---------- */
 function curveSetup(el, points, opts) {
   const canvas = el.querySelector("canvas");
@@ -680,7 +717,13 @@ function curveSetup(el, points, opts) {
 
     ctx.strokeStyle = "#f08c3c"; ctx.lineWidth = 2;
     ctx.beginPath();
-    points.forEach((p, i) => { const s = P(p); i ? ctx.lineTo(s[0], s[1]) : ctx.moveTo(s[0], s[1]); });
+    const x0 = points[0][0], x1 = points[points.length - 1][0];
+    const STEPS = 72;                          // 스플라인을 촘촘히 샘플해 그린다
+    for (let i = 0; i <= STEPS; i++) {
+      const x = x0 + (x1 - x0) * i / STEPS;
+      const s = P([x, sampleCurve(points, x)]);
+      i ? ctx.lineTo(s[0], s[1]) : ctx.moveTo(s[0], s[1]);
+    }
     ctx.stroke();
 
     ctx.fillStyle = "#ffffff";
@@ -727,6 +770,27 @@ function curveSetup(el, points, opts) {
     canvas.addEventListener("pointermove", onMove);
     canvas.addEventListener("pointerup", onUp);
     draw();
+  });
+
+  /* 우클릭 = 제어점 삭제 (DCC 관례). 양 끝점은 곡선의 앵커라 지울 수 없다. */
+  canvas.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) / rect.width;
+    const my = (1 - (e.clientY - rect.top) / rect.height) * opts.max;
+    let idx = -1, best = Infinity;
+    points.forEach((p, i) => {
+      const d = Math.hypot(p[0] - mx, (p[1] - my) / opts.max);
+      if (d < best) { best = d; idx = i; }
+    });
+    if (idx <= 0 || idx >= points.length - 1) {
+      setStatus("양 끝점은 지울 수 없습니다");
+      return;
+    }
+    if (best > 0.08) return;                   // 점 근처가 아니면 무시
+    points.splice(idx, 1);
+    draw();
+    setStatus(opts.label + " 제어점 삭제 — " + points.length + "개 (우클릭=삭제)");
   });
 
   return draw;
