@@ -40,6 +40,8 @@ def _read_windows_credential(target: str) -> str | None:
         ctypes.POINTER(ctypes.POINTER(CREDENTIALW)),
     ]
     advapi.CredReadW.restype = wintypes.BOOL
+    advapi.CredFree.argtypes = [ctypes.c_void_p]
+    advapi.CredFree.restype = None
     if not advapi.CredReadW(target, 1, 0, ctypes.byref(pointer)):
         return None
     try:
