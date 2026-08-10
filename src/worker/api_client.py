@@ -33,6 +33,7 @@ class UploadTarget:
     kind: str
     object_path: str
     token: str
+    signed_url: str
 
 
 class ArtokeApiClient:
@@ -113,6 +114,7 @@ class ArtokeApiClient:
                     kind=str(item["kind"]),
                     object_path=str(item["objectPath"]),
                     token=str(item["token"]),
+                    signed_url=str(item["signedUrl"]),
                 )
                 for item in payload["uploads"]
             )

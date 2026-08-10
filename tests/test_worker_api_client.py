@@ -79,7 +79,10 @@ def test_client_authorizes_uploads_and_publishes_manifest() -> None:
         requests.append((request.full_url, json.loads(request.data or b"{}")))
         if request.full_url.endswith("/uploads"):
             return Response(200, {"uploads": [{
-                "kind": "bvh", "objectPath": "owner/job/result/motion.bvh", "token": "signed",
+                "kind": "bvh",
+                "objectPath": "owner/job/result/motion.bvh",
+                "token": "signed",
+                "signedUrl": "https://storage.test/upload?token=signed",
             }]})
         return Response(200, {"status": "completed"})
 
@@ -95,6 +98,7 @@ def test_client_authorizes_uploads_and_publishes_manifest() -> None:
     client.publish("job-1", manifest)
 
     assert uploads[0].token == "signed"
+    assert uploads[0].signed_url == "https://storage.test/upload?token=signed"
     assert requests[1][0].endswith("/api/motions/worker/artifacts")
     assert requests[1][1] == {"jobId": "job-1", "artifacts": manifest}
 
