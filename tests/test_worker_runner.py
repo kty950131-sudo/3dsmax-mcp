@@ -1,6 +1,7 @@
 from pathlib import Path
 import threading
 import time
+import os
 
 from src.rtmw3d.runtime import Rtmw3dReadiness
 from src.worker.api_client import (
@@ -245,3 +246,29 @@ def test_run_forever_uses_capped_error_backoff(tmp_path: Path) -> None:
 
     assert attempts == 4
     assert stop.delays == [5.0, 10.0, 20.0, 30.0]
+
+
+def test_run_forever_cleans_stale_jobs_before_polling(tmp_path: Path) -> None:
+    stale = tmp_path / "cache" / JOB_ID
+    stale.mkdir(parents=True)
+    old = time.time() - 90_000
+    os.utime(stale, (old, old))
+    stop = threading.Event()
+    stop.set()
+    worker = ArtokeWorker(Api(claim=False), lambda: readiness(tmp_path), tmp_path / "cache")
+
+    worker.run_forever(stop)
+
+    assert not stale.exists()
+
+
+def test_worker_rejects_non_video_source_filename(tmp_path: Path) -> None:
+    api = Api()
+    claim = api.claim()
+    api.claim = lambda: ClaimedJob(
+        claim.job_id, "payload.exe", claim.object_path, claim.download_url, claim.duration_seconds,
+    )
+    worker = ArtokeWorker(api, lambda: readiness(tmp_path), tmp_path / "cache")
+
+    assert worker.run_once() is RunResult.FAILED
+    assert api.failed == (JOB_ID, "invalid_source_filename")

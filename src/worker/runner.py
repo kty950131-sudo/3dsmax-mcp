@@ -16,7 +16,7 @@ from src.worker.artifacts import (
     upload_signed_artifact,
 )
 from src.worker.motion_pipeline import MotionPipeline, PipelineCancelled
-from src.worker.workspace import JobWorkspace
+from src.worker.workspace import JobWorkspace, cleanup_stale
 
 
 class RunResult(Enum):
@@ -34,6 +34,7 @@ CONTENT_TYPES = {
     "thumbnail": "image/webp",
     "metadata": "application/json",
 }
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi"}
 
 
 def _upload(target: UploadTarget, artifact: LocalArtifact) -> None:
@@ -67,6 +68,7 @@ class ArtokeWorker:
         self._heartbeat_interval = heartbeat_interval
 
     def run_forever(self, stop_event: threading.Event) -> None:
+        cleanup_stale(self._cache_root)
         error_delay = 5.0
         while not stop_event.is_set():
             try:
@@ -86,7 +88,10 @@ class ArtokeWorker:
         claim = self._api.claim()
         if claim is None:
             return RunResult.IDLE
-        if Path(claim.source_filename).name != claim.source_filename:
+        if (
+            Path(claim.source_filename).name != claim.source_filename
+            or Path(claim.source_filename).suffix.lower() not in VIDEO_EXTENSIONS
+        ):
             self._api.finish_failed(claim.job_id, "invalid_source_filename")
             return RunResult.FAILED
 

@@ -11,6 +11,7 @@ def test_register_script_uses_current_user_hidden_startup() -> None:
     assert "Resolve-Path" in script
     assert "pythonw.exe" in script
     assert "HKLM:" not in script
+    assert '\\"' not in script
 
 
 def test_unregister_script_removes_only_artoke_worker_entry() -> None:
