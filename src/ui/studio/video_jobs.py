@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from pathlib import Path
 import subprocess
 import threading
@@ -11,18 +9,11 @@ import uuid
 from typing import Any, Callable
 
 from src.rtmw3d.motion import convert_rtmw3d_file
-from src.rtmw3d.runtime import Rtmw3dReadiness, build_rtmw3d_command, default_readiness
+from src.rtmw3d.runtime import Rtmw3dReadiness, default_readiness
+from src.worker.motion_pipeline import MotionPipeline, PipelineCancelled
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 TERMINAL_STATES = {"blocked", "failed", "cancelled", "complete"}
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 class VideoJobController:
@@ -40,7 +31,7 @@ class VideoJobController:
         self._lock = threading.Lock()
         self._job: dict[str, Any] | None = None
         self._thread: threading.Thread | None = None
-        self._process: Any = None
+        self._pipeline: MotionPipeline | None = None
 
     @property
     def current_id(self) -> str:
@@ -96,9 +87,9 @@ class VideoJobController:
             if self._job["status"] in TERMINAL_STATES:
                 return dict(self._job)
             self._job.update(status="cancelled", stage="cancelled")
-            process = self._process
-        if process is not None:
-            process.terminate()
+            pipeline = self._pipeline
+        if pipeline is not None:
+            pipeline.cancel()
         return self.status(job_id)
 
     def wait(self, timeout: float | None = None) -> None:
@@ -120,53 +111,32 @@ class VideoJobController:
                 video = Path(self._job["video"])
                 library = Path(self._job["library"])
             library.mkdir(parents=True, exist_ok=True)
-            body_path = library / f"{video.stem}_rtmw3d.json"
-            bvh_path = library / f"{video.stem}_rtmw3d_tpose.bvh"
-            trace_path = library / f"{video.stem}_rtmw3d_trace.json"
-            command = build_rtmw3d_command(video, body_path, report)
-            if not self._set(status="extracting", stage="extracting", progress=15):
-                return
-            process = self._process_factory(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            pipeline = MotionPipeline(
+                report,
+                process_factory=self._process_factory,
+                converter=self._converter,
             )
             with self._lock:
-                self._process = process
-            stdout, stderr = process.communicate()
+                self._pipeline = pipeline
+            result = pipeline.run(
+                video,
+                library,
+                lambda stage, progress: self._set(
+                    status=stage, stage=stage, progress=progress
+                ),
+                lambda: self.status(self.current_id)["status"] == "cancelled",
+            )
             with self._lock:
-                self._process = None
-                cancelled = self._job is None or self._job["status"] == "cancelled"
-            if cancelled:
-                return
-            if process.returncode != 0:
-                raise RuntimeError((stderr or stdout or "RTMW3D extractor failed").strip())
-            if not body_path.is_file():
-                raise RuntimeError("RTMW3D 추출기가 관절 JSON을 만들지 않았습니다")
-            if not self._set(status="converting", stage="converting", progress=65):
-                return
-            frame_count = self._converter(body_path, bvh_path)
-            if not bvh_path.is_file():
-                raise RuntimeError("BVH 변환 결과가 없습니다")
-            self._set(status="validating", stage="validating", progress=85)
-            trace = {
-                "backend": "OpenMMLab RTMW3D-L",
-                "source_video": str(video),
-                "rtmw3d_json": str(body_path),
-                "bvh": str(bvh_path),
-                "frame_count": frame_count,
-                "command": command,
-                "sha256": {
-                    "video": _sha256(video), "rtmw3d": _sha256(body_path), "bvh": _sha256(bvh_path)
-                },
-            }
-            trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+                self._pipeline = None
             self._set(
                 status="complete", stage="complete", progress=100,
-                rtmw3d_path=str(body_path), bvh_path=str(bvh_path),
-                trace_path=str(trace_path), frame_count=frame_count,
+                rtmw3d_path=str(result.rtmw3d_json), bvh_path=str(result.bvh),
+                trace_path=str(result.trace), frame_count=result.frame_count,
             )
+        except PipelineCancelled:
+            return
         except Exception as exc:
             self._set(status="failed", stage="failed", error=f"{type(exc).__name__}: {exc}")
+        finally:
+            with self._lock:
+                self._pipeline = None
