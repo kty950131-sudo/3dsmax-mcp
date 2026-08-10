@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src.worker.artifacts import build_artifacts, download_source
+from src.worker.artifacts import build_artifacts, download_source, upload_signed_artifact
 from src.worker.motion_pipeline import PipelineArtifacts
 
 
@@ -78,3 +78,27 @@ def test_build_artifacts_creates_four_fixed_outputs(tmp_path: Path) -> None:
     assert metadata["duration_seconds"] == 4.0
     assert metadata["sha256"]["source"]
     assert metadata["warnings"] == []
+
+
+def test_signed_upload_streams_file_with_put(tmp_path: Path) -> None:
+    artifact = tmp_path / "motion.bvh"
+    artifact.write_bytes(b"bvh-data")
+    requests = []
+
+    def opener(request, timeout):
+        requests.append((request, timeout, b"".join(request.data)))
+        return DownloadResponse(b"{}")
+
+    upload_signed_artifact(
+        "https://storage.test/upload?token=secret",
+        artifact,
+        "application/octet-stream",
+        opener=opener,
+    )
+
+    request, timeout, body = requests[0]
+    assert request.method == "PUT"
+    assert request.headers["Content-type"] == "application/octet-stream"
+    assert request.headers["Content-length"] == str(len(body))
+    assert body == b"bvh-data"
+    assert timeout == 120

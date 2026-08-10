@@ -58,6 +58,31 @@ def download_source(
         raise
 
 
+def upload_signed_artifact(
+    signed_url: str,
+    path: Path,
+    content_type: str,
+    opener: Callable[..., Any] = urlopen,
+) -> None:
+    def blocks():
+        with path.open("rb") as stream:
+            while block := stream.read(1024 * 1024):
+                yield block
+
+    request = Request(
+        signed_url,
+        data=blocks(),
+        method="PUT",
+        headers={
+            "Content-Type": content_type,
+            "Content-Length": str(path.stat().st_size),
+            "x-upsert": "true",
+        },
+    )
+    with opener(request, timeout=120) as response:
+        response.read()
+
+
 def _bvh_info(path: Path) -> tuple[int, float]:
     text = path.read_text(encoding="utf-8", errors="strict")
     if "HIERARCHY" not in text or "MOTION" not in text:
