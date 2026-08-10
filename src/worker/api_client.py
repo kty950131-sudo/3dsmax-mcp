@@ -13,6 +13,10 @@ from urllib.request import Request, urlopen
 class WorkerApiError(RuntimeError):
     """A redacted ARTOKE API failure safe to write to local logs."""
 
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
 
 @dataclass(frozen=True)
 class ClaimedJob:
@@ -20,6 +24,7 @@ class ClaimedJob:
     source_filename: str
     object_path: str
     download_url: str
+    duration_seconds: float
 
 
 @dataclass(frozen=True)
@@ -63,7 +68,10 @@ class ArtokeApiClient:
                 body = response.read()
                 return response.status, None if not body else json.loads(body)
         except HTTPError as exc:
-            raise WorkerApiError(f"ARTOKE API returned HTTP {exc.code}") from None
+            raise WorkerApiError(
+                f"ARTOKE API returned HTTP {exc.code}",
+                status=exc.code,
+            ) from None
         except (URLError, TimeoutError, OSError, ValueError):
             raise WorkerApiError("ARTOKE API request failed") from None
 
@@ -82,6 +90,7 @@ class ArtokeApiClient:
                 source_filename=str(job["sourceFilename"]),
                 object_path=str(source["objectPath"]),
                 download_url=str(source["downloadUrl"]),
+                duration_seconds=float(job["sourceDurationSeconds"]),
             )
         except (KeyError, TypeError):
             raise WorkerApiError("ARTOKE claim response is invalid") from None

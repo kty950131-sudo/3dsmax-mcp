@@ -27,7 +27,11 @@ def test_claim_sends_bearer_token_and_parses_job() -> None:
     def open_request(request, timeout):
         requests.append((request, timeout))
         return Response(200, {
-            "job": {"id": "job-1", "sourceFilename": "walk.mp4"},
+            "job": {
+                "id": "job-1",
+                "sourceFilename": "walk.mp4",
+                "sourceDurationSeconds": 4.2,
+            },
             "source": {"objectPath": "owner/job/source/walk.mp4", "downloadUrl": "https://signed"},
         })
 
@@ -36,6 +40,7 @@ def test_claim_sends_bearer_token_and_parses_job() -> None:
 
     assert claim is not None
     assert claim.job_id == "job-1"
+    assert claim.duration_seconds == 4.2
     request, timeout = requests[0]
     assert request.full_url == "https://artoke.com/api/motions/worker/claim"
     assert request.headers["Authorization"] == "Bearer secret-token"
@@ -118,3 +123,13 @@ def test_error_never_contains_token_or_signed_query() -> None:
     assert token not in message
     assert "signed-secret" not in message
     assert "503" in message
+
+
+def test_http_409_is_reported_as_a_lost_lease() -> None:
+    def fail(request, timeout):
+        raise HTTPError(request.full_url, 409, "conflict", {}, None)
+
+    client = ArtokeApiClient("https://artoke.com", "token", opener=fail)
+    with pytest.raises(WorkerApiError) as raised:
+        client.heartbeat("job-1", "extracting", 20)
+    assert raised.value.status == 409
