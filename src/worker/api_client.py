@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import json
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -48,6 +48,12 @@ class ArtokeApiClient:
         token: str,
         opener: Callable[..., Any] = urlopen,
     ) -> None:
+        parsed = urlsplit(base_url)
+        local = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        if parsed.scheme != "https" and not (parsed.scheme == "http" and local):
+            raise ValueError("ARTOKE API requires HTTPS")
+        if parsed.username or parsed.password:
+            raise ValueError("ARTOKE API URL must not contain credentials")
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._opener = opener

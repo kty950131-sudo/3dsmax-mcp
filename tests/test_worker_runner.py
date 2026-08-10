@@ -192,6 +192,31 @@ def test_lost_lease_aborts_without_terminal_overwrite(tmp_path: Path) -> None:
     assert api.failed is None and api.cancelled is False
 
 
+def test_heartbeat_network_failure_does_not_fake_user_cancellation(tmp_path: Path) -> None:
+    api = Api()
+    api.heartbeat = lambda *_args: (_ for _ in ()).throw(WorkerApiError("offline"))
+    download, build, upload, _ = dependencies(tmp_path)
+    stopped = threading.Event()
+
+    class Pipeline:
+        def run(self, *_args):
+            stopped.wait(1)
+            raise PipelineCancelled()
+
+        def cancel(self):
+            stopped.set()
+
+    worker = ArtokeWorker(
+        api, lambda: readiness(tmp_path), tmp_path / "cache",
+        pipeline_factory=lambda _report: Pipeline(),
+        downloader=download, artifact_builder=build, uploader=upload,
+        heartbeat_interval=0.01,
+    )
+
+    assert worker.run_once() is RunResult.LEASE_LOST
+    assert api.failed is None and api.cancelled is False
+
+
 def test_run_forever_uses_capped_error_backoff(tmp_path: Path) -> None:
     api = Api(claim=False)
     attempts = 0

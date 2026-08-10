@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 from typing import Any, Callable
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from src.worker.motion_pipeline import PipelineArtifacts
@@ -38,13 +39,19 @@ def download_source(
     destination: Path,
     expected_sha256: str | None = None,
     opener: Callable[..., Any] = urlopen,
+    max_bytes: int = 500 * 1024 * 1024,
 ) -> Path:
+    _require_secure_url(url)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
     digest = hashlib.sha256()
+    received = 0
     try:
         with opener(Request(url), timeout=60) as response, temporary.open("wb") as output:
             while block := response.read(1024 * 1024):
+                received += len(block)
+                if received > max_bytes:
+                    raise ValueError("source download is too large")
                 output.write(block)
                 digest.update(block)
         actual = digest.hexdigest()
@@ -64,6 +71,7 @@ def upload_signed_artifact(
     content_type: str,
     opener: Callable[..., Any] = urlopen,
 ) -> None:
+    _require_secure_url(signed_url)
     def blocks():
         with path.open("rb") as stream:
             while block := stream.read(1024 * 1024):
@@ -81,6 +89,15 @@ def upload_signed_artifact(
     )
     with opener(request, timeout=120) as response:
         response.read()
+
+
+def _require_secure_url(url: str) -> None:
+    parsed = urlsplit(url)
+    local = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and local):
+        raise ValueError("signed transfer requires HTTPS")
+    if parsed.username or parsed.password:
+        raise ValueError("signed transfer URL must not contain credentials")
 
 
 def _bvh_info(path: Path) -> tuple[int, float]:

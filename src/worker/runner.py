@@ -143,6 +143,8 @@ class ArtokeWorker:
                 )
                 if lease_lost.is_set():
                     return RunResult.LEASE_LOST
+                if heartbeat_failed.is_set():
+                    return RunResult.LEASE_LOST
                 if cancelled.is_set():
                     raise PipelineCancelled()
 
@@ -180,7 +182,7 @@ class ArtokeWorker:
                 self._api.publish(claim.job_id, manifest)
                 return RunResult.COMPLETED
         except PipelineCancelled:
-            if lease_lost.is_set():
+            if lease_lost.is_set() or heartbeat_failed.is_set():
                 return RunResult.LEASE_LOST
             self._api.finish_cancelled(claim.job_id)
             return RunResult.CANCELLED

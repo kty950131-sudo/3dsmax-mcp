@@ -39,6 +39,18 @@ def test_download_rejects_a_source_hash_mismatch(tmp_path: Path) -> None:
     assert not target.exists()
 
 
+def test_download_rejects_oversized_or_non_https_sources(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="HTTPS"):
+        download_source("file:///secret", tmp_path / "source.mp4")
+    with pytest.raises(ValueError, match="too large"):
+        download_source(
+            "https://signed.test/source",
+            tmp_path / "source.mp4",
+            max_bytes=4,
+            opener=lambda *_args, **_kwargs: DownloadResponse(b"video"),
+        )
+
+
 def test_build_artifacts_creates_four_fixed_outputs(tmp_path: Path) -> None:
     video = tmp_path / "source.mp4"
     video.write_bytes(b"video")
@@ -102,3 +114,10 @@ def test_signed_upload_streams_file_with_put(tmp_path: Path) -> None:
     assert request.headers["Content-length"] == str(len(body))
     assert body == b"bvh-data"
     assert timeout == 120
+
+
+def test_signed_upload_rejects_non_https_url(tmp_path: Path) -> None:
+    artifact = tmp_path / "motion.bvh"
+    artifact.write_bytes(b"bvh")
+    with pytest.raises(ValueError, match="HTTPS"):
+        upload_signed_artifact("file:///tmp/result", artifact, "application/octet-stream")

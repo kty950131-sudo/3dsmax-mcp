@@ -133,3 +133,9 @@ def test_http_409_is_reported_as_a_lost_lease() -> None:
     with pytest.raises(WorkerApiError) as raised:
         client.heartbeat("job-1", "extracting", 20)
     assert raised.value.status == 409
+
+
+def test_remote_api_requires_https() -> None:
+    with pytest.raises(ValueError, match="HTTPS"):
+        ArtokeApiClient("http://artoke.com", "token")
+    ArtokeApiClient("http://localhost:3000", "token")
