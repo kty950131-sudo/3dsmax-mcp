@@ -25,6 +25,9 @@ class ClaimedJob:
     object_path: str
     download_url: str
     duration_seconds: float
+    edit_revision: int = 0
+    tracking_url: str | None = None
+    edits_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,12 +94,33 @@ class ArtokeApiClient:
         try:
             job = payload["job"]
             source = payload["source"]
+            edit_revision = job.get("editRevision", 0)
+            tracking_url = source.get("trackingUrl")
+            edits_url = source.get("editsUrl")
+            if (
+                not isinstance(edit_revision, int)
+                or isinstance(edit_revision, bool)
+                or edit_revision < 0
+            ):
+                raise TypeError
+            if any(
+                value is not None and (not isinstance(value, str) or not value)
+                for value in (tracking_url, edits_url)
+            ):
+                raise TypeError
+            if edit_revision > 0 and (tracking_url is None or edits_url is None):
+                raise TypeError
+            if edit_revision == 0 and (tracking_url is not None or edits_url is not None):
+                raise TypeError
             return ClaimedJob(
                 job_id=str(job["id"]),
                 source_filename=str(job["sourceFilename"]),
                 object_path=str(source["objectPath"]),
                 download_url=str(source["downloadUrl"]),
                 duration_seconds=float(job["sourceDurationSeconds"]),
+                edit_revision=edit_revision,
+                tracking_url=tracking_url,
+                edits_url=edits_url,
             )
         except (KeyError, TypeError):
             raise WorkerApiError("ARTOKE claim response is invalid") from None

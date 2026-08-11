@@ -116,6 +116,8 @@ def build_artifacts(
     pipeline: PipelineArtifacts,
     output_dir: Path,
     duration_seconds: float,
+    *,
+    edit_revision: int = 0,
     process_runner: Callable[..., Any] = subprocess.run,
 ) -> tuple[LocalArtifact, ...]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -156,6 +158,7 @@ def build_artifacts(
         "fps": 30,
         "frame_count": frame_count,
         "duration_seconds": duration_seconds,
+        "editRevision": edit_revision,
         "sha256": {
             "source": sha256_file(video),
             "bvh": sha256_file(bvh),

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from enum import Enum
+import json
 from pathlib import Path
 import threading
 from typing import Any, Callable
 
+from src.rtmw3d.motion import convert_rtmw3d_file
 from src.rtmw3d.runtime import Rtmw3dReadiness, default_readiness
 from src.worker.api_client import ArtokeApiClient, UploadTarget, WorkerApiError
 from src.worker.artifacts import (
@@ -15,7 +17,8 @@ from src.worker.artifacts import (
     download_source,
     upload_signed_artifact,
 )
-from src.worker.motion_pipeline import MotionPipeline, PipelineCancelled
+from src.worker.motion_pipeline import MotionPipeline, PipelineArtifacts, PipelineCancelled
+from src.worker.tracking_corrections import apply_tracking_corrections
 from src.worker.workspace import JobWorkspace, cleanup_stale
 
 
@@ -56,6 +59,8 @@ class ArtokeWorker:
         downloader: Callable[..., Path] = download_source,
         artifact_builder: Callable[..., tuple[LocalArtifact, ...]] = build_artifacts,
         uploader: Callable[[UploadTarget, LocalArtifact], None] = _upload,
+        correction_applier: Callable[[Path, Path, Path], Path] = apply_tracking_corrections,
+        converter: Callable[[Path, Path], int] = convert_rtmw3d_file,
         heartbeat_interval: float = 20.0,
     ) -> None:
         self._api = api
@@ -65,6 +70,8 @@ class ArtokeWorker:
         self._downloader = downloader
         self._artifact_builder = artifact_builder
         self._uploader = uploader
+        self._correction_applier = correction_applier
+        self._converter = converter
         self._heartbeat_interval = heartbeat_interval
 
     def run_forever(self, stop_event: threading.Event) -> None:
@@ -102,7 +109,7 @@ class ArtokeWorker:
         state_lock = threading.Lock()
         stage = "downloading"
         progress = 0
-        pipeline = self._pipeline_factory(report)
+        pipeline: Any | None = None
 
         def update_stage(next_stage: str, next_progress: int) -> None:
             nonlocal stage, progress
@@ -121,11 +128,13 @@ class ArtokeWorker:
                     else:
                         heartbeat_failed.set()
                     cancelled.set()
-                    pipeline.cancel()
+                    if pipeline is not None:
+                        pipeline.cancel()
                     return
                 if response.cancel_requested:
                     cancelled.set()
-                    pipeline.cancel()
+                    if pipeline is not None:
+                        pipeline.cancel()
                     return
 
         heartbeat = threading.Thread(
@@ -139,13 +148,45 @@ class ArtokeWorker:
             with JobWorkspace.open(self._cache_root, claim.job_id) as workspace:
                 source = workspace.path / claim.source_filename
                 self._downloader(claim.download_url, source)
-                phase = "pipeline_failed"
-                pipeline_result = pipeline.run(
-                    source,
-                    workspace.path,
-                    update_stage,
-                    cancelled.is_set,
-                )
+                if cancelled.is_set():
+                    raise PipelineCancelled()
+                if claim.edit_revision > 0:
+                    phase = "correction_download_failed"
+                    if claim.tracking_url is None or claim.edits_url is None:
+                        raise ValueError("correction claim is incomplete")
+                    original_tracking = workspace.path / "original.rtmw3d.json"
+                    edits = workspace.path / "tracking.edits.json"
+                    self._downloader(claim.tracking_url, original_tracking)
+                    self._downloader(claim.edits_url, edits)
+                    if cancelled.is_set():
+                        raise PipelineCancelled()
+
+                    phase = "correction_failed"
+                    update_stage("converting", 65)
+                    corrected = workspace.path / "corrected.rtmw3d.json"
+                    self._correction_applier(original_tracking, edits, corrected)
+                    bvh = workspace.path / "corrected.bvh"
+                    frame_count = self._converter(corrected, bvh)
+                    trace = workspace.path / "corrected.trace.json"
+                    trace.write_text(json.dumps({
+                        "backend": "OpenMMLab RTMW3D-L",
+                        "editRevision": claim.edit_revision,
+                    }), encoding="utf-8")
+                    pipeline_result = PipelineArtifacts(
+                        corrected,
+                        bvh,
+                        trace,
+                        frame_count,
+                    )
+                else:
+                    phase = "pipeline_failed"
+                    pipeline = self._pipeline_factory(report)
+                    pipeline_result = pipeline.run(
+                        source,
+                        workspace.path,
+                        update_stage,
+                        cancelled.is_set,
+                    )
                 if lease_lost.is_set():
                     return RunResult.LEASE_LOST
                 if heartbeat_failed.is_set():
@@ -160,6 +201,7 @@ class ArtokeWorker:
                     pipeline_result,
                     workspace.path / "result",
                     claim.duration_seconds,
+                    edit_revision=claim.edit_revision,
                 )
                 targets = {item.kind: item for item in self._api.authorize_uploads(claim.job_id)}
                 if set(targets) != {item.kind for item in artifacts}:
@@ -198,5 +240,6 @@ class ArtokeWorker:
             return RunResult.FAILED
         finally:
             stop_heartbeat.set()
-            pipeline.cancel()
+            if pipeline is not None:
+                pipeline.cancel()
             heartbeat.join(2)
