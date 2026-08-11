@@ -1,7 +1,7 @@
-"""Tests for src/helpers/github_sync.py (gh calls are monkeypatched)."""
+"""Tests for maxmcp/helpers/github_sync.py (gh calls are monkeypatched)."""
 import json
 
-from src.helpers import github_sync
+from maxmcp.helpers import github_sync
 
 
 REMOTE = [

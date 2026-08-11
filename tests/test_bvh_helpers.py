@@ -1,6 +1,6 @@
 import pytest
 
-from src.helpers.bvh import (
+from maxmcp.helpers.bvh import (
     _biped_rename_map,
     has_upright_spine,
     parse_bvh,
