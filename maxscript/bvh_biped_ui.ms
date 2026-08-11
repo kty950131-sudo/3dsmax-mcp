@@ -10,8 +10,10 @@
 --   * 팔 간격    — arm-space slider, uniform outward upper-arm rotation ("ArmSpace" layer)
 
 global BvhBipedUi
+global BvhBipedUiHeadless
 global bvhUiOut, bvhUiUpright, bvhUiErr, bvhUiSeconds
 global bvhUiSyncOut, bvhUiSyncErr
+global bvhUiReviewOut, bvhUiReviewErr
 
 struct BvhBipedUiStruct
 (
@@ -123,6 +125,7 @@ struct BvhBipedUiStruct
 		local bip = biped.createNew 170 -90 [0, 0, 0]
 		if bip == undefined do return "ERROR: biped.createNew failed"
 		if bipName != "" do bip.name = bipName
+		setUserProp bip "BvhSourcePath" srcPath
 		local c = bip.transform.controller
 		local ok = false
 		local oldQ = setQuietMode true
@@ -142,6 +145,71 @@ struct BvhBipedUiStruct
 			msg += " " + (animationRange as string)
 		if not upright do msg += " | 경고: T포즈 골격이 아님(_tpose 파일 권장) — 자세가 틀어질 수 있음"
 		msg
+	),
+
+	-- Retain the reviewed Max scene, viewport and a JSON trace, then register
+	-- the decision through motiongen-engine's SQLite CLI. Accepted/rejected
+	-- reviews are never written without all three retained evidence files.
+	fn recordBipedReview bip dbPath sourceId clipLabel reviewStatus notes =
+	(
+		if classOf bip.transform.controller != Vertical_Horizontal_Turn do return "ERROR: not a biped root"
+		local bvhPath = getUserProp bip "BvhSourcePath"
+		if bvhPath == undefined or not doesFileExist bvhPath do return "ERROR: Biped 원본 BVH를 찾을 수 없음"
+		if dbPath == "" or not doesFileExist dbPath do return "ERROR: SQLite DB를 찾을 수 없음"
+		if clipLabel == "" do return "ERROR: SQLite clip label이 필요함"
+		if notes == "" do return "ERROR: 검수 메모가 필요함"
+
+		local reviewDir = (getFilenamePath bvhPath) + "reviews\\"
+		makeDir reviewDir all:true
+		local safeLabel = substituteString clipLabel " " "_"
+		local maxPath = reviewDir + safeLabel + "_review.max"
+		local pngPath = reviewDir + safeLabel + "_viewport.png"
+		local tracePath = reviewDir + safeLabel + "_max_review.json"
+		local saved = false
+		try ( saved = saveMaxFile maxPath quiet:true ) catch ()
+		if not saved do return "ERROR: Max scene 저장 실패: " + maxPath
+		try
+		(
+			local bmp = gw.getViewportDib()
+			bmp.filename = pngPath
+			save bmp
+			close bmp
+		)
+		catch ( return "ERROR: viewport 저장 실패: " + pngPath )
+
+		bvhUiReviewOut = ""
+		bvhUiReviewErr = ""
+		local py = "from pymxs import runtime as rt\n"
+		py += "from pathlib import Path\n"
+		py += "import json, subprocess\n"
+		py += "try:\n"
+		py += "    engine = Path(r'C:/work/Ai/motiongen-engine')\n"
+		py += "    trace = Path(str(rt.bvhUiReviewTrace))\n"
+		py += "    payload = {'stage':'3ds_max_biped_review','biped':str(rt.bvhUiReviewBiped),'clip_label':str(rt.bvhUiReviewClip),'bvh_path':str(rt.bvhUiReviewBvh),'max_scene_path':str(rt.bvhUiReviewMax),'viewport_path':str(rt.bvhUiReviewPng),'status':str(rt.bvhUiReviewStatus),'animation_range':str(rt.animationRange)}\n"
+		py += "    trace.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')\n"
+		py += "    cmd = [str(engine/'.venv/Scripts/python.exe'), str(engine/'scripts/zzz-motion-pipeline.py'), '--json', 'record-biped-review', '--db', str(rt.bvhUiReviewDb), '--source-id', str(int(rt.bvhUiReviewSourceId)), '--clip-label', str(rt.bvhUiReviewClip), '--bvh', str(rt.bvhUiReviewBvh), '--status', str(rt.bvhUiReviewStatus), '--notes', str(rt.bvhUiReviewNotes), '--max-scene', str(rt.bvhUiReviewMax), '--viewport', str(rt.bvhUiReviewPng), '--trace', str(trace)]\n"
+		py += "    result = subprocess.run(cmd, check=False, capture_output=True, text=True)\n"
+		py += "    if result.returncode != 0: raise RuntimeError(result.stdout or result.stderr)\n"
+		py += "    report = Path(r'C:/work/Ai/me/me/wiki/projects/2026-08-10-gvhmr-bvh-biped-pipeline-status.md')\n"
+		py += "    report_cmd = [str(engine/'.venv/Scripts/python.exe'), str(engine/'scripts/zzz-motion-pipeline.py'), '--json', 'write-obsidian', '--db', str(rt.bvhUiReviewDb), '--source-id', str(int(rt.bvhUiReviewSourceId)), '--output', str(report)]\n"
+		py += "    report_result = subprocess.run(report_cmd, check=False, capture_output=True, text=True)\n"
+		py += "    if report_result.returncode != 0: raise RuntimeError(report_result.stdout or report_result.stderr)\n"
+		py += "    rt.bvhUiReviewOut = result.stdout.strip() + '\\n' + report_result.stdout.strip()\n"
+		py += "except Exception as exc:\n"
+		py += "    rt.bvhUiReviewErr = str(exc)\n"
+		global bvhUiReviewDb = dbPath
+		global bvhUiReviewSourceId = sourceId
+		global bvhUiReviewClip = clipLabel
+		global bvhUiReviewBvh = bvhPath
+		global bvhUiReviewStatus = reviewStatus
+		global bvhUiReviewNotes = notes
+		global bvhUiReviewMax = maxPath
+		global bvhUiReviewPng = pngPath
+		global bvhUiReviewTrace = tracePath
+		global bvhUiReviewBiped = bip.name
+		python.Execute py
+		if bvhUiReviewErr != "" then "ERROR: " + bvhUiReviewErr
+		else "OK: SQLite · Obsidian 검수 기록 " + clipLabel + " / " + reviewStatus
 	),
 
 	-- Mixamo-style arm-space: outward upper-arm rotation on an "ArmSpace"
@@ -237,6 +305,16 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 		button btMixer "Motion Mixer로 보내기" width:240
 	)
 
+	group "SQLite · Obsidian 검수 기록"
+	(
+		edittext etReviewDb "DB:" text:@"C:\work\Ai\motiongen-engine\data\analysis.sqlite3" fieldWidth:205
+		spinner spSourceId "Source ID:" range:[1, 999999, 1] type:#integer fieldWidth:60
+		edittext etClipLabel "Clip label:" fieldWidth:170
+		dropdownlist ddReviewStatus "판정:" items:#("pending", "accepted", "rejected") selection:1
+		edittext etReviewNotes "메모:" fieldWidth:250 height:48 multiLine:true
+		button btRecordReview "현재 Biped 검수 저장 + SQLite · Obsidian 기록" width:264 height:30
+	)
+
 	fn refreshClips =
 	(
 		lbClips.items = BvhBipedUi.listClips etFolder.text
@@ -276,7 +354,11 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 	)
 	on lbClips selected idx do
 	(
-		if idx > 0 do etName.text = "Bip_" + lbClips.items[idx]
+		if idx > 0 do
+		(
+			etName.text = "Bip_" + lbClips.items[idx]
+			etClipLabel.text = substituteString lbClips.items[idx] "_tpose" ""
+		)
 	)
 	on btImport pressed do
 	(
@@ -314,6 +396,16 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 			else lbStatus.text = BvhBipedUi.sendToMixer bip
 		)
 	)
+	on btRecordReview pressed do
+	(
+		if ddBiped.selection == 0 then lbStatus.text = "바이패드를 선택하세요"
+		else
+		(
+			local bip = getNodeByName ddBiped.items[ddBiped.selection]
+			if bip == undefined then lbStatus.text = "ERROR: 바이패드를 찾을 수 없음"
+			else lbStatus.text = BvhBipedUi.recordBipedReview bip etReviewDb.text spSourceId.value etClipLabel.text ddReviewStatus.selected etReviewNotes.text
+		)
+	)
 )
 
 (
@@ -323,6 +415,9 @@ rollout roBvhBiped "BVH → Biped (kimodo)"
 		BvhBipedUi.repoRoot = pathConfig.removePathLeaf (pathConfig.removePathLeaf thisFile)
 	else
 		BvhBipedUi.repoRoot = @"C:\work\Ai\3dsmax-mcp"
-	try ( destroyDialog roBvhBiped ) catch ()
-	createDialog roBvhBiped 300 650
+	if BvhBipedUiHeadless != true do
+	(
+		try ( destroyDialog roBvhBiped ) catch ()
+		createDialog roBvhBiped 300 850
+	)
 )
