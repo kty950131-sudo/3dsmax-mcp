@@ -74,6 +74,7 @@ def test_build_artifacts_creates_four_fixed_outputs(tmp_path: Path) -> None:
         PipelineArtifacts(body, bvh, trace, 12),
         tmp_path / "result",
         duration_seconds=4.0,
+        edit_revision=3,
         process_runner=ffmpeg,
     )
 
@@ -88,6 +89,7 @@ def test_build_artifacts_creates_four_fixed_outputs(tmp_path: Path) -> None:
     assert metadata["fps"] == 30
     assert metadata["frame_count"] == 12
     assert metadata["duration_seconds"] == 4.0
+    assert metadata["editRevision"] == 3
     assert metadata["sha256"]["source"]
     assert metadata["warnings"] == []
 

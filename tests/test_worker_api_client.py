@@ -41,11 +41,42 @@ def test_claim_sends_bearer_token_and_parses_job() -> None:
     assert claim is not None
     assert claim.job_id == "job-1"
     assert claim.duration_seconds == 4.2
+    assert claim.edit_revision == 0
+    assert claim.tracking_url is None
+    assert claim.edits_url is None
     request, timeout = requests[0]
     assert request.full_url == "https://artoke.com/api/motions/worker/claim"
     assert request.headers["Authorization"] == "Bearer secret-token"
     assert json.loads(request.data) == {"capabilities": {"rtmw3d": True}}
     assert timeout == 30
+
+
+def test_claim_parses_correction_revision_and_signed_urls() -> None:
+    client = ArtokeApiClient(
+        "https://artoke.com",
+        "secret-token",
+        opener=lambda *_args, **_kwargs: Response(200, {
+            "job": {
+                "id": "job-1",
+                "sourceFilename": "walk.mp4",
+                "sourceDurationSeconds": 4.2,
+                "editRevision": 3,
+            },
+            "source": {
+                "objectPath": "owner/job/source/walk.mp4",
+                "downloadUrl": "https://storage.test/video-signed",
+                "trackingUrl": "https://storage.test/tracking-signed",
+                "editsUrl": "https://storage.test/edits-signed",
+            },
+        }),
+    )
+
+    claim = client.claim()
+
+    assert claim is not None
+    assert claim.edit_revision == 3
+    assert claim.tracking_url == "https://storage.test/tracking-signed"
+    assert claim.edits_url == "https://storage.test/edits-signed"
 
 
 def test_claim_returns_none_for_empty_queue() -> None:

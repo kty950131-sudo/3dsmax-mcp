@@ -1,9 +1,11 @@
 from pathlib import Path
+import json
 import threading
 import time
 import os
 
 from src.rtmw3d.runtime import Rtmw3dReadiness
+from src.rtmw3d.motion import BODY23_NAMES
 from src.worker.api_client import (
     ClaimedJob,
     HeartbeatResult,
@@ -67,7 +69,7 @@ def dependencies(tmp_path: Path):
         destination.write_bytes(b"video")
         return destination
 
-    def build(_video, _pipeline, output, duration_seconds):
+    def build(_video, _pipeline, output, duration_seconds, edit_revision=0):
         for kind, name in [
             ("bvh", "motion.bvh"),
             ("rtmw3d_json", "motion.rtmw3d.json"),
@@ -120,6 +122,94 @@ def test_success_heartbeats_uploads_and_publishes(tmp_path: Path) -> None:
     assert uploads == [(kind, kind) for kind in ("bvh", "rtmw3d_json", "thumbnail", "metadata")]
     assert api.published and api.published[0] == JOB_ID
     assert len(api.published[1]) == 4
+
+
+def test_correction_rebuild_skips_inference_and_publishes_exact_revision(tmp_path: Path) -> None:
+    api = Api()
+    api.claim = lambda: ClaimedJob(
+        JOB_ID,
+        "walk.mp4",
+        "owner/job/source/walk.mp4",
+        "https://signed/video",
+        4.0,
+        edit_revision=3,
+        tracking_url="https://signed/tracking",
+        edits_url="https://signed/edits",
+    )
+    downloaded: list[str] = []
+    source_payload = {
+        "schema": "artoke.rtmw3d.v1",
+        "source_video": "walk.mp4",
+        "fps": 30,
+        "image_size": {"width": 1920, "height": 1080},
+        "frames": [{
+            "index": 0,
+            "keypoints": {
+                joint: [float(index), float(index + 1), float(index + 2)]
+                for index, joint in enumerate(BODY23_NAMES)
+            },
+            "image_keypoints": {
+                joint: [float(index * 10), float(index * 5)]
+                for index, joint in enumerate(BODY23_NAMES)
+            },
+            "scores": {joint: 0.9 for joint in BODY23_NAMES},
+        }],
+    }
+
+    def download(url, destination):
+        downloaded.append(url)
+        if url.endswith("/video"):
+            destination.write_bytes(b"video")
+        elif url.endswith("/tracking"):
+            destination.write_text(json.dumps(source_payload), encoding="utf-8")
+        else:
+            destination.write_text(json.dumps([{
+                "frame": 0,
+                "joint": "left_wrist",
+                "x": 310.5,
+                "y": 205.0,
+                "state": "manual",
+            }]), encoding="utf-8")
+        return destination
+
+    def convert(source, output):
+        corrected = json.loads(source.read_text(encoding="utf-8"))
+        assert corrected["frames"][0]["keypoints"]["left_wrist"][:2] == [310.5, -205.0]
+        output.write_text(
+            "HIERARCHY\nROOT Pelvis\nMOTION\nFrames: 1\nFrame Time: 0.0333333333\n",
+            encoding="utf-8",
+        )
+        return 1
+
+    built_revision = None
+    _download, _build, upload, uploads = dependencies(tmp_path)
+
+    def build(video, pipeline, output, duration_seconds, edit_revision=0):
+        nonlocal built_revision
+        built_revision = edit_revision
+        return _build(video, pipeline, output, duration_seconds, edit_revision)
+
+    worker = ArtokeWorker(
+        api,
+        lambda: readiness(tmp_path),
+        tmp_path / "cache",
+        pipeline_factory=lambda _report: (_ for _ in ()).throw(
+            AssertionError("rebuild must not start RTMW3D inference")
+        ),
+        downloader=download,
+        artifact_builder=build,
+        uploader=upload,
+        converter=convert,
+    )
+
+    assert worker.run_once() is RunResult.COMPLETED
+    assert downloaded == [
+        "https://signed/video",
+        "https://signed/tracking",
+        "https://signed/edits",
+    ]
+    assert built_revision == 3
+    assert len(uploads) == 4
 
 
 def test_server_cancellation_terminates_pipeline(tmp_path: Path) -> None:
