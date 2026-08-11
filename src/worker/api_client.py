@@ -92,8 +92,12 @@ class ArtokeApiClient:
         if status == 204:
             return None
         try:
+            if not isinstance(payload, dict):
+                raise TypeError
             job = payload["job"]
             source = payload["source"]
+            if not isinstance(job, dict) or not isinstance(source, dict):
+                raise TypeError
             edit_revision = job.get("editRevision", 0)
             tracking_url = source.get("trackingUrl")
             edits_url = source.get("editsUrl")
@@ -122,7 +126,7 @@ class ArtokeApiClient:
                 tracking_url=tracking_url,
                 edits_url=edits_url,
             )
-        except (KeyError, TypeError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             raise WorkerApiError("ARTOKE claim response is invalid") from None
 
     def heartbeat(

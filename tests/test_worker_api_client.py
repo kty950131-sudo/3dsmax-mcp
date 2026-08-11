@@ -88,6 +88,38 @@ def test_claim_returns_none_for_empty_queue() -> None:
     assert client.claim() is None
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        {"job": None, "source": {}},
+        {"job": [], "source": {}},
+        {"job": {}, "source": None},
+        {
+            "job": {
+                "id": "job-1",
+                "sourceFilename": "walk.mp4",
+                "sourceDurationSeconds": "not-a-number",
+            },
+            "source": {
+                "objectPath": "owner/job/source/walk.mp4",
+                "downloadUrl": "https://signed",
+            },
+        },
+    ],
+)
+def test_claim_normalizes_malformed_response_schemas(payload: object) -> None:
+    client = ArtokeApiClient(
+        "https://artoke.com",
+        "secret-token",
+        opener=lambda *_args, **_kwargs: Response(200, payload),
+    )
+
+    with pytest.raises(WorkerApiError, match="claim response is invalid"):
+        client.claim()
+
+
 def test_client_sends_heartbeat_and_terminal_payloads() -> None:
     payloads = []
 

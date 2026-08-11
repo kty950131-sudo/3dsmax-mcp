@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from src.rtmw3d.motion import BODY23_NAMES, load_rtmw3d
@@ -58,7 +59,8 @@ def apply_tracking_corrections(
             raise ValueError("correction frame is out of range")
         if not isinstance(joint, str) or joint not in BODY23_NAMES:
             raise ValueError("correction joint is invalid")
-        if correction["state"] not in _EDIT_STATES:
+        state = correction["state"]
+        if not isinstance(state, str) or state not in _EDIT_STATES:
             raise ValueError("correction state is invalid")
         key = (frame, joint)
         if key in seen:
@@ -76,15 +78,27 @@ def apply_tracking_corrections(
         target["keypoints"][joint] = [x, -y, z]
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(output.suffix + ".part")
+    temporary: Path | None = None
     try:
-        temporary.write_text(
-            json.dumps(document, ensure_ascii=False, indent=2, allow_nan=False),
+        with tempfile.NamedTemporaryFile(
+            mode="w",
             encoding="utf-8",
-        )
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(
+                document,
+                stream,
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            )
         load_rtmw3d(temporary)
         temporary.replace(output)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return output

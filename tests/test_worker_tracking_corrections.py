@@ -65,6 +65,7 @@ def test_applies_body23_corrections_without_mutating_source(tmp_path: Path) -> N
         ([{"frame": 0, "joint": "pelvis", "x": 1, "y": 2, "state": "manual"}], "joint"),
         ([{"frame": 0, "joint": "left_wrist", "x": -1, "y": 2, "state": "manual"}], "coordinate"),
         ([{"frame": 0, "joint": "left_wrist", "x": float("nan"), "y": 2, "state": "manual"}], "coordinate"),
+        ([{"frame": 0, "joint": "left_wrist", "x": 1, "y": 2, "state": []}], "state"),
         ([
             {"frame": 0, "joint": "left_wrist", "x": 1, "y": 2, "state": "manual"},
             {"frame": 0, "joint": "left_wrist", "x": 3, "y": 4, "state": "propagated"},
@@ -89,3 +90,19 @@ def test_refuses_to_overwrite_the_immutable_source(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="source"):
         apply_tracking_corrections(source, edits, source)
+
+
+def test_atomic_output_never_reuses_or_removes_source_named_like_legacy_temp(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "corrected.json"
+    source = tmp_path / "corrected.json.part"
+    source.write_text(json.dumps(tracking_payload()), encoding="utf-8")
+    original = source.read_bytes()
+    edits = tmp_path / "edits.json"
+    edits.write_text("[]", encoding="utf-8")
+
+    apply_tracking_corrections(source, edits, output)
+
+    assert source.read_bytes() == original
+    assert output.exists()
