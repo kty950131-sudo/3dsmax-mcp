@@ -120,6 +120,18 @@ def test_claim_normalizes_malformed_response_schemas(payload: object) -> None:
         client.claim()
 
 
+def test_claim_rejects_wrong_required_types_and_nonfinite_duration() -> None:
+    payload = {"job": {"id": 7, "sourceFilename": "walk.mp4", "sourceDurationSeconds": float("inf")},
+               "source": {"objectPath": "path", "downloadUrl": "https://signed"}}
+    client = ArtokeApiClient("https://artoke.com", "token", opener=lambda *_a, **_k: Response(200, payload))
+    with pytest.raises(WorkerApiError): client.claim()
+
+
+def test_heartbeat_rejects_coerced_values() -> None:
+    client = ArtokeApiClient("https://artoke.com", "token", opener=lambda *_a, **_k: Response(200, {"cancelRequested": "false", "leaseExpiresAt": 3}))
+    with pytest.raises(WorkerApiError): client.heartbeat("job", "extracting", 1)
+
+
 def test_client_sends_heartbeat_and_terminal_payloads() -> None:
     payloads = []
 

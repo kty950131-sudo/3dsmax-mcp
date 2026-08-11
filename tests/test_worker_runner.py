@@ -3,6 +3,7 @@ import json
 import threading
 import time
 import os
+import pytest
 
 from src.rtmw3d.runtime import Rtmw3dReadiness
 from src.rtmw3d.motion import BODY23_NAMES
@@ -122,6 +123,25 @@ def test_success_heartbeats_uploads_and_publishes(tmp_path: Path) -> None:
     assert uploads == [(kind, kind) for kind in ("bvh", "rtmw3d_json", "thumbnail", "metadata")]
     assert api.published and api.published[0] == JOB_ID
     assert len(api.published[1]) == 4
+
+
+@pytest.mark.parametrize("boundary", ["authorize", "publish"])
+def test_publication_409_is_lease_lost_without_terminal_failure(tmp_path: Path, boundary: str) -> None:
+    api = Api()
+    if boundary == "authorize":
+        api.authorize_uploads = lambda _job: (_ for _ in ()).throw(WorkerApiError("conflict", status=409))
+    else:
+        api.publish = lambda *_args: (_ for _ in ()).throw(WorkerApiError("conflict", status=409))
+    download, build, upload, _uploads = dependencies(tmp_path)
+    class ImmediatePipeline:
+        def run(self, _video, workspace, *_args):
+            path = workspace / "internal"; path.write_text("x"); return PipelineArtifacts(path, path, path, 1)
+        def cancel(self): pass
+    worker = ArtokeWorker(api, lambda: readiness(tmp_path), tmp_path / "cache",
+        pipeline_factory=lambda _report: ImmediatePipeline(), downloader=download,
+        artifact_builder=build, uploader=upload)
+    assert worker.run_once() is RunResult.LEASE_LOST
+    assert api.failed is None
 
 
 def test_correction_rebuild_skips_inference_and_publishes_exact_revision(tmp_path: Path) -> None:

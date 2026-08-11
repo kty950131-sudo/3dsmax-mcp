@@ -233,6 +233,11 @@ class ArtokeWorker:
                 return RunResult.LEASE_LOST
             self._api.finish_cancelled(claim.job_id)
             return RunResult.CANCELLED
+        except WorkerApiError as exc:
+            if exc.status == 409:
+                return RunResult.LEASE_LOST
+            self._api.finish_failed(claim.job_id, phase)
+            return RunResult.FAILED
         except Exception:
             if lease_lost.is_set():
                 return RunResult.LEASE_LOST

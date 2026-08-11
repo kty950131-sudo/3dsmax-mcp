@@ -82,8 +82,16 @@ class MotionPipeline:
         )
         with self._lock:
             self._process = process
+            cancel_after_publish = self._cancelled.is_set()
+        if cancel_after_publish:
+            process.terminate()
         try:
             stdout, stderr = process.communicate()
+        except BaseException:
+            process.terminate()
+            if hasattr(process, "wait"):
+                process.wait()
+            raise
         finally:
             with self._lock:
                 self._process = None

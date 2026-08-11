@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
@@ -98,6 +99,12 @@ class ArtokeApiClient:
             source = payload["source"]
             if not isinstance(job, dict) or not isinstance(source, dict):
                 raise TypeError
+            required_strings = (
+                job.get("id"), job.get("sourceFilename"),
+                source.get("objectPath"), source.get("downloadUrl"),
+            )
+            if any(not isinstance(value, str) or not value for value in required_strings):
+                raise TypeError
             edit_revision = job.get("editRevision", 0)
             tracking_url = source.get("trackingUrl")
             edits_url = source.get("editsUrl")
@@ -116,12 +123,16 @@ class ArtokeApiClient:
                 raise TypeError
             if edit_revision == 0 and (tracking_url is not None or edits_url is not None):
                 raise TypeError
+            duration = job["sourceDurationSeconds"]
+            if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+                raise TypeError
+            duration_seconds = float(duration)
+            if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+                raise ValueError
             return ClaimedJob(
-                job_id=str(job["id"]),
-                source_filename=str(job["sourceFilename"]),
-                object_path=str(source["objectPath"]),
-                download_url=str(source["downloadUrl"]),
-                duration_seconds=float(job["sourceDurationSeconds"]),
+                job_id=job["id"], source_filename=job["sourceFilename"],
+                object_path=source["objectPath"], download_url=source["downloadUrl"],
+                duration_seconds=duration_seconds,
                 edit_revision=edit_revision,
                 tracking_url=tracking_url,
                 edits_url=edits_url,
@@ -140,9 +151,15 @@ class ArtokeApiClient:
             {"stage": stage, "progress": progress},
         )
         try:
+            if not isinstance(payload, dict):
+                raise TypeError
+            cancel_requested = payload["cancelRequested"]
+            lease_expires_at = payload["leaseExpiresAt"]
+            if not isinstance(cancel_requested, bool) or not isinstance(lease_expires_at, str) or not lease_expires_at:
+                raise TypeError
             return HeartbeatResult(
-                cancel_requested=bool(payload["cancelRequested"]),
-                lease_expires_at=str(payload["leaseExpiresAt"]),
+                cancel_requested=cancel_requested,
+                lease_expires_at=lease_expires_at,
             )
         except (KeyError, TypeError):
             raise WorkerApiError("ARTOKE heartbeat response is invalid") from None
@@ -152,12 +169,18 @@ class ArtokeApiClient:
             f"/api/motions/worker/jobs/{quote(job_id, safe='')}/uploads"
         )
         try:
+            if not isinstance(payload, dict) or not isinstance(payload.get("uploads"), list):
+                raise TypeError
+            for item in payload["uploads"]:
+                if not isinstance(item, dict) or any(
+                    not isinstance(item.get(key), str) or not item[key]
+                    for key in ("kind", "objectPath", "token", "signedUrl")
+                ):
+                    raise TypeError
             return tuple(
                 UploadTarget(
-                    kind=str(item["kind"]),
-                    object_path=str(item["objectPath"]),
-                    token=str(item["token"]),
-                    signed_url=str(item["signedUrl"]),
+                    kind=item["kind"], object_path=item["objectPath"],
+                    token=item["token"], signed_url=item["signedUrl"],
                 )
                 for item in payload["uploads"]
             )

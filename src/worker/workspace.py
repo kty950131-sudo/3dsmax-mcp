@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import time
-from uuid import UUID
+from uuid import UUID, uuid4
 
 
 def _validated_job_id(value: str) -> str:
@@ -36,8 +36,12 @@ class JobWorkspace:
         safe_id = _validated_job_id(job_id)
         resolved_root = root.resolve()
         resolved_root.mkdir(parents=True, exist_ok=True)
-        path = (resolved_root / safe_id).resolve()
-        if path.parent != resolved_root:
+        job_root = (resolved_root / safe_id).resolve()
+        if job_root.parent != resolved_root or _is_link(job_root):
+            raise ValueError("invalid job id")
+        job_root.mkdir(exist_ok=True)
+        path = (job_root / str(uuid4())).resolve()
+        if path.parent != job_root:
             raise ValueError("invalid job id")
         path.mkdir(exist_ok=False)
         return cls(resolved_root, safe_id, path)
@@ -50,10 +54,12 @@ class JobWorkspace:
 
     def cleanup(self) -> None:
         resolved = self.path.resolve()
-        if resolved.parent != self.root or _is_link(self.path):
+        if resolved.parent.parent != self.root or _is_link(self.path):
             raise RuntimeError("workspace path escaped cache root")
         if self.path.exists():
             shutil.rmtree(self.path)
+        if self.path.parent.exists() and not any(self.path.parent.iterdir()):
+            self.path.parent.rmdir()
 
 
 def cleanup_stale(

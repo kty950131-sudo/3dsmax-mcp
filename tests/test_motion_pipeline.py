@@ -112,3 +112,39 @@ def test_pipeline_terminates_active_extractor(tmp_path: Path) -> None:
 
     assert len(errors) == 1
     assert isinstance(errors[0], PipelineCancelled)
+
+
+def test_cancel_racing_process_publication_terminates_new_process(tmp_path: Path) -> None:
+    video = tmp_path / "walk.mp4"; video.write_bytes(b"video")
+    entered = threading.Event(); release = threading.Event(); terminated = threading.Event()
+    class Process:
+        returncode = -1
+        def communicate(self): return "", "cancelled"
+        def terminate(self): terminated.set()
+    def factory(*_args, **_kwargs):
+        entered.set(); release.wait(1); return Process()
+    pipeline = MotionPipeline(_readiness(tmp_path), process_factory=factory)
+    errors: list[BaseException] = []
+    thread = threading.Thread(target=lambda: _capture_run(pipeline, video, tmp_path / "job", errors))
+    thread.start(); assert entered.wait(1); pipeline.cancel(); release.set(); thread.join(2)
+    assert terminated.is_set()
+    assert isinstance(errors[0], PipelineCancelled)
+
+
+def _capture_run(pipeline, video, workspace, errors):
+    try: pipeline.run(video, workspace, lambda *_: None, lambda: False)
+    except BaseException as exc: errors.append(exc)
+
+
+def test_communicate_failure_terminates_and_waits_before_release(tmp_path: Path) -> None:
+    video = tmp_path / "walk.mp4"; video.write_bytes(b"video")
+    calls: list[str] = []
+    class Process:
+        returncode = -1
+        def communicate(self): raise OSError("pipe failed")
+        def terminate(self): calls.append("terminate")
+        def wait(self): calls.append("wait")
+    pipeline = MotionPipeline(_readiness(tmp_path), process_factory=lambda *_a, **_k: Process())
+    with pytest.raises(OSError):
+        pipeline.run(video, tmp_path / "job", lambda *_: None, lambda: False)
+    assert calls == ["terminate", "wait"]

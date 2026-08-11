@@ -13,11 +13,22 @@ JOB_ID = "00000000-0000-4000-8000-000000000001"
 def test_workspace_stays_below_root_and_cleans_on_exit(tmp_path: Path) -> None:
     root = tmp_path / "cache"
     with JobWorkspace.open(root, JOB_ID) as workspace:
-        assert workspace.path.parent == root.resolve()
+        assert workspace.path.parent.parent == root.resolve()
         (workspace.path / "source.mp4").write_bytes(b"video")
         path = workspace.path
 
     assert not path.exists()
+
+
+def test_reclaimed_job_uses_a_new_attempt_beside_stale_workspace(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    first = JobWorkspace.open(root, JOB_ID)
+    (first.path / "partial").write_text("stale")
+    second = JobWorkspace.open(root, JOB_ID)
+    assert second.path != first.path
+    second.cleanup()
+    assert first.path.exists()
+    first.cleanup()
 
 
 @pytest.mark.parametrize("job_id", ["../escape", "not-a-uuid", "", "a/b"])
