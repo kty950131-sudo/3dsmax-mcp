@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from maxmcp.helpers.bvh import (
@@ -12,6 +14,19 @@ from maxmcp.helpers.bvh import (
     unwrap_angles,
     warp,
 )
+
+
+def test_bvh_maxscript_embedded_python_uses_maxmcp_package() -> None:
+    script = (
+        Path(__file__).resolve().parents[1] / "maxscript" / "bvh_biped_ui.ms"
+    ).read_text(encoding="utf-8")
+
+    assert "import src." not in script
+    assert "from src." not in script
+    assert "import maxmcp.helpers.bvh as _bvh" in script
+    assert "from maxmcp.helpers.bvh import prepare_for_biped" in script
+    assert "import maxmcp.helpers.github_sync as _gs" in script
+
 
 # kimodo-style: static wrapper root above a 6-channel Hips, extra eye joint.
 KIMODO_STYLE = """HIERARCHY

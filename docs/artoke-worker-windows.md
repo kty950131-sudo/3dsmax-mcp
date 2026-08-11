@@ -10,6 +10,10 @@
 
 The worker does not require 3ds Max to be open. It processes one GPU job at a time.
 
+## Installation scope
+
+The active ARTOKE worker and RTMW3D runtime are supported only from a configured repository checkout. Installing the `3dsmax-mcp` wheel alone is not sufficient: it does not include, create, or configure `.venv-rtmw3d`, the `vendor` extractor repositories, or the model/checkpoint files. Run the commands below from the checkout where `scripts/install-rtmw3d.ps1` has configured those external runtime assets.
+
 ## Configure the token
 
 Run this in a normal PowerShell window from the repository root:

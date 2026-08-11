@@ -3,6 +3,10 @@
 BVH Studio의 `영상 추가`는 OpenMMLab RTMW3D-L을 RTX GPU에서 로컬 실행한다.
 영상은 외부 서버로 전송하지 않으며 SMPL-X와 PyTorch3D를 사용하지 않는다.
 
+이 런타임은 설정된 저장소 checkout에서만 지원한다. `3dsmax-mcp` wheel만 설치해서는
+`.venv-rtmw3d`, `vendor` 아래 extractor 저장소, 모델·checkpoint가 포함·설치·구성되지
+않는다. 아래 경로와 `scripts/install-rtmw3d.ps1`을 사용하는 checkout에서 실행한다.
+
 ## 현재 설치 위치
 
 - Python 환경: `C:\work\Ai\3dsmax-mcp\.venv-rtmw3d`

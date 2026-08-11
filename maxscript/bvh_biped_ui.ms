@@ -1,7 +1,7 @@
 -- bvh_biped_ui.ms — BVH → Biped import UI (kimodo/SMPL-X friendly)
 --
 -- Run via Scripting > Run Script (or drop on a toolbar as a macroscript).
--- Conversion reuses src/helpers/bvh.py through Max's embedded Python, so the
+-- Conversion reuses maxmcp/helpers/bvh.py through Max's embedded Python, so the
 -- rewrite rules (strip dummy root, prune extras, rename to Character Studio
 -- vocabulary) live in one place.
 --
@@ -60,9 +60,9 @@ struct BvhBipedUiStruct
 		py += "try:\n"
 		py += "    from pathlib import Path\n"
 		py += "    import importlib\n"
-		py += "    import src.helpers.bvh as _bvh\n"
+		py += "    import maxmcp.helpers.bvh as _bvh\n"
 		py += "    importlib.reload(_bvh)\n"
-		py += "    from src.helpers.bvh import prepare_for_biped, has_upright_spine, DEFAULT_BIPED_PRUNE\n"
+		py += "    from maxmcp.helpers.bvh import prepare_for_biped, has_upright_spine, DEFAULT_BIPED_PRUNE\n"
 		py += "    src = Path(r'" + src + "')\n"
 		py += "    text = src.read_text(encoding='utf-8')\n"
 		py += "    out = src.with_name(src.stem + '_biped.bvh')\n"
@@ -79,7 +79,7 @@ struct BvhBipedUiStruct
 	),
 
 	-- Pull new/changed .bvh clips from the artoke GitHub repo into folder
-	-- (src/helpers/github_sync.py via gh CLI). Returns a status string.
+	-- (maxmcp/helpers/github_sync.py via gh CLI). Returns a status string.
 	fn syncFromGithub folder =
 	(
 		bvhUiSyncOut = ""
@@ -91,7 +91,7 @@ struct BvhBipedUiStruct
 		py += "sys.path.insert(0, r'" + repo + "')\n"
 		py += "try:\n"
 		py += "    import importlib\n"
-		py += "    import src.helpers.github_sync as _gs\n"
+		py += "    import maxmcp.helpers.github_sync as _gs\n"
 		py += "    importlib.reload(_gs)\n"
 		py += "    res = _gs.sync_motions(r'" + dst + "')\n"
 		py += "    rt.bvhUiSyncOut = ', '.join(res['downloaded'])\n"
