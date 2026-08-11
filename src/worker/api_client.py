@@ -164,10 +164,19 @@ class ArtokeApiClient:
         except (KeyError, TypeError):
             raise WorkerApiError("ARTOKE upload response is invalid") from None
 
-    def publish(self, job_id: str, artifacts: list[dict[str, object]]) -> None:
+    def publish(
+        self,
+        job_id: str,
+        artifacts: list[dict[str, object]],
+        edit_revision: int = 0,
+    ) -> None:
         self._post(
             "/api/motions/worker/artifacts",
-            {"jobId": job_id, "artifacts": artifacts},
+            {
+                "jobId": job_id,
+                "editRevision": edit_revision,
+                "artifacts": artifacts,
+            },
         )
 
     def finish_failed(self, job_id: str, error_code: str) -> None:

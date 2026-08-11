@@ -163,12 +163,16 @@ def test_client_authorizes_uploads_and_publishes_manifest() -> None:
         "sha256": "a" * 64,
         "formatVersion": "1",
     }]
-    client.publish("job-1", manifest)
+    client.publish("job-1", manifest, edit_revision=3)
 
     assert uploads[0].token == "signed"
     assert uploads[0].signed_url == "https://storage.test/upload?token=signed"
     assert requests[1][0].endswith("/api/motions/worker/artifacts")
-    assert requests[1][1] == {"jobId": "job-1", "artifacts": manifest}
+    assert requests[1][1] == {
+        "jobId": "job-1",
+        "editRevision": 3,
+        "artifacts": manifest,
+    }
 
 
 def test_error_never_contains_token_or_signed_query() -> None:

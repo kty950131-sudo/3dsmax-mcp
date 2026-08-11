@@ -52,8 +52,8 @@ class Api:
             ]
         )
 
-    def publish(self, job, manifest):
-        self.published = (job, manifest)
+    def publish(self, job, manifest, edit_revision=0):
+        self.published = (job, manifest, edit_revision)
 
     def finish_failed(self, job, code):
         self.failed = (job, code)
@@ -210,6 +210,7 @@ def test_correction_rebuild_skips_inference_and_publishes_exact_revision(tmp_pat
     ]
     assert built_revision == 3
     assert len(uploads) == 4
+    assert api.published and api.published[2] == 3
 
 
 def test_server_cancellation_terminates_pipeline(tmp_path: Path) -> None:
