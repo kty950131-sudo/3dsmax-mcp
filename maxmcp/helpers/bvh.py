@@ -21,7 +21,7 @@ the ``*_tpose`` export.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Sequence
 
 _STATIC_EPS = 1e-4
 
@@ -383,6 +383,78 @@ def retime(bvh: BvhFile, speed: float) -> BvhFile:
     )
 
 
+def unwrap_angles(values: list[float]) -> list[float]:
+    """오일러 각 수열을 연속으로 편다.
+
+    ±180° 경계를 넘는 지점에서 360° 를 더하거나 빼, 인접 프레임 차이가
+    항상 최단 경로가 되게 한다. 보간 전에 반드시 거쳐야 한다.
+    """
+    if not values:
+        return []
+    out = [values[0]]
+    offset = 0.0
+    for prev, cur in zip(values, values[1:]):
+        delta = cur - prev
+        if delta > 180.0:
+            offset -= 360.0
+        elif delta < -180.0:
+            offset += 360.0
+        out.append(cur + offset)
+    return out
+
+
+def _flat_channels(root: BvhJoint) -> list[str]:
+    """모션 행의 컬럼 순서대로 채널 이름을 나열한다 (_column_map 과 같은 순회)."""
+    names: list[str] = []
+
+    def visit(joint: BvhJoint) -> None:
+        names.extend(joint.channels)
+        for child in joint.children:
+            visit(child)
+
+    visit(root)
+    return names
+
+
+def warp(bvh: BvhFile, time_map: Sequence[float]) -> BvhFile:
+    """time_map[i] = 출력 프레임 i 가 가져올 원본 프레임 위치(소수 허용).
+
+    ``retime`` 은 frame_time 만 바꾸므로 균일 속도만 표현할 수 있다. 구간별로
+    다른 속도(타임워프)는 이 함수로 프레임을 재샘플해야 한다. frame_time 은
+    유지되고 프레임 수만 달라진다.
+
+    회전 채널은 언랩 후 보간하므로 출력값이 ±180° 를 벗어날 수 있다. 이는
+    의도된 동작이다 — 연속적인 각도 수열이 소비자 입장에서 더 안전하다.
+    """
+    if not time_map:
+        raise ValueError("time_map must not be empty")
+    if not bvh.frames:
+        raise ValueError("bvh has no frames")
+    for prev, cur in zip(time_map, time_map[1:]):
+        if cur < prev:
+            raise ValueError(f"time_map must be non-decreasing: {prev} -> {cur}")
+
+    n = len(bvh.frames)
+    if len(time_map) == n and all(t == i for i, t in enumerate(time_map)):
+        return bvh  # 항등 사상 — 원본을 손대지 않는다
+
+    channels = _flat_channels(bvh.root)
+    columns = [list(col) for col in zip(*bvh.frames)]
+    prepared = [
+        unwrap_angles(col) if name.lower().endswith("rotation") else col
+        for name, col in zip(channels, columns)
+    ]
+
+    frames: list[list[float]] = []
+    for t in time_map:
+        clamped = min(max(t, 0.0), float(n - 1))
+        lo = int(clamped)
+        hi = min(lo + 1, n - 1)
+        frac = clamped - lo
+        frames.append([col[lo] + (col[hi] - col[lo]) * frac for col in prepared])
+    return BvhFile(root=bvh.root, frame_time=bvh.frame_time, frames=frames)
+
+
 def trim(bvh: BvhFile, start_frac: float, end_frac: float) -> BvhFile:
     """Keep only the [start_frac, end_frac] slice of the clip (Mixamo Trim)."""
     if (start_frac, end_frac) == (0.0, 1.0):
@@ -403,13 +475,21 @@ def prepare_for_biped(
     offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
     speed: float = 1.0,
     trim_range: tuple[float, float] = (0.0, 1.0),
+    time_map: Optional[Sequence[float]] = None,
 ) -> str:
-    """Rewrite BVH text so 3ds Max biped.loadMocapFile accepts it."""
+    """Rewrite BVH text so 3ds Max biped.loadMocapFile accepts it.
+
+    ``time_map`` 을 주면 균일 ``speed`` 대신 비균일 타임워프를 적용한다.
+    인덱스는 트림된 뒤 클립 기준이다. 주지 않으면 기존 경로 그대로다.
+    """
     bvh = parse_bvh(text)
     bvh = strip_static_root(bvh)
     bvh = prune_joints(bvh, prune)
     bvh = rename_for_biped(bvh)
     bvh = offset_root(bvh, offset)
     bvh = trim(bvh, trim_range[0], trim_range[1])
-    bvh = retime(bvh, speed)
+    if time_map is None:
+        bvh = retime(bvh, speed)
+    else:
+        bvh = warp(bvh, time_map)
     return serialize_bvh(bvh)

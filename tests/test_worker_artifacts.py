@@ -1,0 +1,125 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from maxmcp.worker.artifacts import build_artifacts, download_source, upload_signed_artifact
+from maxmcp.worker.motion_pipeline import PipelineArtifacts
+
+
+class DownloadResponse:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, size: int = -1) -> bytes:
+        if not self.body:
+            return b""
+        if size < 0:
+            data, self.body = self.body, b""
+        else:
+            data, self.body = self.body[:size], self.body[size:]
+        return data
+
+
+def test_download_rejects_a_source_hash_mismatch(tmp_path: Path) -> None:
+    target = tmp_path / "source.mp4"
+    with pytest.raises(ValueError, match="SHA-256"):
+        download_source(
+            "https://signed.test/source?token=secret",
+            target,
+            expected_sha256="0" * 64,
+            opener=lambda *_args, **_kwargs: DownloadResponse(b"video"),
+        )
+    assert not target.exists()
+
+
+def test_download_rejects_oversized_or_non_https_sources(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="HTTPS"):
+        download_source("file:///secret", tmp_path / "source.mp4")
+    with pytest.raises(ValueError, match="too large"):
+        download_source(
+            "https://signed.test/source",
+            tmp_path / "source.mp4",
+            max_bytes=4,
+            opener=lambda *_args, **_kwargs: DownloadResponse(b"video"),
+        )
+
+
+def test_build_artifacts_creates_four_fixed_outputs(tmp_path: Path) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    body = tmp_path / "walk_rtmw3d.json"
+    body.write_text('{"schema":"artoke.rtmw3d.v1"}', encoding="utf-8")
+    bvh = tmp_path / "walk.bvh"
+    bvh.write_text(
+        "HIERARCHY\nROOT Pelvis\nMOTION\nFrames: 12\nFrame Time: 0.0333333333\n",
+        encoding="utf-8",
+    )
+    trace = tmp_path / "trace.json"
+    trace.write_text('{"backend":"OpenMMLab RTMW3D-L"}', encoding="utf-8")
+
+    def ffmpeg(command, **kwargs):
+        assert "-ss" in command
+        Path(command[-1]).write_bytes(b"webp")
+        return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+    artifacts = build_artifacts(
+        video,
+        PipelineArtifacts(body, bvh, trace, 12),
+        tmp_path / "result",
+        duration_seconds=4.0,
+        edit_revision=3,
+        process_runner=ffmpeg,
+    )
+
+    assert [(item.kind, item.path.name) for item in artifacts] == [
+        ("bvh", "motion.bvh"),
+        ("rtmw3d_json", "motion.rtmw3d.json"),
+        ("thumbnail", "thumbnail.webp"),
+        ("metadata", "metadata.json"),
+    ]
+    assert all(item.size_bytes > 0 and len(item.sha256) == 64 for item in artifacts)
+    metadata = json.loads((tmp_path / "result" / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["fps"] == 30
+    assert metadata["frame_count"] == 12
+    assert metadata["duration_seconds"] == 4.0
+    assert metadata["editRevision"] == 3
+    assert metadata["sha256"]["source"]
+    assert metadata["warnings"] == []
+
+
+def test_signed_upload_streams_file_with_put(tmp_path: Path) -> None:
+    artifact = tmp_path / "motion.bvh"
+    artifact.write_bytes(b"bvh-data")
+    requests = []
+
+    def opener(request, timeout):
+        requests.append((request, timeout, b"".join(request.data)))
+        return DownloadResponse(b"{}")
+
+    upload_signed_artifact(
+        "https://storage.test/upload?token=secret",
+        artifact,
+        "application/octet-stream",
+        opener=opener,
+    )
+
+    request, timeout, body = requests[0]
+    assert request.method == "PUT"
+    assert request.headers["Content-type"] == "application/octet-stream"
+    assert request.headers["Content-length"] == str(len(body))
+    assert body == b"bvh-data"
+    assert timeout == 120
+
+
+def test_signed_upload_rejects_non_https_url(tmp_path: Path) -> None:
+    artifact = tmp_path / "motion.bvh"
+    artifact.write_bytes(b"bvh")
+    with pytest.raises(ValueError, match="HTTPS"):
+        upload_signed_artifact("file:///tmp/result", artifact, "application/octet-stream")

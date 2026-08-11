@@ -9,6 +9,8 @@ from maxmcp.helpers.bvh import (
     rename_for_biped,
     serialize_bvh,
     strip_static_root,
+    unwrap_angles,
+    warp,
 )
 
 # kimodo-style: static wrapper root above a 6-channel Hips, extra eye joint.
@@ -43,6 +45,50 @@ Frames: 2
 Frame Time: 0.03333333
 0.0 0.0 0.0 0.0 -0.0 0.0 1.0 99.0 2.0 89.0 -4.9 90.2 1.0 2.0 3.0 0.5 0.5 0.5 0.1 0.2 0.3
 0.0 0.0 0.0 0.0 -0.0 0.0 1.1 99.1 2.1 89.1 -4.8 90.3 1.1 2.1 3.1 0.6 0.6 0.6 0.2 0.3 0.4
+"""
+
+# Fixture for rotation channel crossing: Zrotation goes 179 -> -179 between frames.
+# Used to test unwrap + interpolation integration in warp().
+ROTATION_CROSSING = """HIERARCHY
+ROOT Hips
+{
+  OFFSET 0.0 0.0 0.0
+  CHANNELS 3 Xposition Yposition Zrotation
+}
+MOTION
+Frames: 2
+Frame Time: 0.03333333
+0.0 0.0 179.0
+0.0 0.0 -179.0
+"""
+
+# Golden output from pre-Task-2 code (commit a012cbb) with prepare_for_biped(KIMODO_STYLE, prune=("LeftEye",), speed=2.0)
+# This proves backward compatibility for existing MAXScript caller.
+PREPARE_GOLDEN_SPEED2 = """HIERARCHY
+ROOT Hips
+{
+  OFFSET 0.000000 100.000000 0.000000
+  CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+  JOINT Head
+  {
+    OFFSET 0.000000 20.000000 0.000000
+    CHANNELS 3 Zrotation Yrotation Xrotation
+    JOINT HeadEnd
+    {
+      OFFSET 0.000000 10.000000 0.000000
+      CHANNELS 3 Zrotation Yrotation Xrotation
+      End Site
+      {
+        OFFSET 0.000000 0.000000 0.000000
+      }
+    }
+  }
+}
+MOTION
+Frames: 2
+Frame Time: 0.01666667
+1.000000 99.000000 2.000000 89.000000 -4.900000 90.200000 1.000000 2.000000 3.000000 0.100000 0.200000 0.300000
+1.100000 99.100000 2.100000 89.100000 -4.800000 90.300000 1.100000 2.100000 3.100000 0.200000 0.300000 0.400000
 """
 
 
@@ -198,3 +244,106 @@ def test_has_upright_spine() -> None:
         "OFFSET 0.0 20.0 0.0", "OFFSET 20.0 0.5 0.0"
     )
     assert not has_upright_spine(x_major)
+
+
+def test_unwrap_angles_crosses_180() -> None:
+    # 179 -> -179 는 -358 도 이동이 아니라 +2 도 이동이다
+    assert unwrap_angles([179.0, -179.0]) == pytest.approx([179.0, 181.0])
+
+
+def test_unwrap_angles_passes_through_smooth_run() -> None:
+    assert unwrap_angles([0.0, 10.0, 20.0]) == pytest.approx([0.0, 10.0, 20.0])
+
+
+def test_unwrap_angles_empty() -> None:
+    assert unwrap_angles([]) == []
+
+
+def test_warp_identity_returns_original_frames() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    out = warp(bvh, [0.0, 1.0])
+    assert out.frames == bvh.frames
+    assert out.frame_time == bvh.frame_time
+
+
+def test_warp_halves_frame_count() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    out = warp(bvh, [0.0])
+    assert len(out.frames) == 1
+    assert out.frames[0] == bvh.frames[0]
+
+
+def test_warp_interpolates_midpoint() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    out = warp(bvh, [0.0, 0.5, 1.0])
+    assert len(out.frames) == 3
+    # 6번 컬럼(Hips Xposition)은 1.0 -> 1.1 이므로 중간은 1.05
+    assert out.frames[1][6] == pytest.approx(1.05)
+
+
+def test_warp_rejects_decreasing_time_map() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    with pytest.raises(ValueError, match="non-decreasing"):
+        warp(bvh, [1.0, 0.0])
+
+
+def test_warp_rejects_empty_time_map() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    with pytest.raises(ValueError, match="empty"):
+        warp(bvh, [])
+
+
+def test_warp_clamps_out_of_range() -> None:
+    bvh = parse_bvh(KIMODO_STYLE)
+    out = warp(bvh, [-5.0, 99.0])
+    assert out.frames[0] == bvh.frames[0]
+    assert out.frames[1] == bvh.frames[-1]
+
+
+def test_unwrap_angles_multi_wrap_same_direction() -> None:
+    # Verify accumulated offset exceeds 360° with repeated wraps in same direction.
+    # Raw deltas: +170 (no wrap), -190 (wrap, offset +=360), +170 (no wrap),
+    # -190 (wrap, offset +=360). Accumulated offset reaches 720 by the end.
+    # Input: [0, 170, -20, 150, -40]
+    # Expected: [0, 170, 340, 510, 680] (each value offset by accumulated 360k)
+    assert unwrap_angles([0.0, 170.0, -20.0, 150.0, -40.0]) == pytest.approx(
+        [0.0, 170.0, 340.0, 510.0, 680.0]
+    )
+
+
+def test_warp_interpolates_rotation_crossing_180() -> None:
+    # Rotation channel crossing ±180° must unwrap before interpolation.
+    # Zrotation goes 179 -> -179 (short path is +2°, not -358°).
+    # Midpoint of unwrapped [179, 181] at t=0.5 is 180° (continuous).
+    bvh = parse_bvh(ROTATION_CROSSING)
+    out = warp(bvh, [0.0, 0.5, 1.0])
+    assert len(out.frames) == 3
+    # Column 2 is Zrotation; at t=0.5 it should interpolate the unwrapped
+    # value (179 + 181) / 2 = 180, NOT the raw (179 + (-179)) / 2 = 0.
+    assert out.frames[1][2] == pytest.approx(180.0)
+
+
+def test_prepare_golden_backward_compat() -> None:
+    # 회귀 방어: 기존 호출자(bvh_biped_ui.ms)의 출력이 프리-Task2 코드의 바이트와 정확히 일치해야 한다.
+    out = prepare_for_biped(KIMODO_STYLE, prune=("LeftEye",), speed=2.0)
+    assert out == PREPARE_GOLDEN_SPEED2
+
+
+def test_prepare_without_time_map_is_deterministic() -> None:
+    # time_map=None 일 때 결정적(deterministic)이어야 한다.
+    baseline = prepare_for_biped(KIMODO_STYLE, prune=("LeftEye",), speed=2.0)
+    with_none = prepare_for_biped(
+        KIMODO_STYLE, prune=("LeftEye",), speed=2.0, time_map=None
+    )
+    assert with_none == baseline
+
+
+def test_prepare_with_time_map_resamples() -> None:
+    out = prepare_for_biped(KIMODO_STYLE, time_map=[0.0, 0.5, 1.0])
+    assert "Frames: 3" in out
+
+
+def test_prepare_time_map_ignores_speed() -> None:
+    # time_map 이 있으면 speed 는 적용되지 않는다 (frame_time 유지)
+    out = prepare_for_biped(KIMODO_STYLE, speed=4.0, time_map=[0.0, 1.0])
+    assert "Frame Time: 0.03333333" in out

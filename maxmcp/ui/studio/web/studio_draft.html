@@ -1,0 +1,969 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BVH Studio — 구조 목업 (디자인 전)</title>
+<style>
+/* ------------------------------------------------------------------
+   이 스타일시트는 자리표시자다. 피그마 디자인이 확정되면 통째로 교체한다.
+   일부러 중립적으로 뒀다 — 배치와 상태만 보이면 된다.
+   app.js 가 찾는 선택자(.clip-card, [data-action] 등)는 유지해야 한다.
+   ------------------------------------------------------------------ */
+:root {
+  --bg: #1e1e20;
+  --panel: #26262a;
+  --line: #37373d;
+  --text: #e4e4e8;
+  --dim: #8e8e98;
+  --accent: #f08c3c;
+  --pose: #48a9c5;
+  --gap: 12px;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto auto;
+  gap: var(--gap);
+  padding: var(--gap);
+}
+
+/* 상단 바 */
+.topbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.topbar input[type="text"] { flex: 0 1 auto; }
+
+input[type="text"], input[type="number"], select {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 5px 8px;
+  border-radius: 4px;
+  font: inherit;
+}
+input[data-field="folder"] { flex: 1 1 320px; min-width: 200px; }
+input[data-field="search"] { flex: 0 1 180px; }
+
+button {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 5px 12px;
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+button:hover { border-color: var(--dim); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #1a1a1a; font-weight: 600; }
+button.video-add { min-height: 44px; border-radius: 2px; }
+
+.video-job-card {
+  display: none; align-items: center; gap: 10px; padding: 8px 10px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 2px;
+}
+.video-job-card.is-visible { display: flex; }
+.video-job-copy { flex: 1; min-width: 180px; }
+.video-job-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.video-progress { height: 4px; margin-top: 5px; background: #161619; border-radius: 2px; overflow: hidden; }
+.video-progress > span { display: block; width: 0; height: 100%; background: var(--pose); transition: width .2s ease; }
+.video-job-state { color: var(--pose); font-size: 11px; }
+
+label.check { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+
+/* 본문 2단 */
+.body { display: grid; grid-template-columns: 1fr 420px; gap: var(--gap); min-height: 0; }
+
+/* 클립 그리드 */
+.clip-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 10px;
+  overflow-y: auto;
+  align-content: start;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.clip-card {
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 6px;
+  cursor: pointer;
+  background: #2c2c31;
+}
+.clip-card:hover { border-color: var(--dim); }
+.clip-card.is-selected { border-color: var(--accent); }
+.clip-card canvas { width: 100%; aspect-ratio: 1; display: block; border-radius: 3px; background: #232326; }
+.clip-card .name { margin-top: 5px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-card .tags { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-card.is-broken { opacity: .45; cursor: not-allowed; }
+.clip-card.is-broken .name::after { content: " ⚠"; }
+
+/* 하이브리드 썸네일: Max 배치가 찍은 PNG 가 있는 카드와 계산 썸네일 카드가 섞인다.
+   디자인할 때 두 상태가 다 존재한다는 걸 염두에 둘 것. */
+.clip-card { position: relative; }
+.clip-card.is-rendered .thumb-badge {
+  position: absolute; top: 10px; right: 10px;
+  background: rgba(0,0,0,.6); color: var(--accent);
+  font-size: 10px; padding: 1px 5px; border-radius: 3px;
+}
+.clip-card .thumb-badge { display: none; }
+.clip-card.is-rendered .thumb-badge { display: block; }
+
+/* 우측 패널 */
+.side { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+.card h2 { margin: 0 0 8px; font-size: 12px; color: var(--dim); font-weight: 600; letter-spacing: .04em; }
+.row { display: flex; gap: 6px; align-items: center; margin-bottom: 7px; }
+.row > label:first-child { flex: 0 0 68px; color: var(--dim); }
+.row > input, .row > select { flex: 1 1 auto; min-width: 0; }
+
+/* 뷰포트는 남는 세로 공간을 전부 먹는다. 아래 카드들은 고정 높이라 안 밀린다. */
+.card.preview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 240px; }
+.preview canvas { width: 100%; flex: 1 1 auto; min-height: 0; display: block; border-radius: 4px; background: #232326; }
+.preview-bar { display: flex; gap: 6px; margin-top: 7px; }
+.preview-bar button { flex: 1; padding: 4px; font-size: 12px; }
+
+/* 타임라인 */
+.timeline {
+  position: relative; height: 40px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; touch-action: none; user-select: none;
+}
+.timeline .track { position: absolute; inset: 12px 0; }
+.timeline .kept { position: absolute; top: 0; bottom: 0; background: rgba(240,140,60,.22); border-left: 1px solid var(--accent); border-right: 1px solid var(--accent); }
+.trim-handle { position: absolute; top: 0; bottom: 0; width: 11px; margin-left: -5px; cursor: ew-resize; }
+.trim-handle::after { content: ""; position: absolute; left: 4px; top: -6px; bottom: -6px; width: 3px; background: var(--accent); border-radius: 2px; }
+.timeline .ticks { position: absolute; left: 0; right: 0; bottom: 1px; height: 10px; color: var(--dim); font-size: 10px; }
+.timeline .ticks span { position: absolute; transform: translateX(-50%); }
+
+/* 곡선 */
+.curves { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+.curve { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.curve h2 { margin: 0 0 6px; font-size: 12px; color: var(--dim); font-weight: 600; display: flex; justify-content: space-between; }
+.curve h2 .hint { font-weight: 400; }
+.curve canvas { width: 100%; height: 118px; display: block; touch-action: none; cursor: crosshair; }
+
+.status { color: var(--dim); font-size: 12px; min-height: 18px; padding: 0 2px; }
+.status.is-error { color: #e2765e; }
+.status.is-ok { color: #7fc98a; }
+
+.mock-note {
+  position: fixed; right: 10px; bottom: 8px; font-size: 11px; color: var(--dim);
+  background: rgba(0,0,0,.5); padding: 3px 8px; border-radius: 4px; pointer-events: none;
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <input type="text" data-field="folder" value="C:\work\Ai\bvh-library" spellcheck="false">
+  <button data-action="refresh">새로고침</button>
+  <button data-action="sync">Artoke에서 가져오기</button>
+  <button class="video-add" data-action="add-video">영상 추가</button>
+  <input type="text" data-field="search" placeholder="검색 / 태그">
+</div>
+
+<div class="video-job-card" aria-live="polite">
+  <div class="video-job-copy">
+    <div class="video-job-label">영상 변환 대기</div>
+    <div class="video-progress" aria-hidden="true"><span></span></div>
+  </div>
+  <span class="video-job-state"></span>
+  <button data-action="cancel-video">취소</button>
+</div>
+
+<div class="body">
+  <div class="clip-grid"></div>
+
+  <div class="side">
+    <div class="card preview">
+      <h2>프리뷰</h2>
+      <canvas></canvas>
+      <div class="preview-bar">
+        <button data-action="azimuth" data-deg="0">정면</button>
+        <button data-action="azimuth" data-deg="45">45°</button>
+        <button data-action="azimuth" data-deg="90">측면</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>임포트</h2>
+      <div class="row"><label>이름</label><input type="text" data-field="name" value=""></div>
+      <div class="row"><label>배치 간격</label><input type="number" data-field="spacing" value="120" min="0" max="2000" step="10"></div>
+      <div class="row">
+        <label class="check"><input type="checkbox" data-field="convert" checked> kimodo 변환</label>
+        <label class="check"><input type="checkbox" data-field="mirror"> 미러</label>
+      </div>
+      <button class="primary" data-action="import" style="width:100%">바이패드 생성 + 임포트</button>
+    </div>
+
+    <div class="card">
+      <h2>임포트 후</h2>
+      <div class="row"><label>바이패드</label><select data-field="biped"></select></div>
+      <button data-action="mixer" style="width:100%">Motion Mixer로 보내기</button>
+    </div>
+  </div>
+</div>
+
+<div class="timeline">
+  <div class="track">
+    <div class="kept"></div>
+    <div class="trim-handle" data-side="start"></div>
+    <div class="trim-handle" data-side="end"></div>
+  </div>
+  <div class="ticks"></div>
+</div>
+
+<div class="curves">
+  <div class="curve" data-kind="speed">
+    <h2>속도 곡선 <span class="hint">클릭=추가 · 우클릭=삭제 · 드래그=이동</span></h2>
+    <canvas></canvas>
+  </div>
+  <div class="curve" data-kind="armspace">
+    <h2>팔 간격 곡선 <span class="hint">0–45° · 클릭=추가 · 우클릭=삭제</span></h2>
+    <canvas></canvas>
+  </div>
+</div>
+
+<div class="status">클립을 고르세요.</div>
+<div class="mock-note">구조 목업 · 더미 데이터 · 디자인 전</div>
+
+<script>
+/* ==================================================================
+   BVH Studio 구조 목업
+
+   실제 툴에서는 아래 dummy* 함수 자리에 QWebChannel 의 `bridge` 가 들어간다.
+   bridge 가 있으면 그걸 쓰고, 없으면 더미로 도는 구조 — 계획서 Task 10 Step 4
+   의 "브라우저에서 먼저 확인한다" 를 그대로 따른 것이다.
+
+   포즈 데이터 모양은 파이썬 build_pose_data() 의 반환값과 같다:
+     { bones: [[parent, child], ...],
+       poses: [ {joint: [x,y,z], ...}, ... ],
+       frames: int, frame_time: float }
+   ================================================================== */
+
+/* Max 안에서는 QWebChannel 로 파이썬 브리지가 붙는다. 밖(브라우저)에서는
+   더미 데이터로 돈다 — 디자인 반복을 Max 재시작 없이 돌리기 위한 것이다. */
+const BRIDGE = { obj: null };
+
+function bcall(method, arg, cb) {
+  /* 브리지 슬롯은 항상 {ok, data|error} JSON 문자열을 돌려준다 */
+  const done = (raw) => {
+    let res;
+    try { res = JSON.parse(raw); } catch (e) { res = { ok: false, error: "응답 파싱 실패: " + raw }; }
+    cb(res);
+  };
+  if (arg === null) BRIDGE.obj[method](done);
+  else BRIDGE.obj[method](arg, done);
+}
+
+function connectBridge() {
+  if (typeof QWebChannel === "undefined" || !(window.qt && qt.webChannelTransport)) return false;
+  new QWebChannel(qt.webChannelTransport, (channel) => {
+    BRIDGE.obj = channel.objects.bridge;
+    if (!BRIDGE.obj) { setStatus("bridge 객체가 등록되지 않았습니다", "error"); return; }
+    loadClipsFromBridge();
+  });
+  return true;
+}
+
+/* ---------- 더미 클립 목록 ---------- */
+const DUMMY_CLIPS = [
+  { stem: "artoke_walk-forward",   tags: ["artoke", "walk-forward"], kind: "walk",   rendered: true },
+  { stem: "artoke_run-fast",       tags: ["artoke", "run-fast"],     kind: "run",    rendered: true },
+  { stem: "artoke_idle-breath",    tags: ["artoke", "idle-breath"],  kind: "idle"  },
+  { stem: "attack-combo_00",       tags: ["attack-combo"],           kind: "kick"  },
+  { stem: "spin-kick",             tags: ["spin-kick"],              kind: "kick"  },
+  { stem: "jump-land",             tags: ["jump-land"],              kind: "jump"  },
+  { stem: "crouch-move",           tags: ["crouch-move"],            kind: "crouch"},
+  { stem: "wave-hello",            tags: ["wave-hello"],             kind: "wave"  },
+  { stem: "broken-export_03",      tags: ["broken-export"],          kind: null    },
+  { stem: "turn-left-90",          tags: ["turn-left-90"],           kind: "walk"  },
+  { stem: "sit-down",              tags: ["sit-down"],               kind: "sit"   },
+  { stem: "artoke_sprint-stop",    tags: ["artoke", "sprint-stop"],  kind: "run"   },
+];
+
+/* ---------- 더미 골격 ---------- */
+const BONES = [
+  ["Hips","Chest"],["Chest","Neck"],["Neck","Head"],
+  ["Chest","LeftUpArm"],["LeftUpArm","LeftLowArm"],["LeftLowArm","LeftHand"],
+  ["Chest","RightUpArm"],["RightUpArm","RightLowArm"],["RightLowArm","RightHand"],
+  ["Hips","LeftUpLeg"],["LeftUpLeg","LeftLowLeg"],["LeftLowLeg","LeftFoot"],
+  ["Hips","RightUpLeg"],["RightUpLeg","RightLowLeg"],["RightLowLeg","RightFoot"],
+];
+
+/* 동작별 성격. 실제 툴은 BVH 좌표를 쓰므로 이 표는 목업 전용이다 —
+   카드가 전부 똑같아 보이면 그리드 디자인을 판단할 수 없어서 넣었다. */
+const KINDS = {
+  idle:   { amp: 0.12, crouch:  0, lift: 0, armUp: 0.0, splay: 0.0 },
+  walk:   { amp: 0.55, crouch:  0, lift: 0, armUp: 0.0, splay: 0.0 },
+  run:    { amp: 1.00, crouch:  6, lift: 0, armUp: 0.0, splay: 0.0 },
+  kick:   { amp: 1.20, crouch:  0, lift: 0, armUp: 0.0, splay: 0.9 },
+  jump:   { amp: 0.80, crouch: -8, lift: 26, armUp: 0.8, splay: 0.3 },
+  crouch: { amp: 0.40, crouch: 34, lift: 0, armUp: 0.0, splay: 0.2 },
+  wave:   { amp: 0.20, crouch:  0, lift: 0, armUp: 1.0, splay: 0.0 },
+  sit:    { amp: 0.10, crouch: 46, lift: 0, armUp: 0.0, splay: 0.5 },
+};
+
+function dummyPose(phase, kind) {
+  const TAU = Math.PI * 2;
+  const k = KINDS[kind] || KINDS.walk;
+  const amp = k.amp;
+  const s = Math.sin(phase * TAU), c = Math.cos(phase * TAU);
+  const bob = Math.abs(Math.sin(phase * TAU)) * 3 * amp;
+  const hipY = 92 - bob - k.crouch + k.lift * Math.max(0, s);
+
+  const legSwing = s * 32 * amp * (1 + k.splay), legSwing2 = -s * 32 * amp;
+  const armSwing = -s * 26 * amp, armSwing2 = s * 26 * amp;
+  const knee = Math.max(0, c) * 18 * amp + k.crouch * 0.6;
+
+  const p = {};
+  p.Hips  = [0, hipY, 0];
+  p.Chest = [0, hipY + 26, 0];
+  p.Neck  = [0, hipY + 44, 0];
+  p.Head  = [0, hipY + 56, 0];
+
+  const wave = k.armUp * (30 + 14 * s);
+  p.LeftUpArm   = [-15, hipY + 41, 0];
+  p.LeftLowArm  = [-19 - k.armUp * 4, hipY + 20 + wave, armSwing * 0.5];
+  p.LeftHand    = [-21 - k.armUp * 8, hipY + 2 + wave * 2, armSwing];
+  p.RightUpArm  = [ 15, hipY + 41, 0];
+  p.RightLowArm = [ 19, hipY + 20, armSwing2 * 0.5];
+  p.RightHand   = [ 21, hipY + 2,  armSwing2];
+
+  p.LeftUpLeg   = [-8, hipY, 0];
+  p.LeftLowLeg  = [-9, hipY - 42 + knee * 0.3, legSwing * 0.6];
+  p.LeftFoot    = [-9, hipY - 84 + knee,       legSwing];
+  p.RightUpLeg  = [ 8, hipY, 0];
+  p.RightLowLeg = [ 9, hipY - 42, legSwing2 * 0.6];
+  p.RightFoot   = [ 9, hipY - 84, legSwing2];
+  return p;
+}
+
+/* 재생 프레임은 균등 간격이어야 원본 타이밍이 보존된다. 포즈 차이가 큰 순으로
+   고르면 정지 한 장으로는 좋지만 이어 붙이면 멈췄다 순간이동하는 것처럼 보인다. */
+const PLAYBACK_FRAMES = 24;
+
+/* 정지 상태에서 보여줄 대표 프레임: 평균 포즈에서 가장 먼 것.
+   0번은 대개 준비 자세라 무슨 동작인지 설명하지 못한다. (파이썬 poster_index 와 같은 규칙) */
+function posterIndex(poses) {
+  const vecs = poses.map((p) => {
+    const root = p.Hips;
+    return Object.keys(p).sort().flatMap((n) => [0, 1, 2].map((a) => p[n][a] - root[a]));
+  });
+  if (!vecs.length) return 0;
+  const mean = vecs[0].map((_, i) => vecs.reduce((s, v) => s + v[i], 0) / vecs.length);
+  const dist = (v) => v.reduce((s, x, i) => s + (x - mean[i]) ** 2, 0);
+  let best = 0;
+  vecs.forEach((v, i) => { if (dist(v) > dist(vecs[best])) best = i; });
+  return best;
+}
+
+function dummyPoseData(kind) {
+  if (!kind) return null;                       // 파싱 실패 클립
+  const poses = [];
+  for (let i = 0; i < PLAYBACK_FRAMES; i++) poses.push(dummyPose(i / PLAYBACK_FRAMES, kind));
+  return { bones: BONES, poses, poster: posterIndex(poses), frames: 60, frame_time: 1 / 30 };
+}
+
+/* ---------- 그리기 ---------- */
+function project(pos, azimuthDeg) {
+  const r = azimuthDeg * Math.PI / 180;
+  return [pos[0] * Math.cos(r) + pos[2] * Math.sin(r), pos[1]];
+}
+
+function fitCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width * dpr));
+  const h = Math.max(1, Math.round(rect.height * dpr));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w: rect.width, h: rect.height };
+}
+
+/* 클립 전체 프레임을 덮는 투영 바운딩박스. 방위각마다 한 번만 계산해 캐시한다. */
+function clipBounds(data, azimuth) {
+  data._bounds = data._bounds || {};
+  if (data._bounds[azimuth]) return data._bounds[azimuth];
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const pose of data.poses) {
+    for (const name in pose) {
+      const [x, y] = project(pose[name], azimuth);
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+  }
+  return (data._bounds[azimuth] = { minX, maxX, minY, maxY });
+}
+
+function drawPose(canvas, data, index, azimuth) {
+  const { ctx, w, h } = fitCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  if (!data) {
+    ctx.fillStyle = "#5a5a62";
+    ctx.font = "12px system-ui";
+    ctx.textAlign = "center";
+    /* undefined = 브리지 응답 대기(로딩), null = 파싱 실패 */
+    ctx.fillText(data === undefined ? "…" : "파싱 실패", w / 2, h / 2);
+    return;
+  }
+  const pose = data.poses[((index % data.poses.length) + data.poses.length) % data.poses.length];
+  const pts = {};
+  for (const name in pose) pts[name] = project(pose[name], azimuth);
+
+  /* 배율은 클립 전체 bounds 로 한 번만 정한다. 프레임마다 다시 맞추면
+     (a) 웅크린 자세가 확대되어 선 자세와 구분이 안 되고
+     (b) 재생 중 매 프레임 크기가 출렁여 캐릭터가 숨쉬듯 떨린다.
+     파이썬 build_pose_data 가 클립 단위 bounds 를 캐시에 넣는 이유다. */
+  const b = clipBounds(data, azimuth);
+  const span = Math.max(b.maxX - b.minX, b.maxY - b.minY) || 1;
+  const scale = (Math.min(w, h) * 0.82) / span;
+  const cx = (b.maxX + b.minX) / 2, cy = (b.maxY + b.minY) / 2;
+  const S = (p) => [w / 2 + (p[0] - cx) * scale, h / 2 - (p[1] - cy) * scale];
+
+  ctx.lineCap = "round";
+  ctx.lineWidth = Math.max(2, Math.min(w, h) / 40);
+  ctx.strokeStyle = "#e0e0e4";
+  ctx.beginPath();
+  for (const [a, b] of data.bones) {
+    if (!pts[a] || !pts[b]) continue;
+    const p1 = S(pts[a]), p2 = S(pts[b]);
+    ctx.moveTo(p1[0], p1[1]); ctx.lineTo(p2[0], p2[1]);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = "#f08c3c";
+  const r = Math.max(1.5, Math.min(w, h) / 60);
+  for (const n in pts) {
+    const p = S(pts[n]);
+    ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+/* ---------- 상태 ---------- */
+const state = {
+  clips: [],
+  poseCache: new Map(),
+  pending: new Set(),      // 브리지에 포즈를 요청해 놓고 기다리는 클립
+  importCount: 0,          // 배치 간격 = importCount x spacing (원본 .ms 와 같은 규칙)
+  selected: null,
+  hovered: null,
+  azimuth: 0,
+  trim: [0, 1],
+  speedPoints:  [[0, 0], [1, 1]],
+  armPoints:    [[0, 0.22], [1, 0.22]],
+  videoJob: null,
+  videoTimer: null,
+};
+
+const grid = document.querySelector(".clip-grid");
+const previewCanvas = document.querySelector(".preview canvas");
+const statusEl = document.querySelector(".status");
+
+function setStatus(msg, kind) {
+  statusEl.textContent = msg;
+  statusEl.className = "status" + (kind ? " is-" + kind : "");
+}
+
+function poseFor(stem) {
+  if (state.poseCache.has(stem)) return state.poseCache.get(stem);
+  const clip = state.clips.find((c) => c.stem === stem);
+
+  /* 브리지가 있고 실제 파일 경로가 있으면 파이썬에서 FK 좌표를 받아온다.
+     비동기라 도착 전에는 undefined(로딩)를 돌려주고, 도착하면 그 카드만 다시 그린다. */
+  if (BRIDGE.obj && clip && clip.path) {
+    if (!state.pending.has(stem)) {
+      state.pending.add(stem);
+      bcall("pose_data", clip.path, (res) => {
+        state.pending.delete(stem);
+        state.poseCache.set(stem, res.ok ? res.data : null);
+        const card = grid.querySelector('.clip-card[data-stem="' + CSS.escape(stem) + '"]');
+        if (card) {
+          if (!res.ok) { card.classList.add("is-broken"); card.title = res.error; }
+          drawPose(card.querySelector("canvas"), state.poseCache.get(stem), posterOf(stem), 0);
+        }
+      });
+    }
+    return undefined;                          // 로딩 중
+  }
+
+  state.poseCache.set(stem, dummyPoseData(clip ? clip.kind : null));
+  return state.poseCache.get(stem);
+}
+
+function loadClipsFromBridge(selectPath) {
+  const folder = document.querySelector('[data-field="folder"]').value;
+  bcall("list_clips", folder, (res) => {
+    if (res.ok && res.data.length) {
+      state.clips = res.data;
+      state.poseCache.clear();
+      state.pending.clear();
+      if (selectPath) {
+        const selected = res.data.find((clip) => clip.path === selectPath);
+        if (selected) state.selected = selected.stem;
+      }
+      renderGrid();
+      setStatus("라이브러리 " + res.data.length + "개 클립 (실제 데이터)", "ok");
+      refreshBipeds();
+    } else {
+      setStatus(res.ok ? "폴더에 .bvh 가 없습니다: " + folder : res.error, "error");
+    }
+  });
+}
+
+const VIDEO_STAGES = {
+  queued: "대기", extracting: "관절 추정", converting: "BVH 변환",
+  validating: "검증", complete: "완료", blocked: "설치 필요",
+  failed: "실패", cancelled: "취소됨"
+};
+
+function showVideoJob(job) {
+  state.videoJob = job;
+  const card = document.querySelector(".video-job-card");
+  card.classList.add("is-visible");
+  card.querySelector(".video-job-label").textContent = job.video || "영상 변환";
+  card.querySelector(".video-job-state").textContent = VIDEO_STAGES[job.stage] || job.stage;
+  card.querySelector(".video-progress > span").style.width = (job.progress || 0) + "%";
+  card.querySelector('[data-action="cancel-video"]').style.display =
+    ["complete", "blocked", "failed", "cancelled"].includes(job.status) ? "none" : "block";
+}
+
+function pollVideoJob(jobId) {
+  clearTimeout(state.videoTimer);
+  bcall("video_job_status", jobId, (res) => {
+    if (!res.ok) { setStatus(res.error, "error"); return; }
+    const job = res.data;
+    showVideoJob(job);
+    if (!["complete", "blocked", "failed", "cancelled"].includes(job.status)) {
+      state.videoTimer = setTimeout(() => pollVideoJob(jobId), 500);
+    } else if (job.status === "complete") {
+      setStatus("BVH 생성 완료: " + job.bvh_path, "ok");
+      loadClipsFromBridge(job.bvh_path);
+    } else if (job.status === "blocked") {
+      setStatus("RTMW3D 설치가 필요합니다: " + job.help_path, "error");
+    } else if (job.status === "failed") {
+      setStatus(job.error || "영상 변환 실패", "error");
+    } else {
+      setStatus("영상 변환을 취소했습니다.");
+    }
+  });
+}
+
+function addVideo() {
+  if (!BRIDGE.obj) { setStatus("영상 추가는 3ds Max 안에서 동작합니다.", "error"); return; }
+  bcall("choose_video", null, (picked) => {
+    if (!picked.ok) { setStatus(picked.error, "error"); return; }
+    if (picked.data.cancelled) return;
+    const payload = {
+      video: picked.data.path,
+      library: document.querySelector('[data-field="folder"]').value
+    };
+    setStatus("RTMW3D 관절 추정 준비 중…");
+    bcall("start_video_job", JSON.stringify(payload), (started) => {
+      if (!started.ok) { setStatus(started.error, "error"); return; }
+      showVideoJob(started.data);
+      pollVideoJob(started.data.id);
+    });
+  });
+}
+
+function refreshBipeds() {
+  if (!BRIDGE.obj) return;
+  bcall("scene_bipeds", null, (res) => {
+    if (!res.ok) return;
+    const sel = document.querySelector('[data-field="biped"]');
+    sel.innerHTML = "";
+    for (const name of res.data) {
+      const opt = document.createElement("option");
+      opt.textContent = name;
+      sel.appendChild(opt);
+    }
+  });
+}
+
+/* 속도 곡선이 항등이 아니면 (출력비율, 원본비율) 제어점을 프레임 단위 time_map 으로
+   편다. 파이썬 build_time_map 과 같은 선형 보간 — 인덱스는 트림된 뒤 기준이다. */
+function timeMapFromCurve(data) {
+  const pts = state.speedPoints;
+  const identity =
+    pts.length === 2 &&
+    pts[0][0] === 0 && pts[0][1] === 0 &&
+    pts[1][0] === 1 && pts[1][1] === 1;
+  if (identity || !data || !data.frames) return null;
+  const nSrc = Math.max(1, Math.round(data.frames * (state.trim[1] - state.trim[0])));
+  const last = nSrc - 1;
+  const outFrames = Math.max(1, Math.round(pts[pts.length - 1][0] * last) + 1);
+  /* 화면과 같은 PCHIP 스플라인으로 샘플한다. 이론상 단조가 보장되지만
+     부동소수 오차 방지로 누적 최댓값 클램프를 한 번 더 건다 (warp 의 감소 금지). */
+  const map = [];
+  let prev = 0;
+  for (let i = 0; i < outFrames; i++) {
+    let v = sampleCurve(pts, last ? i / last : 0) * last;
+    if (v < prev) v = prev;
+    map.push(v);
+    prev = v;
+  }
+  return map;
+}
+
+/* 호버가 끝나면 0번이 아니라 대표 프레임으로 되돌아간다 */
+function posterOf(stem) {
+  const data = poseFor(stem);
+  return data ? (data.poster || 0) : 0;
+}
+
+/* ---------- 그리드 ---------- */
+function renderGrid() {
+  const q = (document.querySelector('[data-field="search"]').value || "").trim().toLowerCase();
+  grid.innerHTML = "";
+  const shown = state.clips.filter(
+    (c) => !q || c.stem.toLowerCase().includes(q) || c.tags.some((t) => t.includes(q))
+  );
+  if (!shown.length) {
+    grid.innerHTML = '<div style="color:var(--dim);padding:16px">일치하는 클립이 없습니다.</div>';
+    return;
+  }
+  for (const clip of shown) {
+    const card = document.createElement("div");
+    card.className = "clip-card";
+    card.dataset.stem = clip.stem;
+    /* 브리지 클립(path 있음)은 포즈 요청이 실패했을 때만 is-broken 이 붙는다
+       (poseFor 콜백). 더미 클립은 kind 가 없으면 파싱 실패 시나리오다. */
+    if (!clip.path && !clip.kind) {
+      card.classList.add("is-broken");
+      card.title = "BVH 파싱 실패 — 목록에서 빼지 않고 사유를 표시한다";
+    }
+    if (state.poseCache.get(clip.stem) === null && clip.path) {
+      card.classList.add("is-broken");
+    }
+    if (clip.stem === state.selected) card.classList.add("is-selected");
+    // Max 배치가 찍은 PNG 가 있으면 그걸 쓰고, 없으면 canvas 로 계산해 그린다.
+    // PNG 가 없다고 빈칸을 만들지 않는다 — 라이브러리는 Max 없이도 즉시 열려야 한다.
+    if (clip.rendered) card.classList.add("is-rendered");
+    card.innerHTML =
+      "<canvas></canvas><span class='thumb-badge'>MAX</span>" +
+      "<div class='name'></div><div class='tags'></div>";
+    card.querySelector(".name").textContent = clip.stem;
+    card.querySelector(".tags").textContent = clip.tags.join(" · ");
+    grid.appendChild(card);
+    drawPose(card.querySelector("canvas"), poseFor(clip.stem), posterOf(clip.stem), 0);
+  }
+}
+
+/* 문서 전체에 rAF 루프는 하나뿐이다.
+   호버 중인 카드 하나와 프리뷰만 프레임을 돌린다.
+   카드마다 타이머를 두면 클립이 늘수록 죽는다. */
+let lastTick = 0, frameIndex = 0;
+function tick(now) {
+  if (now - lastTick > 90) {
+    lastTick = now;
+    frameIndex++;
+    if (state.hovered) {
+      const card = grid.querySelector('.clip-card[data-stem="' + CSS.escape(state.hovered) + '"]');
+      if (card) drawPose(card.querySelector("canvas"), poseFor(state.hovered), frameIndex, 0);
+    }
+    if (state.selected) drawPose(previewCanvas, poseFor(state.selected), frameIndex, state.azimuth);
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+grid.addEventListener("mouseover", (e) => {
+  const card = e.target.closest(".clip-card");
+  if (!card || card.dataset.stem === state.hovered) return;
+  if (state.hovered) {
+    const prev = grid.querySelector('.clip-card[data-stem="' + CSS.escape(state.hovered) + '"]');
+    if (prev) drawPose(prev.querySelector("canvas"), poseFor(state.hovered), posterOf(state.hovered), 0);
+  }
+  state.hovered = card.dataset.stem;
+});
+grid.addEventListener("mouseleave", () => {
+  if (state.hovered) {
+    const prev = grid.querySelector('.clip-card[data-stem="' + CSS.escape(state.hovered) + '"]');
+    if (prev) drawPose(prev.querySelector("canvas"), poseFor(state.hovered), posterOf(state.hovered), 0);
+  }
+  state.hovered = null;
+});
+grid.addEventListener("click", (e) => {
+  const card = e.target.closest(".clip-card");
+  if (!card) return;
+  if (card.classList.contains("is-broken")) { setStatus("파싱에 실패한 클립입니다.", "error"); return; }
+  state.selected = card.dataset.stem;
+  document.querySelector('[data-field="name"]').value = "Bip_" + state.selected;
+  renderGrid();
+  const data = poseFor(state.selected);
+  if (data) setStatus(state.selected + " — " + data.frames + "프레임 / " + (data.frames * data.frame_time).toFixed(1) + "초");
+  else setStatus(state.selected + " — 포즈 로딩 중…");
+});
+
+/* ---------- 타임라인 ---------- */
+const timelineEl = document.querySelector(".timeline");
+const trackEl = timelineEl.querySelector(".track");
+const keptEl = timelineEl.querySelector(".kept");
+
+function renderTimeline() {
+  const [a, b] = state.trim;
+  keptEl.style.left = (a * 100) + "%";
+  keptEl.style.width = ((b - a) * 100) + "%";
+  trackEl.querySelector('[data-side="start"]').style.left = (a * 100) + "%";
+  trackEl.querySelector('[data-side="end"]').style.left = (b * 100) + "%";
+  const ticks = timelineEl.querySelector(".ticks");
+  ticks.innerHTML = "";
+  for (let i = 0; i <= 4; i++) {
+    const s = document.createElement("span");
+    s.style.left = (i * 25) + "%";
+    s.textContent = Math.round(i * 25) + "%";
+    ticks.appendChild(s);
+  }
+}
+
+trackEl.addEventListener("pointerdown", (e) => {
+  const handle = e.target.closest(".trim-handle");
+  if (!handle) return;
+  const side = handle.dataset.side;
+  handle.setPointerCapture(e.pointerId);       // 커서가 막대를 벗어나도 드래그 유지
+  const MIN = 1 / 60;                          // 최소 한 프레임
+  const onMove = (ev) => {
+    const rect = trackEl.getBoundingClientRect();
+    let v = (ev.clientX - rect.left) / rect.width;
+    v = Math.min(1, Math.max(0, v));
+    if (side === "start") state.trim[0] = Math.min(v, state.trim[1] - MIN);
+    else                  state.trim[1] = Math.max(v, state.trim[0] + MIN);
+    renderTimeline();
+    setStatus("트림 " + Math.round(state.trim[0] * 100) + "% – " + Math.round(state.trim[1] * 100) + "%");
+  };
+  const onUp = () => {
+    handle.removeEventListener("pointermove", onMove);
+    handle.removeEventListener("pointerup", onUp);
+  };
+  handle.addEventListener("pointermove", onMove);
+  handle.addEventListener("pointerup", onUp);
+});
+
+/* ---------- 곡선 보간 ----------
+   제어점 사이를 직선이 아니라 모노톤 3차 스플라인(Fritsch–Butland PCHIP)으로
+   잇는다. 베지어 핸들 없이도 DCC 곡선처럼 부드럽고, 제어점이 단조이면 곡선도
+   단조가 수학적으로 보장된다 — 속도 곡선이 time_map 의 "감소 금지" 요구를
+   오버슈트 없이 항상 만족한다는 뜻이다 (일반 캣멀롬은 여기서 튀어나온다). */
+function pchipTangents(pts) {
+  const n = pts.length, h = [], d = [];
+  for (let i = 0; i < n - 1; i++) {
+    h[i] = pts[i + 1][0] - pts[i][0];
+    d[i] = h[i] ? (pts[i + 1][1] - pts[i][1]) / h[i] : 0;
+  }
+  const m = new Array(n);
+  m[0] = d[0] || 0; m[n - 1] = d[n - 2] || 0;
+  for (let i = 1; i < n - 1; i++) {
+    if (d[i - 1] * d[i] <= 0) m[i] = 0;      // 극점에서는 접선 0 (오버슈트 방지)
+    else {
+      const w1 = 2 * h[i] + h[i - 1], w2 = h[i] + 2 * h[i - 1];
+      m[i] = (w1 + w2) / (w1 / d[i - 1] + w2 / d[i]);
+    }
+  }
+  return m;
+}
+
+function sampleCurve(pts, x) {
+  if (pts.length < 2 || x <= pts[0][0]) return pts[0][1];
+  if (x >= pts[pts.length - 1][0]) return pts[pts.length - 1][1];
+  const m = pchipTangents(pts);
+  let i = 0;
+  while (x > pts[i + 1][0]) i++;
+  const h = pts[i + 1][0] - pts[i][0];
+  if (!h) return pts[i + 1][1];
+  const t = (x - pts[i][0]) / h, t2 = t * t, t3 = t2 * t;
+  return (2 * t3 - 3 * t2 + 1) * pts[i][1] + (t3 - 2 * t2 + t) * h * m[i]
+       + (-2 * t3 + 3 * t2) * pts[i + 1][1] + (t3 - t2) * h * m[i + 1];
+}
+
+/* ---------- 곡선 ---------- */
+function curveSetup(el, points, opts) {
+  const canvas = el.querySelector("canvas");
+
+  function draw() {
+    const { ctx, w, h } = fitCanvas(canvas);
+    ctx.clearRect(0, 0, w, h);
+    const P = (p) => [p[0] * w, h - p[1] / opts.max * h];
+
+    ctx.strokeStyle = "#33333a"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < 4; i++) {
+      ctx.moveTo(0, h * i / 4); ctx.lineTo(w, h * i / 4);
+      ctx.moveTo(w * i / 4, 0); ctx.lineTo(w * i / 4, h);
+    }
+    ctx.stroke();
+
+    ctx.strokeStyle = "#f08c3c"; ctx.lineWidth = 2;
+    ctx.beginPath();
+    const x0 = points[0][0], x1 = points[points.length - 1][0];
+    const STEPS = 72;                          // 스플라인을 촘촘히 샘플해 그린다
+    for (let i = 0; i <= STEPS; i++) {
+      const x = x0 + (x1 - x0) * i / STEPS;
+      const s = P([x, sampleCurve(points, x)]);
+      i ? ctx.lineTo(s[0], s[1]) : ctx.moveTo(s[0], s[1]);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = "#ffffff";
+    for (const p of points) {
+      const s = P(p);
+      ctx.beginPath(); ctx.arc(s[0], s[1], 4, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  canvas.addEventListener("pointerdown", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) / rect.width;
+    let idx = 0, best = Infinity;
+    points.forEach((p, i) => { const d = Math.abs(p[0] - mx); if (d < best) { best = d; idx = i; } });
+    if (best > 0.12) {                                    // 빈 곳을 누르면 제어점을 추가한다
+      const my = (1 - (e.clientY - rect.top) / rect.height) * opts.max;
+      idx = points.findIndex((p) => p[0] > mx);
+      if (idx < 0) idx = points.length;
+      points.splice(idx, 0, [mx, my]);
+    }
+    canvas.setPointerCapture(e.pointerId);
+    const onMove = (ev) => {
+      const r = canvas.getBoundingClientRect();
+      let x = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
+      let y = Math.min(opts.max, Math.max(0, (1 - (ev.clientY - r.top) / r.height) * opts.max));
+      // 단조성은 드래그 단계에서 이웃 값으로 클램프해 강제한다.
+      // build_time_map 이 ValueError 를 던지기 전에 UI 에서 막는 것이다.
+      if (idx > 0) x = Math.max(x, points[idx - 1][0]);
+      if (idx < points.length - 1) x = Math.min(x, points[idx + 1][0]);
+      if (opts.monotoneY) {
+        if (idx > 0) y = Math.max(y, points[idx - 1][1]);
+        if (idx < points.length - 1) y = Math.min(y, points[idx + 1][1]);
+      }
+      if (idx === 0) x = 0;
+      if (idx === points.length - 1) x = Math.max(x, 0.05);
+      points[idx] = [x, y];
+      draw();
+      setStatus(opts.label + " 제어점 " + points.length + "개");
+    };
+    const onUp = () => {
+      canvas.removeEventListener("pointermove", onMove);
+      canvas.removeEventListener("pointerup", onUp);
+    };
+    canvas.addEventListener("pointermove", onMove);
+    canvas.addEventListener("pointerup", onUp);
+    draw();
+  });
+
+  /* 우클릭 = 제어점 삭제 (DCC 관례). 양 끝점은 곡선의 앵커라 지울 수 없다. */
+  canvas.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) / rect.width;
+    const my = (1 - (e.clientY - rect.top) / rect.height) * opts.max;
+    let idx = -1, best = Infinity;
+    points.forEach((p, i) => {
+      const d = Math.hypot(p[0] - mx, (p[1] - my) / opts.max);
+      if (d < best) { best = d; idx = i; }
+    });
+    if (idx <= 0 || idx >= points.length - 1) {
+      setStatus("양 끝점은 지울 수 없습니다");
+      return;
+    }
+    if (best > 0.08) return;                   // 점 근처가 아니면 무시
+    points.splice(idx, 1);
+    draw();
+    setStatus(opts.label + " 제어점 삭제 — " + points.length + "개 (우클릭=삭제)");
+  });
+
+  return draw;
+}
+
+const drawSpeed = curveSetup(document.querySelector('.curve[data-kind="speed"]'),
+  state.speedPoints, { max: 1, monotoneY: true, label: "속도 곡선" });
+const drawArm = curveSetup(document.querySelector('.curve[data-kind="armspace"]'),
+  state.armPoints, { max: 1, monotoneY: false, label: "팔 간격 곡선" });
+
+/* ---------- 버튼 ---------- */
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-action]");
+  if (!btn) return;
+  const action = btn.dataset.action;
+  if (action === "azimuth") {
+    state.azimuth = Number(btn.dataset.deg);
+    setStatus("방위각 " + state.azimuth + "°");
+  } else if (action === "refresh") {
+    state.poseCache.clear();
+    if (BRIDGE.obj) loadClipsFromBridge();
+    else { renderGrid(); setStatus("새로고침했습니다."); }
+  } else if (action === "sync") {
+    if (!BRIDGE.obj) { setStatus("(목업) 동기화는 Max 안에서 동작합니다."); return; }
+    setStatus("Artoke 모션 동기화 중…");
+    bcall("sync_from_artoke", document.querySelector('[data-field="folder"]').value, (res) => {
+      if (!res.ok) { setStatus(res.error, "error"); return; }
+      const got = res.data.downloaded;
+      setStatus(got.length ? "Artoke 다운로드: " + got.join(", ") : "최신 상태 — 새 모션 없음", "ok");
+      if (got.length) loadClipsFromBridge();
+    });
+  } else if (action === "add-video") {
+    addVideo();
+  } else if (action === "cancel-video") {
+    if (!state.videoJob) return;
+    bcall("cancel_video_job", state.videoJob.id, (res) => {
+      if (res.ok) showVideoJob(res.data);
+      setStatus(res.ok ? "영상 변환을 취소했습니다." : res.error, res.ok ? "" : "error");
+    });
+  } else if (action === "import") {
+    if (!state.selected) { setStatus("클립을 먼저 고르세요.", "error"); return; }
+    const clip = state.clips.find((c) => c.stem === state.selected);
+    if (!BRIDGE.obj || !clip || !clip.path) {
+      setStatus("(목업) 임포트는 Max 안에서 동작합니다 — 브라우저에서는 미리보기만.", "error");
+      return;
+    }
+    const data = poseFor(state.selected);
+    const payload = {
+      path: clip.path,
+      name: document.querySelector('[data-field="name"]').value || ("Bip_" + clip.stem),
+      convert: document.querySelector('[data-field="convert"]').checked,
+      mirror: document.querySelector('[data-field="mirror"]').checked,
+      x_offset: state.importCount * Number(document.querySelector('[data-field="spacing"]').value || 0),
+      trim_start: state.trim[0],
+      trim_end: state.trim[1],
+    };
+    const timeMap = timeMapFromCurve(data);
+    if (timeMap) payload.time_map = timeMap;
+    setStatus("임포트 중… (" + clip.stem + ")");
+    bcall("import_clip", JSON.stringify(payload), (res) => {
+      if (res.ok) {
+        state.importCount++;
+        setStatus(res.data.message, "ok");
+        refreshBipeds();
+      } else setStatus(res.error, "error");
+    });
+  } else if (action === "mixer") {
+    if (!BRIDGE.obj) { setStatus("(목업) Motion Mixer 전송"); return; }
+    const sel = document.querySelector('[data-field="biped"]');
+    if (!sel.value) { setStatus("바이패드를 선택하세요", "error"); return; }
+    const clipsDir = document.querySelector('[data-field="folder"]').value + "\\clips";
+    bcall("send_to_mixer", JSON.stringify({ biped: sel.value, clips_dir: clipsDir }), (res) => {
+      setStatus(res.ok ? res.data.message : res.error, res.ok ? "ok" : "error");
+    });
+  }
+});
+
+document.querySelector('[data-field="search"]').addEventListener("input", renderGrid);
+
+/* ---------- 시작 ---------- */
+state.clips = DUMMY_CLIPS;
+renderGrid();
+renderTimeline();
+drawSpeed();
+drawArm();
+window.addEventListener("resize", () => { renderTimeline(); drawSpeed(); drawArm(); });
+if (!connectBridge())
+  setStatus("더미 데이터로 동작 중입니다 — Max 브리지 없음. 클립을 고르세요.");
+</script>
+</body>
+</html>
