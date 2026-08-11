@@ -68,3 +68,20 @@ Only expired UUID-named directories below the ARTOKE worker cache are removed. C
 6. ARTOKE verifies each path, size, and SHA-256 before completing the job.
 
 The local worker never receives a Supabase service-role key or anon key. Tokens and signed URL query strings must not be copied into support logs.
+
+## Corrected BVH rebuilds
+
+An initial claim has `editRevision: 0` and null tracking/edit URLs. A correction claim has a positive revision plus `trackingUrl` and `editsUrl`. The worker downloads the source, immutable original RTMW3D JSON, and exact edit snapshot; validates BODY23 corrections; writes through a unique same-directory temporary file; skips inference; and converts corrected JSON directly to BVH.
+
+Metadata and the publication manifest carry the claimed revision. Corrected artifacts upload beneath `result/revisions/<revision>/`; ARTOKE rejects any claimed, requested, manifest, or path revision mismatch. Original JSON and BVH remain at their fixed `result/` paths.
+
+## Operational recovery
+
+- HTTP `409` during heartbeat or publication means the lease or revision is no longer valid. Stop and allow normal cleanup/reclaim.
+- Network retries are bounded by the usable lease. Cancellation uses the same cleanup path for initial and correction jobs.
+- `python -m src.worker cleanup` removes only expired UUID workspaces below the configured cache.
+- Logs may include job IDs, normalized stages, and safe codes. Never log bearer tokens, credential contents, source media, correction coordinates, object paths, or signed query strings.
+
+## Member smoke-test checklist
+
+With a locally owned MP4 shorter than 30 seconds, verify upload through completion, automatic editor opening, a persisted wrist edit after reload, corrected publication, separate original/corrected downloads, corrected BVH import in 3ds Max, and complete job deletion. This operator test requires a configured server, private storage, member account, and ready NVIDIA/RTMW3D machine; `doctor` does not perform it.
