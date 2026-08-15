@@ -156,6 +156,7 @@ class CompanionSession:
         self._cleaned = False
         self._cleanup_running = False
         self._lease_active = False
+        self._receive_active = False
         self._lock = threading.Lock()
 
     @classmethod
@@ -224,6 +225,7 @@ class CompanionSession:
             if self._state in {"receiving", "accepted"}:
                 raise UploadRejected("source_already_selected")
             self._state = "receiving"
+            self._receive_active = True
 
         source: Path | None = None
         descriptor: int | None = None
@@ -259,9 +261,7 @@ class CompanionSession:
                     self._source_size = content_length
                     self._state = "accepted"
                     accepted = True
-                    snapshot = self._snapshot_locked()
                     descriptor = None
-            return snapshot
         except UploadRejected as exc:
             rejection = exc
         except (OSError, ValueError):
@@ -272,10 +272,13 @@ class CompanionSession:
                     os.close(descriptor)
                 except OSError:
                     pass
+            removed = True
             if not accepted:
                 removed = source is None or self._safe_unlink(source)
-                cleanup_now = False
-                with self._lock:
+            cleanup_now = False
+            with self._lock:
+                self._receive_active = False
+                if not accepted:
                     cancellation = (
                         self._state == "cancelling"
                         or self._cancel_requested.is_set()
@@ -287,8 +290,15 @@ class CompanionSession:
                         cleanup_now = True
                     else:
                         self._state = "ready"
-                if cleanup_now:
-                    self._finish_cleanup()
+                elif self._state == "cancelling":
+                    cleanup_now = True
+            if cleanup_now:
+                self._finish_cleanup()
+        if accepted:
+            with self._lock:
+                if self._state == "accepted":
+                    return self._snapshot_locked()
+            raise UploadRejected("cancelled")
         if rejection is not None:
             raise rejection
         raise UploadRejected("source_write_failed")
@@ -375,7 +385,7 @@ class CompanionSession:
             self._terminal_target = target
             if self._state == target and self._cleaned:
                 return self._snapshot_locked()
-            if self._state == "receiving" or self._lease_active:
+            if self._receive_active or self._lease_active:
                 self._state = "cancelling"
                 return self._snapshot_locked()
             if self._cleaned:
@@ -386,6 +396,9 @@ class CompanionSession:
 
     def _finish_cleanup(self) -> SessionSnapshot:
         with self._lock:
+            if self._receive_active or self._lease_active:
+                self._state = "cancelling"
+                return self._snapshot_locked()
             if self._cleanup_running:
                 return self._snapshot_locked()
             self._cleanup_running = True

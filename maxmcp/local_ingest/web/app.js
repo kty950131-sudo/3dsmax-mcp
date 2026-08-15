@@ -14,6 +14,8 @@ let activeUpload = null;
 let generation = 0;
 let terminal = false;
 let cleanupInFlight = false;
+let pollTimer = null;
+const pollIntervalMs = 1000;
 
 function setStatus(message, progress) {
   statusText.textContent = message;
@@ -68,6 +70,7 @@ function encodeDisplayName(value) {
 
 function renderCleanupRequired() {
   terminal = true;
+  stopPolling();
   setBusy(true);
   setStatus("로컬 정리가 필요합니다.", 0);
   cancelAction.textContent = "로컬 정리 다시 시도";
@@ -76,6 +79,7 @@ function renderCleanupRequired() {
 
 function renderCancelled() {
   terminal = true;
+  stopPolling();
   setBusy(true);
   setStatus("로컬 정리가 끝났습니다. 이 창을 닫아도 됩니다.", 0);
   cancelAction.textContent = "정리 완료";
@@ -90,6 +94,42 @@ function uploadFailed(message, requestGeneration) {
   setStatus(message, 0);
 }
 
+function stopPolling() {
+  if (pollTimer !== null) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function scheduleSessionPoll(expectedGeneration = generation) {
+  stopPolling();
+  if (!terminal || expectedGeneration !== generation) return;
+  pollTimer = setTimeout(async () => {
+    pollTimer = null;
+    if (!terminal || expectedGeneration !== generation) return;
+    try {
+      const response = await fetch("/api/session", { cache: "no-store" });
+      if (response.status !== 200) throw new Error("session_unavailable");
+      const payload = parseSession(await response.json());
+      if (expectedGeneration !== generation) return;
+      renderSession(payload);
+    } catch (_error) {
+      if (terminal && expectedGeneration === generation) {
+        scheduleSessionPoll(expectedGeneration);
+      }
+    }
+  }, pollIntervalMs);
+}
+
+function renderCancelling() {
+  terminal = true;
+  setBusy(true);
+  setStatus("취소 중입니다.", 0);
+  cancelAction.textContent = "취소 중";
+  cancelAction.disabled = true;
+  scheduleSessionPoll();
+}
+
 function renderSession(payload) {
   csrfToken = payload.csrfToken;
   if (payload.state === "cancelled" || payload.state === "closed") {
@@ -97,11 +137,18 @@ function renderSession(payload) {
     else renderCleanupRequired();
     return;
   }
-  if (payload.state === "cleanup_required" || payload.state === "cancelling") {
+  if (payload.state === "cleanup_required") {
     renderCleanupRequired();
     return;
   }
-  if (terminal) return;
+  if (payload.state === "cancelling") {
+    renderCancelling();
+    return;
+  }
+  if (terminal) {
+    scheduleSessionPoll();
+    return;
+  }
   if (payload.state === "accepted") {
     setBusy(true);
     setStatus("영상이 준비됐습니다.", 100);
@@ -190,9 +237,10 @@ async function requestCleanup() {
       renderCancelled();
       return;
     }
-    renderCleanupRequired();
+    if (result.status === "cancelling") renderCancelling();
+    else renderCleanupRequired();
   } catch (_error) {
-    renderCleanupRequired();
+    renderCancelling();
   } finally {
     cleanupInFlight = false;
     if (cancelAction.textContent === "로컬 정리 다시 시도") {

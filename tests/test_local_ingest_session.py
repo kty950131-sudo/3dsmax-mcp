@@ -151,6 +151,47 @@ def test_cancel_during_upload_removes_partial_and_workspace(tmp_path: Path) -> N
     assert not session.workspace.path.exists()
 
 
+def test_repeated_cancel_never_cleans_before_blocked_receive_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID, chunk_size=4)
+    stream = _BlockingStream()
+    original = JobWorkspace.cleanup
+    cleanup_calls = 0
+    outcome: list[str] = []
+
+    def counted_cleanup(job_workspace: JobWorkspace) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        original(job_workspace)
+
+    monkeypatch.setattr(JobWorkspace, "cleanup", counted_cleanup)
+
+    def receive() -> None:
+        try:
+            session.receive_source(stream, 8, "clip.mp4")
+        except UploadRejected as exc:
+            outcome.append(exc.code)
+
+    thread = threading.Thread(target=receive)
+    thread.start()
+    assert stream.started.wait(timeout=1)
+
+    assert session.cancel().state == "cancelling"
+    assert session.cancel().state == "cancelling"
+    assert cleanup_calls == 0
+    assert session.workspace.path.exists()
+
+    stream.release.set()
+    thread.join(timeout=2)
+
+    assert outcome == ["cancelled"]
+    assert cleanup_calls == 1
+    assert session.snapshot().state == "cancelled"
+    assert not session.workspace.path.exists()
+
+
 def test_replaced_workspace_symlink_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

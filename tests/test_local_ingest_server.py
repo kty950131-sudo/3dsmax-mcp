@@ -445,7 +445,9 @@ global.document = { querySelector: (selector) => elements[selector] };
 
 const fetchReplies = [
   { status: 200, body: { csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false } },
-  { status: 202, body: { status: "cleanup_required", cleaned: false } },
+  { status: 202, body: { status: "cancelling", cleaned: false } },
+  { status: 200, body: { csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false } },
+  { status: 200, body: { csrfToken: "csrf-token-123456", state: "cleanup_required", sizeBytes: null, cleaned: false } },
   { status: 200, body: { status: "cancelled", cleaned: true } },
 ];
 global.fetch = async () => {
@@ -466,6 +468,9 @@ class FakeXHR extends Target {
   abort() { this.aborted = true; this.emit("abort"); }
 }
 global.XMLHttpRequest = FakeXHR;
+const timers = [];
+global.setTimeout = (callback) => { timers.push(callback); return timers.length; };
+global.clearTimeout = () => {};
 
 vm.runInThisContext(fs.readFileSync(process.argv[1], "utf8"), { filename: process.argv[1] });
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -480,8 +485,22 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
   await elements["#cancel-action"].emit("click");
   await tick();
   assert.equal(upload.aborted, true);
+  assert.equal(elements["#status"].textContent, "취소 중입니다.");
+  assert.equal(elements["#cancel-action"].textContent, "취소 중");
+  assert.equal(elements["#cancel-action"].disabled, true);
+  assert.equal(timers.length, 1);
+
+  await timers.shift()();
+  await tick();
+  assert.equal(elements["#status"].textContent, "취소 중입니다.");
+  assert.equal(elements["#cancel-action"].disabled, true);
+  assert.equal(timers.length, 1);
+
+  await timers.shift()();
+  await tick();
   assert.equal(elements["#status"].textContent, "로컬 정리가 필요합니다.");
   assert.equal(elements["#cancel-action"].textContent, "로컬 정리 다시 시도");
+  assert.equal(elements["#cancel-action"].disabled, false);
   assert.equal(elements["#source"].disabled, true);
 
   upload.status = 201;
@@ -499,7 +518,8 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
   renderSession({ ...sessionBase, state: "cleanup_required" });
   assert.equal(elements["#status"].textContent, "로컬 정리가 필요합니다.");
   renderSession({ ...sessionBase, state: "cancelling" });
-  assert.equal(elements["#status"].textContent, "로컬 정리가 필요합니다.");
+  assert.equal(elements["#status"].textContent, "취소 중입니다.");
+  assert.equal(elements["#cancel-action"].disabled, true);
   renderSession({ ...sessionBase, state: "cancelled", cleaned: true });
   assert.equal(elements["#status"].textContent, "로컬 정리가 끝났습니다. 이 창을 닫아도 됩니다.");
   renderSession({ ...sessionBase, state: "ready" });
@@ -511,6 +531,8 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
         [node, "-e", harness, str(app)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=10,
         check=False,
     )
