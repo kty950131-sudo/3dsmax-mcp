@@ -15,7 +15,16 @@ let generation = 0;
 let terminal = false;
 let cleanupInFlight = false;
 let pollTimer = null;
+let cancelIntent = false;
+let cancelAttempts = 0;
+let nonterminalPolls = 0;
+let cancelAcknowledged = false;
+let disposed = false;
+const activeFetchControllers = new Set();
 const pollIntervalMs = 1000;
+const requestTimeoutMs = 5000;
+const maxCancelAttempts = 2;
+const pollsBeforeCancelRetry = 2;
 
 function setStatus(message, progress) {
   statusText.textContent = message;
@@ -70,6 +79,8 @@ function encodeDisplayName(value) {
 
 function renderCleanupRequired() {
   terminal = true;
+  cancelIntent = false;
+  cancelAcknowledged = false;
   stopPolling();
   setBusy(true);
   setStatus("로컬 정리가 필요합니다.", 0);
@@ -79,6 +90,8 @@ function renderCleanupRequired() {
 
 function renderCancelled() {
   terminal = true;
+  cancelIntent = false;
+  cancelAcknowledged = false;
   stopPolling();
   setBusy(true);
   setStatus("로컬 정리가 끝났습니다. 이 창을 닫아도 됩니다.", 0);
@@ -101,33 +114,86 @@ function stopPolling() {
   }
 }
 
+async function fetchJson(path, options = {}) {
+  const controller = new AbortController();
+  activeFetchControllers.add(controller);
+  let timeoutId;
+  try {
+    const operation = (async () => {
+      const response = await fetch(path, { ...options, signal: controller.signal });
+      return { response, payload: await response.json() };
+    })();
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        reject(new Error("request_timeout"));
+      }, requestTimeoutMs);
+    });
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    activeFetchControllers.delete(controller);
+  }
+}
+
 function scheduleSessionPoll(expectedGeneration = generation) {
   stopPolling();
-  if (!terminal || expectedGeneration !== generation) return;
+  if (disposed || !terminal || expectedGeneration !== generation) return;
   pollTimer = setTimeout(async () => {
     pollTimer = null;
-    if (!terminal || expectedGeneration !== generation) return;
+    if (disposed || !terminal || expectedGeneration !== generation) return;
     try {
-      const response = await fetch("/api/session", { cache: "no-store" });
+      const { response, payload } = await fetchJson("/api/session", { cache: "no-store" });
       if (response.status !== 200) throw new Error("session_unavailable");
-      const payload = parseSession(await response.json());
-      if (expectedGeneration !== generation) return;
-      renderSession(payload);
+      const session = parseSession(payload);
+      if (disposed || expectedGeneration !== generation) return;
+      renderSession(session);
     } catch (_error) {
-      if (terminal && expectedGeneration === generation) {
-        scheduleSessionPoll(expectedGeneration);
-      }
+      observeUnconfirmedCancel(expectedGeneration);
     }
   }, pollIntervalMs);
 }
 
-function renderCancelling() {
+function renderCancelling(acknowledged = true) {
   terminal = true;
+  cancelIntent = true;
+  if (acknowledged) {
+    cancelAcknowledged = true;
+    nonterminalPolls = 0;
+  }
   setBusy(true);
   setStatus("취소 중입니다.", 0);
   cancelAction.textContent = "취소 중";
   cancelAction.disabled = true;
   scheduleSessionPoll();
+}
+
+function renderCancelDeliveryFailed() {
+  terminal = true;
+  stopPolling();
+  setBusy(true);
+  setStatus("취소 요청을 보내지 못했습니다.", 0);
+  cancelAction.textContent = "취소 다시 시도";
+  cancelAction.disabled = false;
+}
+
+function observeUnconfirmedCancel(expectedGeneration = generation) {
+  if (!terminal || !cancelIntent || expectedGeneration !== generation) return;
+  if (cancelAcknowledged) {
+    scheduleSessionPoll(expectedGeneration);
+    return;
+  }
+  nonterminalPolls += 1;
+  if (nonterminalPolls < pollsBeforeCancelRetry) {
+    scheduleSessionPoll(expectedGeneration);
+    return;
+  }
+  nonterminalPolls = 0;
+  if (cancelAttempts < maxCancelAttempts) {
+    void sendCancelRequest(expectedGeneration);
+    return;
+  }
+  renderCancelDeliveryFailed();
 }
 
 function renderSession(payload) {
@@ -146,7 +212,7 @@ function renderSession(payload) {
     return;
   }
   if (terminal) {
-    scheduleSessionPoll();
+    observeUnconfirmedCancel();
     return;
   }
   if (payload.state === "accepted") {
@@ -164,9 +230,9 @@ function renderSession(payload) {
 }
 
 async function loadSession() {
-  const response = await fetch("/api/session", { cache: "no-store" });
+  const { response, payload } = await fetchJson("/api/session", { cache: "no-store" });
   if (response.status !== 200) throw new Error("session_unavailable");
-  renderSession(parseSession(await response.json()));
+  if (!disposed) renderSession(parseSession(payload));
 }
 
 function upload(file) {
@@ -213,26 +279,20 @@ function upload(file) {
   }
 }
 
-async function requestCleanup() {
+async function sendCancelRequest(expectedGeneration) {
   if (cleanupInFlight) return;
-  terminal = true;
-  generation += 1;
-  const uploadRequest = activeUpload;
-  activeUpload = null;
-  if (uploadRequest) {
-    try { uploadRequest.abort(); } catch (_error) { /* terminal state still wins */ }
-  }
-  setBusy(true);
   cleanupInFlight = true;
+  cancelAttempts += 1;
   cancelAction.disabled = true;
   try {
     if (!csrfToken) throw new Error("session_unavailable");
-    const response = await fetch("/api/cancel", {
+    const { response, payload } = await fetchJson("/api/cancel", {
       method: "POST",
       headers: { "X-CSRF-Token": csrfToken },
       body: "",
     });
-    const result = parseCleanup(response, await response.json());
+    const result = parseCleanup(response, payload);
+    if (disposed || expectedGeneration !== generation) return;
     if (result.status === "cancelled" && result.cleaned) {
       renderCancelled();
       return;
@@ -240,13 +300,36 @@ async function requestCleanup() {
     if (result.status === "cancelling") renderCancelling();
     else renderCleanupRequired();
   } catch (_error) {
-    renderCancelling();
+    if (expectedGeneration !== generation) return;
+    if (cancelAttempts >= maxCancelAttempts) renderCancelDeliveryFailed();
+    else renderCancelling(false);
   } finally {
     cleanupInFlight = false;
     if (cancelAction.textContent === "로컬 정리 다시 시도") {
       cancelAction.disabled = false;
     }
   }
+}
+
+async function requestCleanup() {
+  if (disposed || cleanupInFlight) return;
+  terminal = true;
+  cancelIntent = true;
+  cancelAttempts = 0;
+  nonterminalPolls = 0;
+  cancelAcknowledged = false;
+  generation += 1;
+  stopPolling();
+  const uploadRequest = activeUpload;
+  activeUpload = null;
+  if (uploadRequest) {
+    try { uploadRequest.abort(); } catch (_error) { /* terminal state still wins */ }
+  }
+  setBusy(true);
+  setStatus("취소 중입니다.", 0);
+  cancelAction.textContent = "취소 중";
+  cancelAction.disabled = true;
+  await sendCancelRequest(generation);
 }
 
 sourceInput.addEventListener("change", () => {
@@ -256,9 +339,17 @@ sourceInput.addEventListener("change", () => {
 });
 
 cancelAction.addEventListener("click", requestCleanup);
+globalThis.addEventListener?.("pagehide", () => {
+  disposed = true;
+  cancelIntent = false;
+  generation += 1;
+  stopPolling();
+  for (const controller of activeFetchControllers) controller.abort();
+  activeFetchControllers.clear();
+});
 
 loadSession().catch(() => {
-  if (terminal) return;
+  if (disposed || terminal) return;
   setBusy(true);
   setStatus("로컬 앱 연결을 확인해 주세요.", 0);
 });

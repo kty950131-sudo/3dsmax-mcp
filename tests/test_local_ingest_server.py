@@ -445,13 +445,19 @@ global.document = { querySelector: (selector) => elements[selector] };
 
 const fetchReplies = [
   { status: 200, body: { csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false } },
+  { throws: true },
+  { status: 200, body: { csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false } },
+  { status: 200, body: { csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false } },
   { status: 202, body: { status: "cancelling", cleaned: false } },
   { status: 200, body: { csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false } },
-  { status: 200, body: { csrfToken: "csrf-token-123456", state: "cleanup_required", sizeBytes: null, cleaned: false } },
-  { status: 200, body: { status: "cancelled", cleaned: true } },
+  { status: 200, body: { csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false } },
+  { status: 200, body: { csrfToken: "csrf-token-123456", state: "cancelled", sizeBytes: null, cleaned: true } },
 ];
-global.fetch = async () => {
+const fetchCalls = [];
+global.fetch = async (path, options = {}) => {
+  fetchCalls.push({ path, method: options.method || "GET" });
   const reply = fetchReplies.shift();
+  if (reply.throws) throw new Error("network_down");
   return { ok: reply.status >= 200 && reply.status < 300, status: reply.status,
     json: async () => reply.body };
 };
@@ -468,9 +474,17 @@ class FakeXHR extends Target {
   abort() { this.aborted = true; this.emit("abort"); }
 }
 global.XMLHttpRequest = FakeXHR;
+const lifecycle = {};
+global.addEventListener = (name, callback) => { lifecycle[name] = callback; };
 const timers = [];
-global.setTimeout = (callback) => { timers.push(callback); return timers.length; };
-global.clearTimeout = () => {};
+let nextTimer = 1;
+global.setTimeout = (callback) => {
+  const timer = { id: nextTimer++, callback }; timers.push(timer); return timer.id;
+};
+global.clearTimeout = (id) => {
+  const index = timers.findIndex((timer) => timer.id === id);
+  if (index >= 0) timers.splice(index, 1);
+};
 
 vm.runInThisContext(fs.readFileSync(process.argv[1], "utf8"), { filename: process.argv[1] });
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -490,27 +504,35 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(elements["#cancel-action"].disabled, true);
   assert.equal(timers.length, 1);
 
-  await timers.shift()();
+  await timers.shift().callback();
   await tick();
   assert.equal(elements["#status"].textContent, "취소 중입니다.");
   assert.equal(elements["#cancel-action"].disabled, true);
   assert.equal(timers.length, 1);
 
-  await timers.shift()();
+  await timers.shift().callback();
   await tick();
-  assert.equal(elements["#status"].textContent, "로컬 정리가 필요합니다.");
-  assert.equal(elements["#cancel-action"].textContent, "로컬 정리 다시 시도");
-  assert.equal(elements["#cancel-action"].disabled, false);
+  assert.equal(elements["#status"].textContent, "취소 중입니다.");
+  assert.equal(fetchCalls.filter((call) => call.path === "/api/cancel").length, 2);
+  assert.equal(timers.length, 1);
+
+  await timers.shift().callback();
+  await tick();
+  await timers.shift().callback();
+  await tick();
+  assert.equal(elements["#status"].textContent, "취소 중입니다.");
+  assert.equal(fetchCalls.filter((call) => call.path === "/api/cancel").length, 2);
+  assert.equal(elements["#cancel-action"].disabled, true);
+
+  await timers.shift().callback();
+  await tick();
+  assert.equal(elements["#status"].textContent, "로컬 정리가 끝났습니다. 이 창을 닫아도 됩니다.");
   assert.equal(elements["#source"].disabled, true);
 
   upload.status = 201;
   upload.emit("load");
   upload.emit("error");
   upload.upload.emit("progress", { lengthComputable: true, loaded: 1, total: 1 });
-  assert.equal(elements["#status"].textContent, "로컬 정리가 필요합니다.");
-
-  await elements["#cancel-action"].emit("click");
-  await tick();
   assert.equal(elements["#status"].textContent, "로컬 정리가 끝났습니다. 이 창을 닫아도 됩니다.");
   assert.equal(elements["#source"].disabled, true);
 
@@ -525,6 +547,16 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
   renderSession({ ...sessionBase, state: "ready" });
   assert.equal(elements["#source"].disabled, true);
   assert.equal(elements["#status"].textContent, "로컬 정리가 끝났습니다. 이 창을 닫아도 됩니다.");
+
+  let resolvePoll;
+  global.fetch = () => new Promise((resolve) => { resolvePoll = resolve; });
+  renderSession({ ...sessionBase, state: "cancelling" });
+  const poll = timers.shift();
+  void poll.callback(); await tick();
+  lifecycle.pagehide();
+  resolvePoll({ status: 200, json: async () => ({ ...sessionBase, state: "cancelled", cleaned: true }) });
+  await tick(); await tick();
+  assert.equal(timers.length, 0);
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 '''
     result = subprocess.run(
@@ -537,4 +569,121 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
         check=False,
     )
 
+    assert result.returncode == 0, result.stderr
+
+
+def test_companion_ui_exhausts_cancel_delivery_then_allows_manual_retry() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the executable companion UI contract")
+    app = Path(__file__).parents[1] / "maxmcp" / "local_ingest" / "web" / "app.js"
+    harness = r'''
+const fs = require("fs");
+const vm = require("vm");
+const assert = require("assert");
+class Target {
+  constructor() { this.listeners = {}; this.upload = null; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  emit(name, event = {}) { return this.listeners[name]?.(event); }
+}
+class Element extends Target {
+  constructor() { super(); this.disabled = false; this.textContent = ""; this.style = {};
+    this.files = null; this.value = ""; this.attributes = {}; }
+  setAttribute(name, value) { this.attributes[name] = value; }
+}
+const elements = { "#source": new Element(), "#select-action": new Element(),
+  "#cancel-action": new Element(), "#status": new Element(), "#progress-bar": new Element() };
+elements["#cancel-action"].textContent = "취소하고 닫기";
+global.document = { querySelector: (selector) => elements[selector] };
+const replies = [
+  { status: 200, body: { csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false } },
+  { pending: true },
+  { status: 200, body: { csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false } },
+  { status: 200, body: { csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false } },
+  { pending: true },
+  { status: 200, body: { status: "cancelled", cleaned: true } },
+];
+global.fetch = async () => {
+  const reply = replies.shift();
+  if (reply.pending) return new Promise(() => {});
+  if (reply.throws) throw new Error("network_down");
+  return { status: reply.status, json: async () => reply.body };
+};
+class FakeXHR extends Target {
+  constructor() { super(); this.upload = new Target(); }
+  open() {} setRequestHeader() {} send() {} abort() {}
+}
+global.XMLHttpRequest = FakeXHR;
+const timers = [];
+let nextTimer = 1;
+global.setTimeout = (callback) => {
+  const timer = { id: nextTimer++, callback }; timers.push(timer); return timer.id;
+};
+global.clearTimeout = (id) => {
+  const index = timers.findIndex((timer) => timer.id === id);
+  if (index >= 0) timers.splice(index, 1);
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], "utf8"), { filename: process.argv[1] });
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+(async () => {
+  await tick(); await tick();
+  void elements["#cancel-action"].emit("click"); await tick();
+  await timers.shift().callback(); await tick();
+  await timers.shift().callback(); await tick();
+  await timers.shift().callback(); await tick();
+  await timers.shift().callback(); await tick();
+  assert.equal(elements["#status"].textContent, "취소 요청을 보내지 못했습니다.");
+  assert.equal(elements["#cancel-action"].textContent, "취소 다시 시도");
+  assert.equal(elements["#cancel-action"].disabled, false);
+  assert.equal(elements["#source"].disabled, true);
+
+  await elements["#cancel-action"].emit("click"); await tick();
+  assert.equal(elements["#status"].textContent, "로컬 정리가 끝났습니다. 이 창을 닫아도 됩니다.");
+  assert.equal(elements["#cancel-action"].disabled, true);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", harness, str(app)], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_companion_ui_pagehide_does_not_render_aborted_initial_load() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the executable companion UI contract")
+    app = Path(__file__).parents[1] / "maxmcp" / "local_ingest" / "web" / "app.js"
+    harness = r'''
+const fs = require("fs");
+const vm = require("vm");
+const assert = require("assert");
+class Target { constructor() { this.listeners = {}; } addEventListener(n, c) { this.listeners[n] = c; } }
+class Element extends Target {
+  constructor() { super(); this.disabled = false; this.textContent = ""; this.style = {}; this.attributes = {}; }
+  setAttribute(name, value) { this.attributes[name] = value; }
+}
+const elements = { "#source": new Element(), "#select-action": new Element(),
+  "#cancel-action": new Element(), "#status": new Element(), "#progress-bar": new Element() };
+global.document = { querySelector: (selector) => elements[selector] };
+const lifecycle = {};
+global.addEventListener = (name, callback) => { lifecycle[name] = callback; };
+global.fetch = (_path, options) => new Promise((_resolve, reject) => {
+  options.signal.addEventListener("abort", () => reject(new Error("aborted")));
+});
+class FakeXHR extends Target { constructor() { super(); this.upload = new Target(); } }
+global.XMLHttpRequest = FakeXHR;
+vm.runInThisContext(fs.readFileSync(process.argv[1], "utf8"), { filename: process.argv[1] });
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+(async () => {
+  await tick();
+  lifecycle.pagehide();
+  await tick(); await tick();
+  assert.equal(elements["#status"].textContent, "");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", harness, str(app)], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=10, check=False,
+    )
     assert result.returncode == 0, result.stderr
