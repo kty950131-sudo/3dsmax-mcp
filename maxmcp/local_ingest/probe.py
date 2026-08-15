@@ -156,11 +156,34 @@ def probe_video(
         raise ProbeRejected("video_container_mismatch")
 
     candidates: list[dict[str, object]] = []
+    indexes: set[int] = set()
     for stream in streams:
-        if not isinstance(stream, dict) or stream.get("codec_type") != "video":
-            continue
+        if not isinstance(stream, dict):
+            raise ProbeRejected("video_stream_invalid")
+        index = stream.get("index")
+        codec_type = stream.get("codec_type")
+        codec_name = stream.get("codec_name")
         disposition = stream.get("disposition")
-        if not isinstance(disposition, dict) or disposition.get("attached_pic", 0) != 0:
+        attached_pic = disposition.get("attached_pic") if isinstance(disposition, dict) else None
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or index < 0
+            or index in indexes
+            or not isinstance(codec_type, str)
+            or not codec_type
+            or not isinstance(codec_name, str)
+            or not codec_name
+            or not isinstance(disposition, dict)
+            or not isinstance(attached_pic, int)
+            or isinstance(attached_pic, bool)
+            or attached_pic not in {0, 1}
+        ):
+            raise ProbeRejected("video_stream_invalid")
+        indexes.add(index)
+        if codec_type != "video":
+            continue
+        if attached_pic != 0:
             continue
         candidates.append(stream)
     if len(candidates) != 1:

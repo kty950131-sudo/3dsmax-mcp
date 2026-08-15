@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import json
 import threading
+from urllib.error import HTTPError
 
 import pytest
 
@@ -22,6 +23,7 @@ class _Api:
     def __init__(self) -> None:
         self.calls = []
         self.publish_error: Exception | None = None
+        self.publish_hook = None
 
     def create_job(self, metadata):
         self.calls.append(("create", metadata))
@@ -40,6 +42,8 @@ class _Api:
 
     def publish(self, job_id, revision, manifest):
         self.calls.append(("publish", revision, manifest))
+        if self.publish_hook:
+            self.publish_hook()
         if self.publish_error:
             raise self.publish_error
         return SimpleNamespace(job_id=job_id, status="completed")
@@ -323,3 +327,148 @@ def test_cleanup_failure_is_truthfully_reported_without_cleanup_ack(tmp_path: Pa
 
     assert result.state == "cleanup_required"
     assert not any(call[0] == "cleanup" for call in api.calls)
+
+
+def test_retry_publication_reads_strict_manifest_and_uses_fresh_upload_urls(tmp_path: Path) -> None:
+    api = _Api(); api.publish_error = TimeoutError("response lost")
+    uploaded = []
+    runner, _api, session = _runner(
+        tmp_path, api=api,
+        signed_uploader=lambda url, path, content_type: uploaded.append((url, path.name)),
+    )
+    assert runner.run("Motion").state == "publication_pending"
+    api.publish_error = None
+
+    result = runner.retry_publication()
+
+    assert result.state == "completed"
+    assert len([call for call in api.calls if call[0] == "authorize"]) == 2
+    assert len(uploaded) == 8
+    assert not session.workspace.path.exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda body: body.update({"extra": True}),
+        lambda body: body.update({"editRevision": 1}),
+        lambda body: body["artifacts"][0].update({"path": "../../escape"}),
+        lambda body: body["artifacts"].pop(),
+    ],
+    ids=["extra-key", "wrong-revision", "path-key", "missing-artifact"],
+)
+def test_retry_publication_rejects_malformed_retry_file_and_cleans_terminally(
+    tmp_path: Path, mutation
+) -> None:
+    api = _Api(); api.publish_error = TimeoutError("offline")
+    runner, _api, session = _runner(tmp_path, api=api)
+    assert runner.run("Motion").state == "publication_pending"
+    retry = session.workspace.path / "retry.json"
+    body = json.loads(retry.read_text(encoding="utf-8")); mutation(body)
+    retry.write_text(json.dumps(body), encoding="utf-8")
+
+    with pytest.raises(LocalRunRejected, match="retry_manifest_invalid"):
+        runner.retry_publication()
+
+    assert not session.workspace.path.exists()
+
+
+def test_retry_publication_rejects_non_utf8_retry_file_safely(tmp_path: Path) -> None:
+    api = _Api(); api.publish_error = TimeoutError("offline")
+    runner, _api, session = _runner(tmp_path, api=api)
+    assert runner.run("Motion").state == "publication_pending"
+    (session.workspace.path / "retry.json").write_bytes(b"\xff\xfe")
+    with pytest.raises(LocalRunRejected, match="retry_manifest_invalid"):
+        runner.retry_publication()
+    assert not session.workspace.path.exists()
+
+
+def test_retry_artifact_mutation_is_terminally_cleaned(tmp_path: Path) -> None:
+    api = _Api(); api.publish_error = TimeoutError("offline")
+    runner, _api, session = _runner(tmp_path, api=api)
+    assert runner.run("Motion").state == "publication_pending"
+    artifact = session.workspace.path / "artifacts" / "motion.bvh"
+    artifact.write_bytes(b"changed")
+
+    with pytest.raises(LocalRunRejected, match="retry_manifest_invalid"):
+        runner.retry_publication()
+
+    assert not session.workspace.path.exists()
+
+
+def test_completed_publish_latches_before_racing_cancel_and_still_cleans(tmp_path: Path) -> None:
+    api = _Api()
+    runner, _api, session = _runner(tmp_path, api=api)
+    api.publish_hook = runner.cancel
+
+    result = runner.run("Motion")
+
+    assert result.state == "completed"
+    assert not session.workspace.path.exists()
+    assert not any(call[0] == "cancelled" for call in api.calls)
+    assert any(call[0] == "cleanup" for call in api.calls)
+
+
+@pytest.mark.parametrize("status", [302, 400, 401, 403, 404, 409])
+def test_deterministic_publication_failures_terminally_clean(tmp_path: Path, status: int) -> None:
+    api = _Api(); api.publish_error = LocalIngestApiError("safe", status=status)
+    runner, _api, session = _runner(tmp_path, api=api)
+    workspace = session.workspace.path
+
+    with pytest.raises(LocalRunRejected, match="publication_failed"):
+        runner.run("Motion")
+
+    assert not workspace.exists()
+    assert not any(call[0] == "cleanup" for call in api.calls)
+    assert ("failed", "publication_failed") in api.calls
+
+
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 503])
+def test_retryable_publication_statuses_retain_for_retry(tmp_path: Path, status: int) -> None:
+    api = _Api(); api.publish_error = LocalIngestApiError("safe", status=status)
+    runner, _api, session = _runner(tmp_path, api=api)
+    assert runner.run("Motion").state == "publication_pending"
+    assert session.workspace.path.exists()
+    session.close()
+
+
+def test_signed_upload_redirect_is_terminal_and_never_retained(tmp_path: Path) -> None:
+    def redirect(*_args):
+        raise HTTPError("https://storage.test/?secret=value", 302, "redirect", {}, None)
+    runner, api, session = _runner(tmp_path, signed_uploader=redirect)
+    workspace = session.workspace.path
+
+    with pytest.raises(LocalRunRejected, match="publication_failed"):
+        runner.run("Motion")
+
+    assert not workspace.exists()
+    assert ("failed", "publication_failed") in api.calls
+
+
+def test_invalid_upload_authorization_contract_is_terminal_publication_failure(tmp_path: Path) -> None:
+    class BadAuthorization(_Api):
+        def authorize_uploads(self, job_id):
+            self.calls.append(("authorize",))
+            return (UploadAuthorization("bvh", "https://storage.test/bvh"),)
+    api = BadAuthorization()
+    runner, _api, session = _runner(tmp_path, api=api)
+    workspace = session.workspace.path
+
+    with pytest.raises(LocalRunRejected, match="publication_failed"):
+        runner.run("Motion")
+
+    assert not workspace.exists()
+    assert ("failed", "publication_failed") in api.calls
+
+
+def test_cleanup_failure_during_terminal_error_surfaces_cleanup_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = _Api(); api.publish_error = LocalIngestApiError("C:\\secret", status=403)
+    runner, _api, session = _runner(tmp_path, api=api)
+    monkeypatch.setattr(JobWorkspace, "cleanup", lambda _self: (_ for _ in ()).throw(OSError("C:\\private")))
+
+    with pytest.raises(LocalRunRejected, match="cleanup_required") as raised:
+        runner.run("Motion")
+
+    assert "private" not in str(raised.value)

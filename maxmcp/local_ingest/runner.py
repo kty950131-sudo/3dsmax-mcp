@@ -15,7 +15,7 @@ import time
 from typing import Any, Callable, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, build_opener
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from maxmcp.local_ingest.api_client import (
     LocalIngestApiClient,
@@ -30,6 +30,7 @@ from maxmcp.worker.artifacts import (
     upload_signed_artifact,
 )
 from maxmcp.worker.motion_pipeline import MotionPipeline, PipelineCancelled
+from maxmcp.worker.workspace import WorkspaceProcessLock
 
 
 _LOCAL_RUN_LOCK = threading.Lock()
@@ -41,6 +42,13 @@ _CONTENT_TYPES = {
     "thumbnail": "image/webp",
     "metadata": "application/json",
 }
+_ARTIFACT_NAMES = {
+    "bvh": "motion.bvh",
+    "rtmw3d_json": "motion.rtmw3d.json.gz",
+    "thumbnail": "thumbnail.webp",
+    "metadata": "metadata.json",
+}
+_NETWORK_ERRORS = (LocalIngestApiError, HTTPError, URLError, TimeoutError, HTTPException)
 
 
 class LocalRunRejected(RuntimeError):
@@ -73,9 +81,21 @@ def _manifest(artifacts: Sequence[LocalArtifact]) -> tuple[dict[str, object], ..
         raise LocalRunRejected("artifact_set_invalid")
     result: list[dict[str, object]] = []
     for item in artifacts:
-        if not item.path.is_file():
+        try:
+            info = item.path.stat(follow_symlinks=False)
+            attributes = getattr(info, "st_file_attributes", 0)
+            reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        except OSError:
+            raise LocalRunRejected("artifact_set_invalid") from None
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or item.path.is_symlink()
+            or (hasattr(item.path, "is_junction") and item.path.is_junction())
+            or attributes & reparse
+            or item.path.resolve() != item.path
+        ):
             raise LocalRunRejected("artifact_set_invalid")
-        size = item.path.stat().st_size
+        size = info.st_size
         digest = sha256_file(item.path)
         if size != item.size_bytes or digest != item.sha256:
             raise LocalRunRejected("artifact_changed")
@@ -88,6 +108,22 @@ def _manifest(artifacts: Sequence[LocalArtifact]) -> tuple[dict[str, object], ..
             }
         )
     return tuple(result)
+
+
+def _error_status(error: BaseException) -> int | None:
+    if isinstance(error, HTTPError):
+        return error.code
+    status = getattr(error, "status", None)
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
+
+
+def _retryable_network_error(error: BaseException) -> bool:
+    status = _error_status(error)
+    if status is not None:
+        return status in {408, 425, 429} or status >= 500
+    if isinstance(error, LocalIngestApiError):
+        return str(error) == "ARTOKE API request failed"
+    return isinstance(error, (URLError, TimeoutError, HTTPException))
 
 
 def _safe_processing_file(path: Path, workspace: Path, expected_size: int) -> None:
@@ -138,14 +174,36 @@ class LocalIngestRunner:
         self._cancelled = threading.Event()
         self._last_progress = -1
         self._last_stage = -1
+        self._state_lock = threading.Lock()
+        self._publication_acknowledged = False
+        self._pending_job_id: str | None = None
 
     def cancel(self) -> None:
-        self._cancelled.set()
+        with self._state_lock:
+            if self._publication_acknowledged:
+                return
+            self._cancelled.set()
         self._pipeline.cancel()
 
-    def run(self, name: str) -> LocalRunResult:
+    def _acquire_run_locks(self) -> WorkspaceProcessLock:
         if not _LOCAL_RUN_LOCK.acquire(blocking=False):
             raise LocalRunRejected("local_job_in_progress")
+        process_lock = WorkspaceProcessLock(self._session.workspace.root)
+        try:
+            if not process_lock.acquire():
+                raise LocalRunRejected("local_job_in_progress")
+            return process_lock
+        except BaseException:
+            _LOCAL_RUN_LOCK.release()
+            raise
+
+    @staticmethod
+    def _release_run_locks(process_lock: WorkspaceProcessLock) -> None:
+        process_lock.release()
+        _LOCAL_RUN_LOCK.release()
+
+    def run(self, name: str) -> LocalRunResult:
+        process_lock = self._acquire_run_locks()
         job_id: str | None = None
         workspace = self._session.workspace
         retained = False
@@ -194,25 +252,21 @@ class LocalIngestRunner:
                 self._progress(job_id, "uploading", 90)
                 try:
                     published = self._upload_and_publish(job_id, artifacts, frozen)
-                except (LocalIngestApiError, HTTPError, URLError, TimeoutError, HTTPException):
-                    self._write_retry(job_id, frozen)
-                    retained = True
-                    return LocalRunResult("publication_pending", job_id)
+                except LocalRunRejected:
+                    raise LocalRunRejected("publication_failed") from None
+                except _NETWORK_ERRORS as exc:
+                    if _retryable_network_error(exc):
+                        self._write_retry(job_id, frozen)
+                        self._pending_job_id = job_id
+                        retained = True
+                        return LocalRunResult("publication_pending", job_id)
+                    raise LocalRunRejected("publication_failed") from None
                 if published.job_id != job_id or published.status != "completed":
-                    self._write_retry(job_id, frozen)
-                    retained = True
-                    return LocalRunResult("publication_pending", job_id)
+                    raise LocalRunRejected("publication_failed")
+                with self._state_lock:
+                    self._publication_acknowledged = True
 
-            cleanup = self._session.close()
-            if cleanup.state != "closed" or not cleanup.cleaned:
-                return LocalRunResult("cleanup_required", job_id, cleanup_required=True)
-            try:
-                acknowledged = self._retry(lambda: self._api.acknowledge_cleanup(job_id))
-            except (LocalIngestApiError, HTTPError, URLError, TimeoutError, HTTPException):
-                return LocalRunResult("cleanup_required", job_id, cleanup_required=True)
-            if not acknowledged:
-                return LocalRunResult("cleanup_required", job_id, cleanup_required=True)
-            return LocalRunResult("completed", job_id)
+            return self._finalize_acknowledged(job_id)
         except PipelineCancelled:
             if job_id is not None:
                 try:
@@ -222,18 +276,26 @@ class LocalIngestRunner:
             self._session.cancel()
             return LocalRunResult("cancelled", job_id)
         except (ProbeRejected, UploadRejected) as exc:
-            self._fail_and_clean(job_id, exc.code)
+            if self._fail_and_clean(job_id, exc.code):
+                raise LocalRunRejected("cleanup_required") from None
             raise LocalRunRejected(exc.code) from None
-        except LocalRunRejected:
+        except LocalRunRejected as exc:
             if job_id is not None and not retained:
-                self._fail_and_clean(job_id, "local_processing_failed")
+                terminal_code = (
+                    "publication_failed"
+                    if exc.code == "publication_failed"
+                    else "local_processing_failed"
+                )
+                if self._fail_and_clean(job_id, terminal_code):
+                    raise LocalRunRejected("cleanup_required") from None
             raise
         except (RuntimeError, ValueError, OSError):
-            self._fail_and_clean(job_id, "local_processing_failed")
+            if self._fail_and_clean(job_id, "local_processing_failed"):
+                raise LocalRunRejected("cleanup_required") from None
             raise LocalRunRejected("local_processing_failed") from None
         finally:
             workspace.release()
-            _LOCAL_RUN_LOCK.release()
+            self._release_run_locks(process_lock)
 
     def _materialize(self, stream: Any, expected_size: int, display_name: str) -> tuple[Path, str]:
         extension = Path(display_name).suffix.lower()
@@ -293,7 +355,9 @@ class LocalIngestRunner:
             raise PipelineCancelled()
 
     def _ensure_not_cancelled(self) -> None:
-        if self._cancelled.is_set():
+        with self._state_lock:
+            acknowledged = self._publication_acknowledged
+        if self._cancelled.is_set() and not acknowledged:
             raise PipelineCancelled()
 
     def _retry(self, operation: Callable[[], Any]) -> Any:
@@ -301,12 +365,8 @@ class LocalIngestRunner:
             self._ensure_not_cancelled()
             try:
                 return operation()
-            except (LocalIngestApiError, HTTPError, URLError, TimeoutError, HTTPException) as exc:
-                status = getattr(exc, "status", None)
-                if isinstance(exc, HTTPError):
-                    status = exc.code
-                retryable = status is None or status in {408, 425, 429} or status >= 500
-                if not retryable or attempt == 2:
+            except _NETWORK_ERRORS as exc:
+                if not _retryable_network_error(exc) or attempt == 2:
                     raise
                 self._sleeper(0.1 * (attempt + 1))
         raise AssertionError("unreachable")
@@ -343,10 +403,121 @@ class LocalIngestRunner:
         target = self._session.workspace.path / "retry.json"
         target.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
 
-    def _fail_and_clean(self, job_id: str | None, code: str) -> None:
+    def retry_publication(self) -> LocalRunResult:
+        """Retry within the live scoped API session; credentials are never persisted."""
+        process_lock = self._acquire_run_locks()
+        workspace = self._session.workspace
+        job_id = self._pending_job_id
+        try:
+            workspace.acquire()
+            if job_id is None:
+                raise LocalRunRejected("retry_unavailable")
+            artifacts, frozen = self._read_retry(job_id)
+            try:
+                published = self._upload_and_publish(job_id, artifacts, frozen)
+            except _NETWORK_ERRORS as exc:
+                if _retryable_network_error(exc):
+                    return LocalRunResult("publication_pending", job_id)
+                raise LocalRunRejected("publication_failed") from None
+            if published.job_id != job_id or published.status != "completed":
+                raise LocalRunRejected("publication_failed")
+            with self._state_lock:
+                self._publication_acknowledged = True
+            self._pending_job_id = None
+            return self._finalize_acknowledged(job_id)
+        except LocalRunRejected as exc:
+            if job_id is not None and exc.code != "retry_unavailable":
+                if self._fail_and_clean(job_id, "publication_failed"):
+                    raise LocalRunRejected("cleanup_required") from None
+            if exc.code in {"retry_manifest_invalid", "retry_unavailable"}:
+                raise
+            raise LocalRunRejected("publication_failed") from None
+        finally:
+            workspace.release()
+            self._release_run_locks(process_lock)
+
+    def _read_retry(
+        self, job_id: str
+    ) -> tuple[tuple[LocalArtifact, ...], tuple[dict[str, object], ...]]:
+        target = self._session.workspace.path / "retry.json"
+        try:
+            info = target.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_size > 64 * 1024
+                or target.is_symlink()
+                or target.resolve() != target
+            ):
+                raise ValueError
+            body = json.loads(target.read_bytes())
+            if not isinstance(body, dict) or set(body) != {"schema", "jobId", "editRevision", "artifacts"}:
+                raise ValueError
+            if body["schema"] != "artoke.local.retry.v1" or body["editRevision"] != 0:
+                raise ValueError
+            parsed_id = UUID(body["jobId"])
+            if str(parsed_id) != job_id or body["jobId"] != job_id:
+                raise ValueError
+            manifest = body["artifacts"]
+            if not isinstance(manifest, list) or len(manifest) != 4:
+                raise ValueError
+            expected: dict[str, dict[str, object]] = {}
+            for raw in manifest:
+                if not isinstance(raw, dict) or set(raw) != {"kind", "sizeBytes", "sha256", "formatVersion"}:
+                    raise ValueError
+                kind = raw["kind"]
+                if kind not in _ARTIFACT_NAMES or kind in expected:
+                    raise ValueError
+                if (
+                    not isinstance(raw["sizeBytes"], int)
+                    or isinstance(raw["sizeBytes"], bool)
+                    or raw["sizeBytes"] <= 0
+                    or not isinstance(raw["sha256"], str)
+                    or len(raw["sha256"]) != 64
+                    or any(character not in "0123456789abcdef" for character in raw["sha256"])
+                    or not isinstance(raw["formatVersion"], str)
+                    or not 1 <= len(raw["formatVersion"]) <= 40
+                ):
+                    raise ValueError
+                expected[kind] = raw
+            if set(expected) != set(_ARTIFACT_NAMES):
+                raise ValueError
+            artifact_dir = self._session.workspace.path / "artifacts"
+            if artifact_dir.resolve() != artifact_dir or artifact_dir.parent != self._session.workspace.path:
+                raise ValueError
+            artifacts = tuple(
+                LocalArtifact(
+                    kind,
+                    artifact_dir / _ARTIFACT_NAMES[kind],
+                    expected[kind]["sizeBytes"],
+                    expected[kind]["sha256"],
+                    expected[kind]["formatVersion"],
+                )
+                for kind in _ARTIFACT_NAMES
+            )
+            frozen = _manifest(artifacts)
+            if tuple(expected[item.kind] for item in artifacts) != frozen:
+                raise ValueError
+            return artifacts, frozen
+        except (OSError, ValueError, TypeError, json.JSONDecodeError, LocalRunRejected):
+            raise LocalRunRejected("retry_manifest_invalid") from None
+
+    def _finalize_acknowledged(self, job_id: str) -> LocalRunResult:
+        cleanup = self._session.close()
+        if cleanup.state != "closed" or not cleanup.cleaned:
+            return LocalRunResult("cleanup_required", job_id, cleanup_required=True)
+        try:
+            acknowledged = self._retry(lambda: self._api.acknowledge_cleanup(job_id))
+        except _NETWORK_ERRORS:
+            return LocalRunResult("cleanup_required", job_id, cleanup_required=True)
+        if not acknowledged:
+            return LocalRunResult("cleanup_required", job_id, cleanup_required=True)
+        return LocalRunResult("completed", job_id)
+
+    def _fail_and_clean(self, job_id: str | None, code: str) -> bool:
         if job_id is not None:
             try:
                 self._api.finish_failed(job_id, code if code.replace("_", "").isalnum() else "local_processing_failed")
-            except (LocalIngestApiError, HTTPError, URLError, TimeoutError, HTTPException):
+            except _NETWORK_ERRORS:
                 pass
-        self._session.close()
+        cleanup = self._session.close()
+        return cleanup.state != "closed" or not cleanup.cleaned

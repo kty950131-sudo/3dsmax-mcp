@@ -118,3 +118,31 @@ def test_probe_requires_codec_compatible_with_detected_container(tmp_path: Path)
     streams = [{"index": 0, "codec_type": "video", "codec_name": "hevc", "width": 640, "height": 480, "disposition": {"attached_pic": 0}}]
     with pytest.raises(ProbeRejected, match="video_stream_invalid"):
         probe_video(source, "clip.avi", run=lambda *_a, **_k: _Result(_payload(format_name="avi", streams=streams)))
+
+
+@pytest.mark.parametrize(
+    "bad_stream",
+    [
+        {"index": True, "codec_type": "audio", "codec_name": "aac", "disposition": {"attached_pic": 0}},
+        {"index": 1, "codec_type": "video", "width": 640, "height": 480, "disposition": {"attached_pic": 0}},
+        {"index": 1, "codec_type": "audio", "codec_name": "aac", "disposition": {"attached_pic": "0"}},
+    ],
+    ids=["bool-index", "missing-codec", "invalid-disposition"],
+)
+def test_probe_rejects_malformed_secondary_stream_before_selecting_primary(
+    tmp_path: Path, bad_stream: dict[str, object]
+) -> None:
+    source = tmp_path / "clip.mp4"; source.write_bytes(b"x")
+    primary = {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 640, "height": 480, "disposition": {"attached_pic": 0}}
+    with pytest.raises(ProbeRejected, match="video_stream_invalid"):
+        probe_video(source, "clip.mp4", run=lambda *_a, **_k: _Result(_payload(streams=[primary, bad_stream])))
+
+
+def test_probe_rejects_duplicate_stream_indexes(tmp_path: Path) -> None:
+    source = tmp_path / "clip.mp4"; source.write_bytes(b"x")
+    streams = [
+        {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 640, "height": 480, "disposition": {"attached_pic": 0}},
+        {"index": 0, "codec_type": "audio", "codec_name": "aac", "disposition": {"attached_pic": 0}},
+    ]
+    with pytest.raises(ProbeRejected, match="video_stream_invalid"):
+        probe_video(source, "clip.mp4", run=lambda *_a, **_k: _Result(_payload(streams=streams)))
