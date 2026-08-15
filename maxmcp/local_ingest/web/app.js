@@ -341,8 +341,13 @@ sourceInput.addEventListener("change", () => {
 cancelAction.addEventListener("click", requestCleanup);
 globalThis.addEventListener?.("pagehide", () => {
   disposed = true;
-  cancelIntent = false;
   generation += 1;
+  const uploadRequest = activeUpload;
+  activeUpload = null;
+  if (uploadRequest) {
+    try { uploadRequest.abort(); } catch (_error) { /* page teardown still wins */ }
+  }
+  cancelIntent = false;
   stopPolling();
   for (const controller of activeFetchControllers) controller.abort();
   activeFetchControllers.clear();

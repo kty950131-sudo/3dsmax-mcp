@@ -687,3 +687,64 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
         encoding="utf-8", errors="replace", timeout=10, check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_companion_ui_pagehide_detaches_and_aborts_active_upload() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the executable companion UI contract")
+    app = Path(__file__).parents[1] / "maxmcp" / "local_ingest" / "web" / "app.js"
+    harness = r'''
+const fs = require("fs");
+const vm = require("vm");
+const assert = require("assert");
+class Target {
+  constructor() { this.listeners = {}; this.upload = null; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  emit(name, event = {}) { return this.listeners[name]?.(event); }
+}
+class Element extends Target {
+  constructor() { super(); this.disabled = false; this.textContent = ""; this.style = {};
+    this.files = null; this.value = ""; this.attributes = {}; }
+  setAttribute(name, value) { this.attributes[name] = value; }
+}
+const elements = { "#source": new Element(), "#select-action": new Element(),
+  "#cancel-action": new Element(), "#status": new Element(), "#progress-bar": new Element() };
+global.document = { querySelector: (selector) => elements[selector] };
+const lifecycle = {};
+global.addEventListener = (name, callback) => { lifecycle[name] = callback; };
+global.fetch = async () => ({ status: 200, json: async () => ({
+  csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false,
+}) });
+const requests = [];
+class FakeXHR extends Target {
+  constructor() { super(); this.upload = new Target(); this.headers = {}; this.abortCalls = 0; requests.push(this); }
+  open() {} setRequestHeader(name, value) { this.headers[name] = value; } send() {}
+  abort() { this.abortCalls += 1; throw new Error("abort_failed"); }
+}
+global.XMLHttpRequest = FakeXHR;
+vm.runInThisContext(fs.readFileSync(process.argv[1], "utf8"), { filename: process.argv[1] });
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+(async () => {
+  await tick(); await tick();
+  elements["#source"].files = [{ name: "clip.mp4" }];
+  elements["#source"].emit("change");
+  const upload = requests[0];
+  const statusBeforeHide = elements["#status"].textContent;
+
+  assert.doesNotThrow(() => lifecycle.pagehide());
+  assert.equal(upload.abortCalls, 1);
+  assert.equal(vm.runInThisContext("activeUpload"), null);
+
+  upload.status = 201;
+  upload.upload.emit("progress", { lengthComputable: true, loaded: 1, total: 1 });
+  upload.emit("load");
+  upload.emit("error");
+  assert.equal(elements["#status"].textContent, statusBeforeHide);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", harness, str(app)], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stderr
