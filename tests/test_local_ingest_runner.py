@@ -342,9 +342,78 @@ def test_retry_publication_reads_strict_manifest_and_uses_fresh_upload_urls(tmp_
     result = runner.retry_publication()
 
     assert result.state == "completed"
-    assert len([call for call in api.calls if call[0] == "authorize"]) == 2
-    assert len(uploaded) == 8
+    assert len([call for call in api.calls if call[0] == "authorize"]) == 1
+    assert len(uploaded) == 4
     assert not session.workspace.path.exists()
+
+
+def test_publish_response_loss_replays_publish_before_any_reupload(tmp_path: Path) -> None:
+    class CommittedButLost(_Api):
+        def __init__(self):
+            super().__init__(); self.publish_attempts = 0; self.authorize_attempts = 0
+        def authorize_uploads(self, job_id):
+            self.authorize_attempts += 1
+            if self.authorize_attempts > 1:
+                raise AssertionError("completed objects must not be reauthorized or reuploaded")
+            return super().authorize_uploads(job_id)
+        def publish(self, job_id, revision, manifest):
+            self.calls.append(("publish", revision, manifest)); self.publish_attempts += 1
+            if self.publish_attempts <= 3:
+                raise TimeoutError("response lost after commit")
+            return SimpleNamespace(job_id=job_id, status="completed")
+    api = CommittedButLost()
+    runner, _api, session = _runner(tmp_path, api=api)
+
+    assert runner.run("Motion").state == "publication_pending"
+    retry = json.loads((session.workspace.path / "retry.json").read_text(encoding="utf-8"))
+    assert retry["phase"] == "publish_indeterminate"
+    result = runner.retry_publication()
+
+    assert result.state == "completed"
+    assert api.authorize_attempts == 1
+    assert not session.workspace.path.exists()
+
+
+def test_upload_failure_persists_upload_pending_phase(tmp_path: Path) -> None:
+    runner, _api, session = _runner(
+        tmp_path,
+        signed_uploader=lambda *_args: (_ for _ in ()).throw(TimeoutError("offline")),
+    )
+    assert runner.run("Motion").state == "publication_pending"
+    retry = json.loads((session.workspace.path / "retry.json").read_text(encoding="utf-8"))
+    assert retry["phase"] == "upload_pending"
+    session.close()
+
+
+def test_upload_pending_retry_requests_fresh_urls_and_reuploads(tmp_path: Path) -> None:
+    offline = True
+    uploads = []
+    def upload(url, path, _content_type):
+        if offline:
+            raise TimeoutError("offline")
+        uploads.append((url, path.name))
+    runner, api, _session_value = _runner(tmp_path, signed_uploader=upload)
+    assert runner.run("Motion").state == "publication_pending"
+    offline = False
+
+    assert runner.retry_publication().state == "completed"
+    assert len([call for call in api.calls if call[0] == "authorize"]) == 2
+    assert len(uploads) == 4
+
+
+def test_indeterminate_publish_conflict_stays_retained_without_reupload(tmp_path: Path) -> None:
+    api = _Api(); api.publish_error = TimeoutError("lost")
+    runner, _api, session = _runner(tmp_path, api=api)
+    assert runner.run("Motion").state == "publication_pending"
+    authorize_before = len([call for call in api.calls if call[0] == "authorize"])
+    api.publish_error = LocalIngestApiError("conflict", status=409)
+
+    result = runner.retry_publication()
+
+    assert result.state == "publication_conflict"
+    assert session.workspace.path.exists()
+    assert len([call for call in api.calls if call[0] == "authorize"]) == authorize_before
+    session.close()
 
 
 @pytest.mark.parametrize(
@@ -472,3 +541,30 @@ def test_cleanup_failure_during_terminal_error_surfaces_cleanup_required(
         runner.run("Motion")
 
     assert "private" not in str(raised.value)
+
+
+def test_cancellation_cleanup_failure_returns_cleanup_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, _api, session = _runner(tmp_path, pipeline=_Pipeline(cancel=True))
+    monkeypatch.setattr(JobWorkspace, "cleanup", lambda _self: (_ for _ in ()).throw(OSError("locked")))
+
+    result = runner.run("Motion")
+
+    assert result.state == "cleanup_required"
+    assert result.cleanup_required is True
+
+
+@pytest.mark.parametrize("invalid_job_id", [None, 9, [], {}], ids=["null", "number", "list", "object"])
+def test_retry_job_id_type_errors_normalize_and_clean_safely(tmp_path: Path, invalid_job_id: object) -> None:
+    api = _Api(); api.publish_error = TimeoutError("offline")
+    runner, _api, session = _runner(tmp_path, api=api)
+    assert runner.run("Motion").state == "publication_pending"
+    target = session.workspace.path / "retry.json"
+    body = json.loads(target.read_text(encoding="utf-8")); body["jobId"] = invalid_job_id
+    target.write_text(json.dumps(body), encoding="utf-8")
+
+    with pytest.raises(LocalRunRejected, match="retry_manifest_invalid"):
+        runner.retry_publication()
+
+    assert not session.workspace.path.exists()

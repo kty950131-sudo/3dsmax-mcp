@@ -251,12 +251,21 @@ class LocalIngestRunner:
                 frozen = _manifest(artifacts)
                 self._progress(job_id, "uploading", 90)
                 try:
-                    published = self._upload_and_publish(job_id, artifacts, frozen)
+                    self._upload_artifacts(job_id, artifacts, frozen)
                 except LocalRunRejected:
                     raise LocalRunRejected("publication_failed") from None
                 except _NETWORK_ERRORS as exc:
                     if _retryable_network_error(exc):
-                        self._write_retry(job_id, frozen)
+                        self._write_retry(job_id, frozen, "upload_pending")
+                        self._pending_job_id = job_id
+                        retained = True
+                        return LocalRunResult("publication_pending", job_id)
+                    raise LocalRunRejected("publication_failed") from None
+                self._write_retry(job_id, frozen, "publish_indeterminate")
+                try:
+                    published = self._retry(lambda: self._api.publish(job_id, 0, frozen))
+                except _NETWORK_ERRORS as exc:
+                    if _retryable_network_error(exc):
                         self._pending_job_id = job_id
                         retained = True
                         return LocalRunResult("publication_pending", job_id)
@@ -273,7 +282,9 @@ class LocalIngestRunner:
                     self._api.finish_cancelled(job_id)
                 except (LocalIngestApiError, HTTPError, URLError, TimeoutError, HTTPException):
                     pass
-            self._session.cancel()
+            cleanup = self._session.cancel()
+            if cleanup.state == "cleanup_required" or not cleanup.cleaned:
+                return LocalRunResult("cleanup_required", job_id, cleanup_required=True)
             return LocalRunResult("cancelled", job_id)
         except (ProbeRejected, UploadRejected) as exc:
             if self._fail_and_clean(job_id, exc.code):
@@ -371,12 +382,12 @@ class LocalIngestRunner:
                 self._sleeper(0.1 * (attempt + 1))
         raise AssertionError("unreachable")
 
-    def _upload_and_publish(
+    def _upload_artifacts(
         self,
         job_id: str,
         artifacts: Sequence[LocalArtifact],
         frozen: tuple[dict[str, object], ...],
-    ) -> Any:
+    ) -> None:
         authorizations = self._retry(lambda: self._api.authorize_uploads(job_id))
         by_kind = {item.kind: item.upload_url for item in authorizations}
         if set(by_kind) != set(_CONTENT_TYPES):
@@ -396,12 +407,52 @@ class LocalIngestRunner:
         final_manifest = _manifest(artifacts)
         if final_manifest != frozen:
             raise LocalRunRejected("artifact_changed")
-        return self._retry(lambda: self._api.publish(job_id, 0, final_manifest))
 
-    def _write_retry(self, job_id: str, manifest: Sequence[Mapping[str, object]]) -> None:
-        payload = {"schema": "artoke.local.retry.v1", "jobId": job_id, "editRevision": 0, "artifacts": list(manifest)}
+    def _write_retry(
+        self,
+        job_id: str,
+        manifest: Sequence[Mapping[str, object]],
+        phase: str,
+    ) -> None:
+        if phase not in {"upload_pending", "publish_indeterminate"}:
+            raise LocalRunRejected("retry_manifest_invalid")
+        payload = {
+            "schema": "artoke.local.retry.v1",
+            "phase": phase,
+            "jobId": job_id,
+            "editRevision": 0,
+            "artifacts": list(manifest),
+        }
+        encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         target = self._session.workspace.path / "retry.json"
-        target.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        temporary = self._session.workspace.path / f".{uuid4()}.retry.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        for optional in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
+            flags |= int(getattr(os, optional, 0))
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(temporary, flags, 0o600)
+            written = 0
+            while written < len(encoded):
+                count = os.write(descriptor, encoded[written:])
+                if count <= 0:
+                    raise OSError
+                written += count
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
+            os.replace(temporary, target)
+            if os.name != "nt":
+                directory = os.open(self._session.workspace.path, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+        except OSError:
+            if descriptor is not None:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+            raise LocalRunRejected("retry_manifest_invalid") from None
 
     def retry_publication(self) -> LocalRunResult:
         """Retry within the live scoped API session; credentials are never persisted."""
@@ -412,14 +463,26 @@ class LocalIngestRunner:
             workspace.acquire()
             if job_id is None:
                 raise LocalRunRejected("retry_unavailable")
-            artifacts, frozen = self._read_retry(job_id)
+            artifacts, frozen, phase = self._read_retry(job_id)
+            if phase == "upload_pending":
+                try:
+                    self._upload_artifacts(job_id, artifacts, frozen)
+                except _NETWORK_ERRORS as exc:
+                    if _retryable_network_error(exc):
+                        return LocalRunResult("publication_pending", job_id)
+                    raise LocalRunRejected("publication_failed") from None
+                self._write_retry(job_id, frozen, "publish_indeterminate")
             try:
-                published = self._upload_and_publish(job_id, artifacts, frozen)
+                published = self._retry(lambda: self._api.publish(job_id, 0, frozen))
             except _NETWORK_ERRORS as exc:
                 if _retryable_network_error(exc):
                     return LocalRunResult("publication_pending", job_id)
+                if phase == "publish_indeterminate":
+                    return LocalRunResult("publication_conflict", job_id)
                 raise LocalRunRejected("publication_failed") from None
             if published.job_id != job_id or published.status != "completed":
+                if phase == "publish_indeterminate":
+                    return LocalRunResult("publication_conflict", job_id)
                 raise LocalRunRejected("publication_failed")
             with self._state_lock:
                 self._publication_acknowledged = True
@@ -438,7 +501,11 @@ class LocalIngestRunner:
 
     def _read_retry(
         self, job_id: str
-    ) -> tuple[tuple[LocalArtifact, ...], tuple[dict[str, object], ...]]:
+    ) -> tuple[
+        tuple[LocalArtifact, ...],
+        tuple[dict[str, object], ...],
+        str,
+    ]:
         target = self._session.workspace.path / "retry.json"
         try:
             info = target.stat(follow_symlinks=False)
@@ -450,9 +517,16 @@ class LocalIngestRunner:
             ):
                 raise ValueError
             body = json.loads(target.read_bytes())
-            if not isinstance(body, dict) or set(body) != {"schema", "jobId", "editRevision", "artifacts"}:
+            if not isinstance(body, dict) or set(body) != {
+                "schema", "phase", "jobId", "editRevision", "artifacts"
+            }:
                 raise ValueError
             if body["schema"] != "artoke.local.retry.v1" or body["editRevision"] != 0:
+                raise ValueError
+            phase = body["phase"]
+            if phase not in {"upload_pending", "publish_indeterminate"}:
+                raise ValueError
+            if not isinstance(body["jobId"], str):
                 raise ValueError
             parsed_id = UUID(body["jobId"])
             if str(parsed_id) != job_id or body["jobId"] != job_id:
@@ -497,8 +571,15 @@ class LocalIngestRunner:
             frozen = _manifest(artifacts)
             if tuple(expected[item.kind] for item in artifacts) != frozen:
                 raise ValueError
-            return artifacts, frozen
-        except (OSError, ValueError, TypeError, json.JSONDecodeError, LocalRunRejected):
+            return artifacts, frozen, phase
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            AttributeError,
+            json.JSONDecodeError,
+            LocalRunRejected,
+        ):
             raise LocalRunRejected("retry_manifest_invalid") from None
 
     def _finalize_acknowledged(self, job_id: str) -> LocalRunResult:
