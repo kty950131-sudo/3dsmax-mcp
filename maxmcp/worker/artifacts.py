@@ -166,20 +166,38 @@ def build_artifacts(
     duration_seconds: float,
     *,
     edit_revision: int = 0,
+    tracking_encoding: str = "gzip_v1",
     process_runner: Callable[..., Any] = subprocess.run,
 ) -> tuple[LocalArtifact, ...]:
+    if tracking_encoding not in {"identity", "gzip_v1"}:
+        raise ValueError("unsupported tracking encoding")
+    if pipeline.rtmw3d_json.stat().st_size > MAX_TRACKING_DECOMPRESSED_BYTES:
+        raise ValueError("decompressed RTMW3D JSON exceeds 256 MiB")
+    try:
+        with pipeline.rtmw3d_json.open("r", encoding="utf-8") as source:
+            json.load(source)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("tracking JSON is invalid") from exc
+
     output_dir.mkdir(parents=True, exist_ok=True)
     bvh = output_dir / "motion.bvh"
-    body = output_dir / "motion.rtmw3d.json.gz"
+    body = output_dir / (
+        "motion.rtmw3d.json.gz"
+        if tracking_encoding == "gzip_v1"
+        else "motion.rtmw3d.json"
+    )
     thumbnail = output_dir / "thumbnail.webp"
     metadata_path = output_dir / "metadata.json"
     shutil.copy2(pipeline.bvh, bvh)
-    with pipeline.rtmw3d_json.open("rb") as source, body.open("wb") as output:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as compressed:
-            shutil.copyfileobj(source, compressed, length=1024 * 1024)
+    if tracking_encoding == "gzip_v1":
+        with pipeline.rtmw3d_json.open("rb") as source, body.open("wb") as output:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as compressed:
+                shutil.copyfileobj(source, compressed, length=1024 * 1024)
+    else:
+        shutil.copyfile(pipeline.rtmw3d_json, body)
     if body.stat().st_size > MAX_TRACKING_COMPRESSED_BYTES:
         body.unlink(missing_ok=True)
-        raise ValueError("compressed RTMW3D JSON exceeds 45 MiB")
+        raise ValueError("stored RTMW3D JSON exceeds 45 MiB")
 
     frame_count, frame_time = _bvh_info(bvh)
     if frame_count != pipeline.frame_count:

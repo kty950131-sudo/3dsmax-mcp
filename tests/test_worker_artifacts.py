@@ -68,6 +68,39 @@ def test_download_transparently_expands_and_validates_tracking_gzip(tmp_path: Pa
     assert json.loads(target.read_text(encoding="utf-8"))["schema"] == "artoke.rtmw3d.v1"
 
 
+def test_tracking_download_enforces_stored_and_decompressed_boundaries(tmp_path: Path) -> None:
+    target = tmp_path / "original.rtmw3d.json"
+    readable = b'{"schema":"artoke.rtmw3d.v1"}'
+    stored = gzip.compress(readable, mtime=0)
+
+    download_source(
+        "https://signed.test/tracking",
+        target,
+        max_bytes=len(stored),
+        max_decompressed_json_bytes=len(readable),
+        opener=lambda *_args, **_kwargs: DownloadResponse(stored),
+    )
+    assert target.read_bytes() == readable
+
+    with pytest.raises(ValueError, match="source download is too large"):
+        download_source(
+            "https://signed.test/tracking",
+            target,
+            max_bytes=len(stored) - 1,
+            max_decompressed_json_bytes=len(readable),
+            opener=lambda *_args, **_kwargs: DownloadResponse(stored),
+        )
+
+    with pytest.raises(ValueError, match="decompressed JSON is too large"):
+        download_source(
+            "https://signed.test/tracking",
+            target,
+            max_bytes=len(stored),
+            max_decompressed_json_bytes=len(readable) - 1,
+            opener=lambda *_args, **_kwargs: DownloadResponse(stored),
+        )
+
+
 def test_download_bounds_tracking_expansion_and_removes_invalid_json(tmp_path: Path) -> None:
     target = tmp_path / "original.rtmw3d.json"
     with pytest.raises(ValueError, match="too large"):
@@ -156,6 +189,61 @@ def test_build_artifacts_creates_four_fixed_outputs(tmp_path: Path) -> None:
     assert metadata["warnings"] == []
 
 
+def test_build_artifacts_preserves_valid_legacy_identity_tracking(tmp_path: Path) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    body = tmp_path / "walk_rtmw3d.json"
+    body.write_text('{"schema":"artoke.rtmw3d.v1"}', encoding="utf-8")
+    bvh = tmp_path / "walk.bvh"
+    bvh.write_text(
+        "HIERARCHY\nROOT Pelvis\nMOTION\nFrames: 1\nFrame Time: 0.0333333333\n",
+        encoding="utf-8",
+    )
+    trace = tmp_path / "trace.json"
+    trace.write_text("{}", encoding="utf-8")
+
+    def ffmpeg(command, **_kwargs):
+        Path(command[-1]).write_bytes(b"webp")
+        return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+    built = build_artifacts(
+        video,
+        PipelineArtifacts(body, bvh, trace, 1),
+        tmp_path / "result",
+        1.0,
+        tracking_encoding="identity",
+        process_runner=ffmpeg,
+    )
+
+    tracking = next(item for item in built if item.kind == "rtmw3d_json")
+    assert tracking.path.name == "motion.rtmw3d.json"
+    assert tracking.path.read_bytes() == body.read_bytes()
+
+
+def test_build_artifacts_rejects_invalid_legacy_identity_json(tmp_path: Path) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    body = tmp_path / "invalid.json"
+    body.write_text("not-json", encoding="utf-8")
+    bvh = tmp_path / "walk.bvh"
+    bvh.write_text(
+        "HIERARCHY\nROOT Pelvis\nMOTION\nFrames: 1\nFrame Time: 0.0333333333\n",
+        encoding="utf-8",
+    )
+    trace = tmp_path / "trace.json"
+    trace.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="tracking JSON is invalid"):
+        build_artifacts(
+            video,
+            PipelineArtifacts(body, bvh, trace, 1),
+            tmp_path / "result",
+            1.0,
+            tracking_encoding="identity",
+            process_runner=lambda *_args, **_kwargs: None,
+        )
+
+
 def test_tracking_gzip_is_deterministic_and_capped_at_45_mib(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -188,6 +276,30 @@ def test_tracking_gzip_is_deterministic_and_capped_at_45_mib(
     monkeypatch.setattr(artifacts_module, "MAX_TRACKING_COMPRESSED_BYTES", 8)
     with pytest.raises(ValueError, match="45 MiB"):
         build_artifacts(video, pipeline, tmp_path / "limited", 1.0, process_runner=ffmpeg)
+    with pytest.raises(ValueError, match="45 MiB"):
+        build_artifacts(
+            video,
+            pipeline,
+            tmp_path / "limited-identity",
+            1.0,
+            tracking_encoding="identity",
+            process_runner=ffmpeg,
+        )
+
+    monkeypatch.setattr(
+        artifacts_module,
+        "MAX_TRACKING_COMPRESSED_BYTES",
+        45 * 1024 * 1024,
+    )
+    monkeypatch.setattr(artifacts_module, "MAX_TRACKING_DECOMPRESSED_BYTES", 8)
+    with pytest.raises(ValueError, match="256 MiB"):
+        build_artifacts(
+            video,
+            pipeline,
+            tmp_path / "limited-readable",
+            1.0,
+            process_runner=ffmpeg,
+        )
 
 
 def test_signed_upload_streams_file_with_put(tmp_path: Path) -> None:
@@ -212,6 +324,36 @@ def test_signed_upload_streams_file_with_put(tmp_path: Path) -> None:
     assert request.headers["Content-length"] == str(len(body))
     assert body == b"bvh-data"
     assert timeout == 120
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_content_type"),
+    [
+        ("motion.rtmw3d.json", "application/json"),
+        ("motion.rtmw3d.json.gz", "application/gzip"),
+    ],
+)
+def test_signed_tracking_upload_uses_encoding_content_type(
+    tmp_path: Path,
+    filename: str,
+    expected_content_type: str,
+) -> None:
+    artifact = tmp_path / filename
+    artifact.write_bytes(b"tracking")
+    requests = []
+
+    def opener(request, **_kwargs):
+        requests.append(request)
+        return DownloadResponse(b"{}")
+
+    upload_signed_artifact(
+        "https://storage.test/upload?token=secret",
+        artifact,
+        "application/json",
+        opener=opener,
+    )
+
+    assert requests[0].headers["Content-type"] == expected_content_type
 
 
 def test_signed_upload_rejects_non_https_url(tmp_path: Path) -> None:

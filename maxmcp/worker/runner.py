@@ -12,6 +12,8 @@ from maxmcp.rtmw3d.motion import convert_rtmw3d_file
 from maxmcp.rtmw3d.runtime import Rtmw3dReadiness, default_readiness
 from maxmcp.worker.api_client import ArtokeApiClient, UploadTarget, WorkerApiError
 from maxmcp.worker.artifacts import (
+    MAX_TRACKING_COMPRESSED_BYTES,
+    MAX_TRACKING_DECOMPRESSED_BYTES,
     LocalArtifact,
     build_artifacts,
     download_source,
@@ -156,7 +158,12 @@ class ArtokeWorker:
                         raise ValueError("correction claim is incomplete")
                     original_tracking = workspace.path / "original.rtmw3d.json"
                     edits = workspace.path / "tracking.edits.json"
-                    self._downloader(claim.tracking_url, original_tracking)
+                    self._downloader(
+                        claim.tracking_url,
+                        original_tracking,
+                        max_bytes=MAX_TRACKING_COMPRESSED_BYTES,
+                        max_decompressed_json_bytes=MAX_TRACKING_DECOMPRESSED_BYTES,
+                    )
                     self._downloader(claim.edits_url, edits)
                     if cancelled.is_set():
                         raise PipelineCancelled()
@@ -202,6 +209,7 @@ class ArtokeWorker:
                     workspace.path / "result",
                     claim.duration_seconds,
                     edit_revision=claim.edit_revision,
+                    tracking_encoding=claim.tracking_encoding,
                 )
                 targets = {item.kind: item for item in self._api.authorize_uploads(claim.job_id)}
                 if set(targets) != {item.kind for item in artifacts}:
