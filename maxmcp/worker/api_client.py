@@ -27,6 +27,7 @@ class ClaimedJob:
     download_url: str
     duration_seconds: float
     edit_revision: int = 0
+    tracking_encoding: str = "identity"
     tracking_url: str | None = None
     edits_url: str | None = None
 
@@ -106,12 +107,14 @@ class ArtokeApiClient:
             if any(not isinstance(value, str) or not value for value in required_strings):
                 raise TypeError
             edit_revision = job.get("editRevision", 0)
+            tracking_encoding = source.get("trackingEncoding", "identity")
             tracking_url = source.get("trackingUrl")
             edits_url = source.get("editsUrl")
             if (
                 not isinstance(edit_revision, int)
                 or isinstance(edit_revision, bool)
                 or edit_revision < 0
+                or tracking_encoding not in {"identity", "gzip_v1"}
             ):
                 raise TypeError
             if any(
@@ -134,6 +137,7 @@ class ArtokeApiClient:
                 object_path=source["objectPath"], download_url=source["downloadUrl"],
                 duration_seconds=duration_seconds,
                 edit_revision=edit_revision,
+                tracking_encoding=tracking_encoding,
                 tracking_url=tracking_url,
                 edits_url=edits_url,
             )

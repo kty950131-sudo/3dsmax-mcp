@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -15,6 +16,10 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from maxmcp.worker.motion_pipeline import PipelineArtifacts
+
+
+MAX_TRACKING_COMPRESSED_BYTES = 45 * 1024 * 1024
+MAX_TRACKING_DECOMPRESSED_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -40,6 +45,7 @@ def download_source(
     expected_sha256: str | None = None,
     opener: Callable[..., Any] = urlopen,
     max_bytes: int = 500 * 1024 * 1024,
+    max_decompressed_json_bytes: int = MAX_TRACKING_DECOMPRESSED_BYTES,
 ) -> Path:
     _require_secure_url(url)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -57,12 +63,52 @@ def download_source(
         actual = digest.hexdigest()
         if expected_sha256 is not None and actual != expected_sha256:
             raise ValueError("source SHA-256 mismatch")
-        temporary.replace(destination)
+        if destination.suffix.lower() == ".json":
+            _write_validated_json(
+                temporary,
+                destination,
+                max_decompressed_json_bytes,
+            )
+        else:
+            temporary.replace(destination)
         return destination
     except Exception:
         temporary.unlink(missing_ok=True)
+        destination.with_suffix(destination.suffix + ".decoded.part").unlink(missing_ok=True)
         destination.unlink(missing_ok=True)
         raise
+
+
+def _write_validated_json(stored: Path, destination: Path, max_bytes: int) -> None:
+    if max_bytes < 1:
+        raise ValueError("decompressed JSON is too large")
+    decoded = destination.with_suffix(destination.suffix + ".decoded.part")
+    source = stored
+    with stored.open("rb") as stream:
+        gzip_encoded = stream.read(2) == b"\x1f\x8b"
+    if gzip_encoded:
+        received = 0
+        try:
+            with gzip.open(stored, "rb") as compressed, decoded.open("wb") as output:
+                while block := compressed.read(1024 * 1024):
+                    received += len(block)
+                    if received > max_bytes:
+                        raise ValueError("decompressed JSON is too large")
+                    output.write(block)
+            source = decoded
+        except (gzip.BadGzipFile, EOFError, OSError) as exc:
+            raise ValueError("tracking gzip is invalid") from exc
+    elif stored.stat().st_size > max_bytes:
+        raise ValueError("decompressed JSON is too large")
+
+    try:
+        with source.open("r", encoding="utf-8") as stream:
+            json.load(stream)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("tracking JSON is invalid") from exc
+    source.replace(destination)
+    if gzip_encoded:
+        stored.unlink(missing_ok=True)
 
 
 def upload_signed_artifact(
@@ -72,6 +118,8 @@ def upload_signed_artifact(
     opener: Callable[..., Any] = urlopen,
 ) -> None:
     _require_secure_url(signed_url)
+    if path.name.endswith(".json.gz"):
+        content_type = "application/gzip"
     def blocks():
         with path.open("rb") as stream:
             while block := stream.read(1024 * 1024):
@@ -122,11 +170,16 @@ def build_artifacts(
 ) -> tuple[LocalArtifact, ...]:
     output_dir.mkdir(parents=True, exist_ok=True)
     bvh = output_dir / "motion.bvh"
-    body = output_dir / "motion.rtmw3d.json"
+    body = output_dir / "motion.rtmw3d.json.gz"
     thumbnail = output_dir / "thumbnail.webp"
     metadata_path = output_dir / "metadata.json"
     shutil.copy2(pipeline.bvh, bvh)
-    shutil.copy2(pipeline.rtmw3d_json, body)
+    with pipeline.rtmw3d_json.open("rb") as source, body.open("wb") as output:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as compressed:
+            shutil.copyfileobj(source, compressed, length=1024 * 1024)
+    if body.stat().st_size > MAX_TRACKING_COMPRESSED_BYTES:
+        body.unlink(missing_ok=True)
+        raise ValueError("compressed RTMW3D JSON exceeds 45 MiB")
 
     frame_count, frame_time = _bvh_info(bvh)
     if frame_count != pipeline.frame_count:

@@ -32,7 +32,11 @@ def test_claim_sends_bearer_token_and_parses_job() -> None:
                 "sourceFilename": "walk.mp4",
                 "sourceDurationSeconds": 4.2,
             },
-            "source": {"objectPath": "owner/job/source/walk.mp4", "downloadUrl": "https://signed"},
+            "source": {
+                "objectPath": "owner/job/source/walk.mp4",
+                "downloadUrl": "https://signed",
+                "trackingEncoding": "identity",
+            },
         })
 
     client = ArtokeApiClient("https://artoke.com", "secret-token", opener=open_request)
@@ -44,6 +48,7 @@ def test_claim_sends_bearer_token_and_parses_job() -> None:
     assert claim.edit_revision == 0
     assert claim.tracking_url is None
     assert claim.edits_url is None
+    assert claim.tracking_encoding == "identity"
     request, timeout = requests[0]
     assert request.full_url == "https://artoke.com/api/motions/worker/claim"
     assert request.headers["Authorization"] == "Bearer secret-token"
@@ -66,6 +71,7 @@ def test_claim_parses_correction_revision_and_signed_urls() -> None:
                 "objectPath": "owner/job/source/walk.mp4",
                 "downloadUrl": "https://storage.test/video-signed",
                 "trackingUrl": "https://storage.test/tracking-signed",
+                "trackingEncoding": "gzip_v1",
                 "editsUrl": "https://storage.test/edits-signed",
             },
         }),
@@ -76,6 +82,7 @@ def test_claim_parses_correction_revision_and_signed_urls() -> None:
     assert claim is not None
     assert claim.edit_revision == 3
     assert claim.tracking_url == "https://storage.test/tracking-signed"
+    assert claim.tracking_encoding == "gzip_v1"
     assert claim.edits_url == "https://storage.test/edits-signed"
 
 
