@@ -1,5 +1,6 @@
 from io import BytesIO
 from pathlib import Path
+import os
 import threading
 from uuid import UUID
 
@@ -67,17 +68,20 @@ def test_source_streams_to_generated_name_and_keeps_bounded_display_name(tmp_pat
     session = CompanionSession.create(tmp_path, JOB_ID, chunk_size=4)
     payload = b"0123456789"
 
-    source = session.receive_source(
+    snapshot = session.receive_source(
         BytesIO(payload),
         content_length=len(payload),
         display_name="  ../a\\b\x00  sample movie.mp4  ",
     )
 
-    assert source.read_bytes() == payload
+    assert snapshot.state == "accepted"
+    source = next(session.workspace.path.iterdir())
     assert source.parent == session.workspace.path
     UUID(source.name)
     assert session.display_name == ".._a_b_ sample movie.mp4"
     assert not list(session.workspace.path.glob("*.part"))
+    with session.open_verified_source() as lease:
+        assert lease.stream.read() == payload
     session.close()
 
 
@@ -98,8 +102,9 @@ def test_incomplete_stream_removes_partial_file(tmp_path: Path) -> None:
         session.receive_source(_ShortStream(), 12, "clip.mp4")
 
     assert list(session.workspace.path.iterdir()) == []
-    source = session.receive_source(BytesIO(b"retry"), 5, "retry.mp4")
-    assert source.read_bytes() == b"retry"
+    session.receive_source(BytesIO(b"retry"), 5, "retry.mp4")
+    with session.open_verified_source() as lease:
+        assert lease.stream.read() == b"retry"
     session.close()
 
 
@@ -109,8 +114,9 @@ def test_write_error_releases_source_reservation_for_retry(tmp_path: Path) -> No
     with pytest.raises(UploadRejected, match="source_write_failed"):
         session.receive_source(_BrokenStream(), 4, "clip.mp4")
 
-    source = session.receive_source(BytesIO(b"good"), 4, "retry.mp4")
-    assert source.read_bytes() == b"good"
+    session.receive_source(BytesIO(b"good"), 4, "retry.mp4")
+    with session.open_verified_source() as lease:
+        assert lease.stream.read() == b"good"
     session.close()
 
 
@@ -241,11 +247,20 @@ def test_cancel_at_finalization_cannot_also_accept_source(
     release_finalization = threading.Event()
     original = session._validate_open_file
     outcome: list[str] = []
+    validation_count = 0
 
-    def barrier(path: Path, descriptor: int) -> None:
-        original(path, descriptor)
-        reached_finalization.set()
-        release_finalization.wait(timeout=2)
+    def barrier(
+        path: Path,
+        descriptor: int,
+        *,
+        expected_size: int | None = None,
+    ) -> None:
+        nonlocal validation_count
+        validation_count += 1
+        original(path, descriptor, expected_size=expected_size)
+        if validation_count == 2:
+            reached_finalization.set()
+            release_finalization.wait(timeout=2)
 
     monkeypatch.setattr(session, "_validate_open_file", barrier)
 
@@ -267,3 +282,117 @@ def test_cancel_at_finalization_cannot_also_accept_source(
     assert outcome == ["cancelled"]
     assert session.snapshot().state == "cancelled"
     assert not session.workspace.path.exists()
+
+
+def test_verified_source_lease_revalidates_and_reads_accepted_bytes(tmp_path: Path) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+    session.receive_source(BytesIO(b"verified"), 8, "clip.mp4")
+
+    with session.open_verified_source() as lease:
+        assert lease.size_bytes == 8
+        assert lease.stream.read() == b"verified"
+
+    session.close()
+
+
+def test_verified_source_refuses_replaced_path_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+    session.receive_source(BytesIO(b"verified"), 8, "clip.mp4")
+    source = next(session.workspace.path.iterdir())
+    original_stat = Path.stat
+    real_stat = original_stat(source, follow_symlinks=False)
+    changed = list(real_stat)
+    changed[1] += 1
+    replacement_stat = os.stat_result(changed)
+
+    def replaced_stat(path: Path, *, follow_symlinks: bool = True):
+        if path == source and not follow_symlinks:
+            return replacement_stat
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", replaced_stat)
+    with pytest.raises(UploadRejected, match="source_identity_changed"):
+        with session.open_verified_source():
+            pass
+
+    assert session.snapshot().state == "cleanup_required"
+    monkeypatch.undo()
+    assert session.close().state == "closed"
+
+
+def test_verified_source_refuses_replaced_workspace_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+    session.receive_source(BytesIO(b"verified"), 8, "clip.mp4")
+    workspace = session.workspace.path
+    original_stat = Path.stat
+    real_stat = original_stat(workspace, follow_symlinks=False)
+    changed = list(real_stat)
+    changed[1] += 1
+    replacement_stat = os.stat_result(changed)
+
+    def replaced_stat(path: Path, *, follow_symlinks: bool = True):
+        if path == workspace and not follow_symlinks:
+            return replacement_stat
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", replaced_stat)
+    with pytest.raises(UploadRejected, match="source_identity_changed"):
+        with session.open_verified_source():
+            pass
+
+    assert session.snapshot().state == "cleanup_required"
+    monkeypatch.undo()
+    assert session.close().state == "closed"
+
+
+def test_accepted_source_handle_closes_before_cleanup_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+    session.receive_source(BytesIO(b"verified"), 8, "clip.mp4")
+    original = JobWorkspace.cleanup
+    attempts = 0
+
+    def flaky_cleanup(job_workspace: JobWorkspace) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("locked")
+        original(job_workspace)
+
+    monkeypatch.setattr(JobWorkspace, "cleanup", flaky_cleanup)
+    assert session.close().state == "cleanup_required"
+    assert session.close().state == "closed"
+    with pytest.raises(UploadRejected, match="source_unavailable"):
+        with session.open_verified_source():
+            pass
+
+
+def test_verified_source_stream_open_failure_enters_safe_cleanup_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+    session.receive_source(BytesIO(b"verified"), 8, "clip.mp4")
+    original_fdopen = os.fdopen
+
+    def fail_read_stream(descriptor: int, mode: str, **kwargs: object):
+        if mode == "rb":
+            raise OSError("stream unavailable")
+        return original_fdopen(descriptor, mode, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", fail_read_stream)
+    with pytest.raises(UploadRejected, match="source_identity_changed"):
+        with session.open_verified_source():
+            pass
+
+    assert session.snapshot().state == "cleanup_required"
+    monkeypatch.undo()
+    assert session.close().state == "closed"

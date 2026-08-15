@@ -3,6 +3,8 @@ from http.client import HTTPConnection, HTTPResponse
 from pathlib import Path
 import base64
 import json
+import shutil
+import subprocess
 import threading
 import time
 from typing import Iterator
@@ -409,3 +411,108 @@ def test_cancel_reports_cleanup_required_and_retry_truthfully(
         second = request(server, "POST", "/api/cancel", body=b"", headers=headers)
         assert second.status == 200
         assert read_json(second) == {"status": "cancelled", "cleaned": True}
+
+
+def test_companion_ui_aborts_stale_upload_and_retries_cleanup() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the executable companion UI contract")
+    app = Path(__file__).parents[1] / "maxmcp" / "local_ingest" / "web" / "app.js"
+    harness = r'''
+const fs = require("fs");
+const vm = require("vm");
+const assert = require("assert");
+
+class Target {
+  constructor() { this.listeners = {}; this.upload = null; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  emit(name, event = {}) { return this.listeners[name]?.(event); }
+}
+class Element extends Target {
+  constructor() {
+    super(); this.disabled = false; this.textContent = ""; this.style = {};
+    this.files = null; this.value = ""; this.attributes = {};
+  }
+  setAttribute(name, value) { this.attributes[name] = value; }
+}
+const elements = {
+  "#source": new Element(), "#select-action": new Element(),
+  "#cancel-action": new Element(), "#status": new Element(),
+  "#progress-bar": new Element(),
+};
+elements["#cancel-action"].textContent = "취소하고 닫기";
+global.document = { querySelector: (selector) => elements[selector] };
+
+const fetchReplies = [
+  { status: 200, body: { csrfToken: "csrf-token-123456", state: "ready", sizeBytes: null, cleaned: false } },
+  { status: 202, body: { status: "cleanup_required", cleaned: false } },
+  { status: 200, body: { status: "cancelled", cleaned: true } },
+];
+global.fetch = async () => {
+  const reply = fetchReplies.shift();
+  return { ok: reply.status >= 200 && reply.status < 300, status: reply.status,
+    json: async () => reply.body };
+};
+
+const requests = [];
+class FakeXHR extends Target {
+  constructor() {
+    super(); this.upload = new Target(); this.headers = {}; this.status = 0;
+    this.aborted = false; requests.push(this);
+  }
+  open() {}
+  setRequestHeader(name, value) { this.headers[name] = value; }
+  send() {}
+  abort() { this.aborted = true; this.emit("abort"); }
+}
+global.XMLHttpRequest = FakeXHR;
+
+vm.runInThisContext(fs.readFileSync(process.argv[1], "utf8"), { filename: process.argv[1] });
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+(async () => {
+  await tick(); await tick();
+  elements["#source"].files = [{ name: "한국어 영상.mp4" }];
+  elements["#source"].emit("change");
+  const upload = requests[0];
+  assert.match(upload.headers["X-Artoke-Filename"], /^[A-Za-z0-9_-]+$/u);
+
+  await elements["#cancel-action"].emit("click");
+  await tick();
+  assert.equal(upload.aborted, true);
+  assert.equal(elements["#status"].textContent, "로컬 정리가 필요합니다.");
+  assert.equal(elements["#cancel-action"].textContent, "로컬 정리 다시 시도");
+  assert.equal(elements["#source"].disabled, true);
+
+  upload.status = 201;
+  upload.emit("load");
+  upload.emit("error");
+  upload.upload.emit("progress", { lengthComputable: true, loaded: 1, total: 1 });
+  assert.equal(elements["#status"].textContent, "로컬 정리가 필요합니다.");
+
+  await elements["#cancel-action"].emit("click");
+  await tick();
+  assert.equal(elements["#status"].textContent, "로컬 정리가 끝났습니다. 이 창을 닫아도 됩니다.");
+  assert.equal(elements["#source"].disabled, true);
+
+  const sessionBase = { csrfToken: "csrf-token-123456", sizeBytes: null, cleaned: false };
+  renderSession({ ...sessionBase, state: "cleanup_required" });
+  assert.equal(elements["#status"].textContent, "로컬 정리가 필요합니다.");
+  renderSession({ ...sessionBase, state: "cancelling" });
+  assert.equal(elements["#status"].textContent, "로컬 정리가 필요합니다.");
+  renderSession({ ...sessionBase, state: "cancelled", cleaned: true });
+  assert.equal(elements["#status"].textContent, "로컬 정리가 끝났습니다. 이 창을 닫아도 됩니다.");
+  renderSession({ ...sessionBase, state: "ready" });
+  assert.equal(elements["#source"].disabled, true);
+  assert.equal(elements["#status"].textContent, "로컬 정리가 끝났습니다. 이 창을 닫아도 됩니다.");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", harness, str(app)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

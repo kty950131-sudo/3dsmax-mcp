@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from io import BufferedIOBase
 import os
@@ -10,7 +11,7 @@ import re
 import secrets
 import stat
 import threading
-from typing import BinaryIO
+from typing import BinaryIO, Iterator
 from uuid import uuid4
 
 from maxmcp.worker.workspace import JobWorkspace
@@ -114,6 +115,15 @@ class SessionSnapshot:
     cleaned: bool
 
 
+@dataclass(frozen=True)
+class VerifiedSourceLease:
+    """A validated, handle-backed source view with no authoritative path."""
+
+    stream: BinaryIO
+    size_bytes: int
+    display_name: str
+
+
 class CompanionSession:
     """Own one fresh workspace, one browser, and at most one accepted source."""
 
@@ -133,8 +143,11 @@ class CompanionSession:
         self.chunk_size = chunk_size
         self.browser_cookie = secrets.token_urlsafe(32)
         self.csrf_token = secrets.token_urlsafe(32)
+        workspace_stat = workspace.path.stat(follow_symlinks=False)
+        self._workspace_identity = (workspace_stat.st_dev, workspace_stat.st_ino)
         self.display_name: str | None = None
-        self.source_path: Path | None = None
+        self._source_path: Path | None = None
+        self._source_descriptor: int | None = None
         self._source_size: int | None = None
         self._browser_claimed = False
         self._state = "ready"
@@ -142,6 +155,7 @@ class CompanionSession:
         self._cancel_requested = threading.Event()
         self._cleaned = False
         self._cleanup_running = False
+        self._lease_active = False
         self._lock = threading.Lock()
 
     @classmethod
@@ -196,7 +210,7 @@ class CompanionSession:
         stream: BinaryIO | BufferedIOBase,
         content_length: int,
         display_name: str,
-    ) -> Path:
+    ) -> SessionSnapshot:
         if not isinstance(content_length, int) or isinstance(content_length, bool):
             raise UploadRejected("invalid_content_length")
         if content_length <= 0:
@@ -217,8 +231,7 @@ class CompanionSession:
         rejection: UploadRejected | None = None
         try:
             source, descriptor = self._open_source_file()
-            with os.fdopen(descriptor, "wb", closefd=True) as destination:
-                descriptor = None
+            with os.fdopen(descriptor, "wb", closefd=False) as destination:
                 remaining = content_length
                 while remaining:
                     if self._cancel_requested.is_set():
@@ -232,16 +245,23 @@ class CompanionSession:
                     remaining -= len(chunk)
                 destination.flush()
                 os.fsync(destination.fileno())
-                self._validate_open_file(source, destination.fileno())
+                self._validate_open_file(
+                    source,
+                    destination.fileno(),
+                    expected_size=content_length,
+                )
                 with self._lock:
                     if self._state != "receiving" or self._cancel_requested.is_set():
                         raise UploadRejected("cancelled")
                     self.display_name = _display_name(display_name)
-                    self.source_path = source
+                    self._source_path = source
+                    self._source_descriptor = descriptor
                     self._source_size = content_length
                     self._state = "accepted"
                     accepted = True
-            return source
+                    snapshot = self._snapshot_locked()
+                    descriptor = None
+            return snapshot
         except UploadRejected as exc:
             rejection = exc
         except (OSError, ValueError):
@@ -279,13 +299,83 @@ class CompanionSession:
     def close(self) -> SessionSnapshot:
         return self._request_terminal("closed")
 
+    @contextmanager
+    def open_verified_source(self) -> Iterator[VerifiedSourceLease]:
+        """Yield the accepted bytes only after identity, size, and parent checks.
+
+        The lease intentionally contains no filesystem path. Task 9 must consume
+        the handle-backed stream inside this context so a stale path is never
+        treated as the authoritative source.
+        """
+        duplicate: int | None = None
+        with self._lock:
+            if (
+                self._state != "accepted"
+                or self._source_path is None
+                or self._source_descriptor is None
+                or self._source_size is None
+                or self.display_name is None
+            ):
+                raise UploadRejected("source_unavailable")
+            if self._lease_active:
+                raise UploadRejected("source_in_use")
+            try:
+                self._validate_open_file(
+                    self._source_path,
+                    self._source_descriptor,
+                    expected_size=self._source_size,
+                )
+                duplicate = os.dup(self._source_descriptor)
+                os.lseek(duplicate, 0, os.SEEK_SET)
+                self._validate_open_file(
+                    self._source_path,
+                    duplicate,
+                    expected_size=self._source_size,
+                )
+            except (OSError, UploadRejected):
+                if duplicate is not None:
+                    try:
+                        os.close(duplicate)
+                    except OSError:
+                        pass
+                self._state = "cleanup_required"
+                self._cancel_requested.set()
+                raise UploadRejected("source_identity_changed") from None
+            try:
+                stream = os.fdopen(duplicate, "rb", closefd=True)
+            except OSError:
+                try:
+                    os.close(duplicate)
+                except OSError:
+                    pass
+                self._state = "cleanup_required"
+                self._cancel_requested.set()
+                raise UploadRejected("source_identity_changed") from None
+            self._lease_active = True
+            lease = VerifiedSourceLease(
+                stream=stream,
+                size_bytes=self._source_size,
+                display_name=self.display_name,
+            )
+            duplicate = None
+        try:
+            with lease.stream:
+                yield lease
+        finally:
+            cleanup_now = False
+            with self._lock:
+                self._lease_active = False
+                cleanup_now = self._state == "cancelling"
+            if cleanup_now:
+                self._finish_cleanup()
+
     def _request_terminal(self, target: str) -> SessionSnapshot:
         self._cancel_requested.set()
         with self._lock:
             self._terminal_target = target
             if self._state == target and self._cleaned:
                 return self._snapshot_locked()
-            if self._state == "receiving":
+            if self._state == "receiving" or self._lease_active:
                 self._state = "cancelling"
                 return self._snapshot_locked()
             if self._cleaned:
@@ -299,6 +389,18 @@ class CompanionSession:
             if self._cleanup_running:
                 return self._snapshot_locked()
             self._cleanup_running = True
+            descriptor = self._source_descriptor
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                with self._lock:
+                    self._cleanup_running = False
+                    self._state = "cleanup_required"
+                    return self._snapshot_locked()
+            with self._lock:
+                if self._source_descriptor == descriptor:
+                    self._source_descriptor = None
         try:
             self.workspace.cleanup()
         except (OSError, RuntimeError):
@@ -311,7 +413,7 @@ class CompanionSession:
             self._cleanup_running = False
             self._state = self._terminal_target
             self._cleaned = True
-            self.source_path = None
+            self._source_path = None
             return self._snapshot_locked()
 
     def _open_source_file(self) -> tuple[Path, int]:
@@ -319,7 +421,7 @@ class CompanionSession:
         if not self._workspace_is_safe():
             raise UploadRejected("unsafe_workspace")
         source = workspace / str(uuid4())
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
         for optional in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
             flags |= int(getattr(os, optional, 0))
         try:
@@ -334,7 +436,13 @@ class CompanionSession:
             raise
         return source, descriptor
 
-    def _validate_open_file(self, path: Path, descriptor: int) -> None:
+    def _validate_open_file(
+        self,
+        path: Path,
+        descriptor: int,
+        *,
+        expected_size: int | None = None,
+    ) -> None:
         if not self._workspace_is_safe() or path.parent != self.workspace.path:
             raise UploadRejected("unsafe_workspace")
         try:
@@ -348,15 +456,19 @@ class CompanionSession:
             or (path_stat.st_dev, path_stat.st_ino) != (handle_stat.st_dev, handle_stat.st_ino)
             or path.resolve() != path
             or not _windows_handle_matches_path(path, descriptor)
+            or (expected_size is not None and handle_stat.st_size != expected_size)
         ):
             raise UploadRejected("unsafe_workspace")
 
     def _workspace_is_safe(self) -> bool:
         workspace = self.workspace.path
         try:
+            workspace_stat = workspace.stat(follow_symlinks=False)
             return (
                 workspace.is_dir()
                 and not _is_link(workspace)
+                and (workspace_stat.st_dev, workspace_stat.st_ino)
+                == self._workspace_identity
                 and workspace.resolve() == workspace
                 and workspace.resolve().parent == self.workspace.path.parent.resolve()
             )
