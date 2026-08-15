@@ -1,0 +1,143 @@
+from io import BytesIO
+from pathlib import Path
+import threading
+from uuid import UUID
+
+import pytest
+
+from maxmcp.local_ingest.session import (
+    CompanionSession,
+    SessionRejected,
+    UploadRejected,
+)
+
+
+JOB_ID = "00000000-0000-4000-8000-000000000008"
+
+
+class _ShortStream:
+    def read(self, size: int) -> bytes:
+        return b"x" * min(size, 3) if size > 4 else b""
+
+
+class _BlockingStream:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def read(self, size: int) -> bytes:
+        self.started.set()
+        self.release.wait(timeout=2)
+        return b"x" * min(size, 4)
+
+
+def test_browser_cookie_and_csrf_are_separate_unpredictable_values(tmp_path: Path) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+
+    assert session.claim_browser(None) is True
+    assert session.claim_browser(session.browser_cookie) is False
+    assert session.browser_cookie != session.csrf_token
+    assert len(session.browser_cookie) >= 32
+    assert len(session.csrf_token) >= 32
+
+    with pytest.raises(SessionRejected, match="browser_session"):
+        session.claim_browser("another-browser")
+    session.close()
+
+
+def test_mutation_requires_matching_cookie_and_csrf(tmp_path: Path) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+    session.claim_browser(None)
+
+    session.authorize_mutation(session.browser_cookie, session.csrf_token)
+    with pytest.raises(SessionRejected, match="browser_session"):
+        session.authorize_mutation("wrong", session.csrf_token)
+    with pytest.raises(SessionRejected, match="csrf"):
+        session.authorize_mutation(session.browser_cookie, "wrong")
+    session.close()
+
+
+def test_source_streams_to_generated_name_and_keeps_bounded_display_name(tmp_path: Path) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID, chunk_size=4)
+    payload = b"0123456789"
+
+    source = session.receive_source(
+        BytesIO(payload),
+        content_length=len(payload),
+        display_name="  ../a\\b\x00  sample movie.mp4  ",
+    )
+
+    assert source.read_bytes() == payload
+    assert source.parent == session.workspace.path
+    UUID(source.name)
+    assert session.display_name == ".._a_b_ sample movie.mp4"
+    assert not list(session.workspace.path.glob("*.part"))
+    session.close()
+
+
+def test_oversize_is_rejected_before_any_file_is_created(tmp_path: Path) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID, max_source_bytes=8)
+
+    with pytest.raises(UploadRejected, match="source_too_large"):
+        session.receive_source(BytesIO(b"123456789"), 9, "clip.mp4")
+
+    assert list(session.workspace.path.iterdir()) == []
+    session.close()
+
+
+def test_incomplete_stream_removes_partial_file(tmp_path: Path) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID, chunk_size=4)
+
+    with pytest.raises(UploadRejected, match="incomplete_upload"):
+        session.receive_source(_ShortStream(), 12, "clip.mp4")
+
+    assert list(session.workspace.path.iterdir()) == []
+    session.close()
+
+
+def test_second_source_is_rejected_deterministically(tmp_path: Path) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+    session.receive_source(BytesIO(b"one"), 3, "one.mp4")
+
+    with pytest.raises(UploadRejected, match="source_already_selected"):
+        session.receive_source(BytesIO(b"two"), 3, "two.mp4")
+    session.close()
+
+
+def test_cancel_during_upload_removes_partial_and_workspace(tmp_path: Path) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID, chunk_size=4)
+    stream = _BlockingStream()
+    result: list[str] = []
+
+    def receive() -> None:
+        try:
+            session.receive_source(stream, 8, "clip.mp4")
+        except UploadRejected as exc:
+            result.append(exc.code)
+
+    thread = threading.Thread(target=receive)
+    thread.start()
+    assert stream.started.wait(timeout=1)
+    session.cancel()
+    stream.release.set()
+    thread.join(timeout=2)
+
+    assert result == ["cancelled"]
+    assert not session.workspace.path.exists()
+
+
+def test_replaced_workspace_symlink_is_rejected(tmp_path: Path) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+    workspace_path = session.workspace.path
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    workspace_path.rmdir()
+    try:
+        workspace_path.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks require platform permission")
+
+    with pytest.raises(UploadRejected, match="unsafe_workspace"):
+        session.receive_source(BytesIO(b"video"), 5, "clip.mp4")
+
+    assert list(outside.iterdir()) == []
