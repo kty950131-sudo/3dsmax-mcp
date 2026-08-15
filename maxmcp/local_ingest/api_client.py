@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 import json
 import math
 import re
@@ -46,6 +47,16 @@ _VIDEO_EXTENSION = {
 }
 _MAX_SOURCE_BYTES = 2_147_483_648
 _MAX_DURATION_SECONDS = 300.0
+_MAX_EDIT_REVISION = 2_147_483_647
+_ARTIFACT_SIZE_LIMITS = {
+    "bvh": 64 * 1024 * 1024,
+    "rtmw3d_json": 45 * 1024 * 1024,
+    "thumbnail": 5 * 1024 * 1024,
+    "metadata": 1024 * 1024,
+}
+_RFC3339_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$"
+)
 
 
 class LocalIngestApiError(RuntimeError):
@@ -63,10 +74,13 @@ class LocalIngestCancelled(RuntimeError):
         super().__init__("Local motion ingest was cancelled")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class LocalSession:
     session_id: str
     expires_at: str
+
+    def __repr__(self) -> str:
+        return "LocalSession(<redacted>)"
 
 
 @dataclass(frozen=True, repr=False)
@@ -121,6 +135,29 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _bounded_float(value: object, minimum: float, maximum: float) -> float:
+    if not _is_number(value):
+        raise TypeError
+    if isinstance(value, int):
+        if value < minimum or value > maximum:
+            raise ValueError
+        return float(value)
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ValueError
+    return value
+
+
+def _valid_rfc3339_timestamp(value: object) -> str:
+    if not isinstance(value, str) or not 1 <= len(value) <= 128:
+        raise TypeError
+    if not _RFC3339_TIMESTAMP.fullmatch(value):
+        raise ValueError
+    parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError
+    return value
+
+
 def _exact_object(value: object, keys: set[str]) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != keys:
         raise TypeError
@@ -173,13 +210,15 @@ class LocalIngestApiClient:
             raise ValueError("ARTOKE API URL must not contain credentials")
         if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
             raise ValueError("ARTOKE API URL must not contain a path, query, or fragment")
-        if not _is_number(timeout) or not math.isfinite(float(timeout)) or not 0 < float(timeout) <= 60:
-            raise ValueError("ARTOKE API timeout is invalid")
+        try:
+            safe_timeout = _bounded_float(timeout, 0.000_001, 60.0)
+        except (TypeError, ValueError, OverflowError):
+            raise LocalIngestApiError("ARTOKE API timeout is invalid") from None
 
         self._base_url = base_url.rstrip("/")
         self._opener = opener
         self._cancelled = cancelled
-        self._timeout = float(timeout)
+        self._timeout = safe_timeout
         self._access_token: str | None = None
         self._job_id: str | None = None
 
@@ -205,7 +244,11 @@ class LocalIngestApiClient:
             access_token = _header(headers, "X-Artoke-Local-Access")
             if any(not isinstance(item, str) or not item for item in (session_id, expires_at, access_token)):
                 raise TypeError
-        except (KeyError, TypeError):
+            session_id = _canonical_job_id(session_id)
+            expires_at = _valid_rfc3339_timestamp(expires_at)
+            if not re.fullmatch(rf"{re.escape(session_id)}\.[0-9a-f]{{64}}", access_token):
+                raise TypeError
+        except (KeyError, TypeError, ValueError, LocalIngestApiError):
             raise LocalIngestApiError("ARTOKE exchange response is invalid") from None
         self._access_token = access_token
         return LocalSession(session_id=session_id, expires_at=expires_at)
@@ -282,7 +325,7 @@ class LocalIngestApiClient:
         artifacts: Sequence[Mapping[str, object]],
     ) -> LocalJob:
         bound = self._require_job(job_id)
-        if not _is_int(edit_revision) or edit_revision < 0:
+        if not _is_int(edit_revision) or not 0 <= edit_revision <= _MAX_EDIT_REVISION:
             raise LocalIngestApiError("Local motion publication is invalid")
         safe_artifacts = [self._validate_artifact(item) for item in artifacts]
         if (
@@ -373,7 +416,7 @@ class LocalIngestApiClient:
                     raise LocalIngestApiError("ARTOKE API response is invalid")
                 try:
                     decoded = json.loads(body)
-                except (UnicodeDecodeError, json.JSONDecodeError):
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                     raise LocalIngestApiError("ARTOKE API response is invalid") from None
                 return decoded, response.headers
         except LocalIngestApiError:
@@ -412,12 +455,7 @@ class LocalIngestApiClient:
                 or not 0 < body["sizeBytes"] <= _MAX_SOURCE_BYTES
             ):
                 raise TypeError
-            if (
-                not _is_number(body["durationSeconds"])
-                or not math.isfinite(float(body["durationSeconds"]))
-                or not 0 <= float(body["durationSeconds"]) <= _MAX_DURATION_SECONDS
-            ):
-                raise TypeError
+            _bounded_float(body["durationSeconds"], 0.0, _MAX_DURATION_SECONDS)
             if not isinstance(body["sourceSha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", body["sourceSha256"]):
                 raise TypeError
             return body
@@ -430,11 +468,18 @@ class LocalIngestApiClient:
             body = _exact_object(dict(artifact), _ARTIFACT_KEYS)
             if body["kind"] not in _ARTIFACT_KINDS:
                 raise TypeError
-            if not _is_int(body["sizeBytes"]) or body["sizeBytes"] <= 0:
+            kind = body["kind"]
+            if (
+                not _is_int(body["sizeBytes"])
+                or not 0 < body["sizeBytes"] <= _ARTIFACT_SIZE_LIMITS[kind]
+            ):
                 raise TypeError
             if not isinstance(body["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", body["sha256"]):
                 raise TypeError
-            if not isinstance(body["formatVersion"], str) or not body["formatVersion"]:
+            if (
+                not isinstance(body["formatVersion"], str)
+                or not 1 <= len(body["formatVersion"]) <= 40
+            ):
                 raise TypeError
             return body
         except (KeyError, TypeError, ValueError):
@@ -466,14 +511,27 @@ class LocalIngestApiClient:
             required_strings = (body["name"], body["sourceFilename"], body["createdAt"])
             if any(not isinstance(value, str) or not value for value in required_strings):
                 raise TypeError
+            if body["name"] != body["name"].strip() or len(body["name"]) > 120:
+                raise TypeError
+            if (
+                len(body["sourceFilename"]) > 180
+                or body["sourceFilename"] in {".", ".."}
+                or "/" in body["sourceFilename"]
+                or "\\" in body["sourceFilename"]
+            ):
+                raise TypeError
             if body["status"] not in _JOB_STATUSES:
                 raise TypeError
             duration = body["sourceDurationSeconds"]
-            if duration is not None and (
-                not _is_number(duration) or not math.isfinite(float(duration)) or float(duration) < 0
+            duration_value = (
+                None
+                if duration is None
+                else _bounded_float(duration, 0.0, _MAX_DURATION_SECONDS)
+            )
+            if (
+                not _is_int(body["sourceSizeBytes"])
+                or not 0 < body["sourceSizeBytes"] <= _MAX_SOURCE_BYTES
             ):
-                raise TypeError
-            if not _is_int(body["sourceSizeBytes"]) or body["sourceSizeBytes"] <= 0:
                 raise TypeError
             if not _is_int(body["progress"]) or not 0 <= body["progress"] <= 100:
                 raise TypeError
@@ -487,12 +545,16 @@ class LocalIngestApiClient:
             )
             if any(value is not None and not isinstance(value, str) for value in nullable_strings):
                 raise TypeError
+            if body["progressStage"] is not None and body["progressStage"] not in _PROGRESS_STAGES:
+                raise TypeError
+            if body["errorCode"] is not None and not _SAFE_ERROR_CODE.fullmatch(body["errorCode"]):
+                raise TypeError
             return LocalJob(
                 job_id=job_id,
                 name=body["name"],
                 status=body["status"],
                 source_filename=body["sourceFilename"],
-                source_duration_seconds=None if duration is None else float(duration),
+                source_duration_seconds=duration_value,
                 source_size_bytes=body["sourceSizeBytes"],
                 progress=body["progress"],
                 source_delete_after=body["sourceDeleteAfter"],
@@ -503,5 +565,5 @@ class LocalIngestApiClient:
                 created_at=body["createdAt"],
                 completed_at=body["completedAt"],
             )
-        except (KeyError, TypeError, ValueError, LocalIngestApiError):
+        except (KeyError, TypeError, ValueError, OverflowError, LocalIngestApiError):
             raise LocalIngestApiError("ARTOKE job response is invalid") from None

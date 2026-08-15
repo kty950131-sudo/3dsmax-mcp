@@ -16,7 +16,9 @@ from maxmcp.local_ingest.api_client import (
 JOB_ID = "00000000-0000-4000-8000-000000000002"
 OTHER_JOB_ID = "00000000-0000-4000-8000-000000000003"
 HANDOFF = "a" * 64
-ACCESS = "scoped-access-secret"
+SESSION_ID = "00000000-0000-4000-8000-000000000001"
+EXPIRES_AT = "2026-08-16T00:05:00.000Z"
+ACCESS = f"{SESSION_ID}.{'e' * 64}"
 
 
 def job_payload(*, job_id: str = JOB_ID, status: str = "processing") -> dict[str, object]:
@@ -130,15 +132,15 @@ def test_exchange_reads_access_only_from_header_and_does_not_send_authorization(
         requests.append((request, timeout))
         return Response(
             200,
-            {"sessionId": "session-1", "expiresAt": "2026-08-16T00:05:00.000Z"},
+            {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT},
             headers={"X-Artoke-Local-Access": ACCESS},
         )
 
     client = LocalIngestApiClient("https://artoke.com/", opener=open_request)
     session = client.exchange(HANDOFF)
 
-    assert session.session_id == "session-1"
-    assert session.expires_at == "2026-08-16T00:05:00.000Z"
+    assert session.session_id == SESSION_ID
+    assert session.expires_at == EXPIRES_AT
     request, timeout = requests[0]
     assert request.full_url == "https://artoke.com/api/motions/local/exchange"
     assert request.get_method() == "POST"
@@ -147,6 +149,8 @@ def test_exchange_reads_access_only_from_header_and_does_not_send_authorization(
     assert timeout == 15.0
     assert HANDOFF not in repr(client)
     assert ACCESS not in repr(client)
+    assert SESSION_ID not in repr(session)
+    assert EXPIRES_AT not in repr(session)
 
 
 @pytest.mark.parametrize(
@@ -154,17 +158,21 @@ def test_exchange_reads_access_only_from_header_and_does_not_send_authorization(
     [
         (
             {
-                "sessionId": "session-1",
-                "expiresAt": "2026-08-16T00:05:00.000Z",
+                "sessionId": SESSION_ID,
+                "expiresAt": EXPIRES_AT,
                 "accessToken": ACCESS,
             },
             {},
         ),
         (
-            {"sessionId": "session-1", "expiresAt": "2026-08-16T00:05:00.000Z"},
+            {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT},
             {},
         ),
         ([], {"X-Artoke-Local-Access": ACCESS}),
+        (
+            {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT},
+            {"X-Artoke-Local-Access": "/home/me?token=query-secret"},
+        ),
     ],
 )
 def test_exchange_rejects_body_token_missing_header_and_wrong_shape(payload, headers) -> None:
@@ -177,6 +185,32 @@ def test_exchange_rejects_body_token_missing_header_and_wrong_shape(payload, hea
         client.exchange(HANDOFF)
 
 
+@pytest.mark.parametrize(
+    "session_id,expires_at",
+    [
+        ("not-a-uuid", EXPIRES_AT),
+        ("/home/me/session", EXPIRES_AT),
+        (SESSION_ID, "2026-08-16T00:05:00"),
+        (SESSION_ID, "not-a-time?token=query-secret"),
+        (SESSION_ID, "2" * 129),
+    ],
+)
+def test_exchange_rejects_malicious_or_unbounded_session_scalars(session_id, expires_at) -> None:
+    client = LocalIngestApiClient(
+        "https://artoke.com",
+        opener=lambda *_a, **_k: Response(
+            200,
+            {"sessionId": session_id, "expiresAt": expires_at},
+            headers={"X-Artoke-Local-Access": ACCESS},
+        ),
+    )
+    with pytest.raises(LocalIngestApiError, match="exchange response is invalid") as raised:
+        client.exchange(HANDOFF)
+    rendered = f"{raised.value!s} {raised.value!r}"
+    assert str(session_id) not in rendered
+    assert str(expires_at) not in rendered
+
+
 def test_create_job_sends_scoped_bearer_and_binds_the_returned_job() -> None:
     requests = []
 
@@ -185,7 +219,7 @@ def test_create_job_sends_scoped_bearer_and_binds_the_returned_job() -> None:
         if request.full_url.endswith("/exchange"):
             return Response(
                 200,
-                {"sessionId": "session-1", "expiresAt": "later"},
+                {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT},
                 headers={"X-Artoke-Local-Access": ACCESS},
             )
         return Response(201, job_payload())
@@ -209,7 +243,7 @@ def test_progress_upload_publish_terminal_and_cleanup_use_only_task4_routes() ->
         if request.full_url.endswith("/exchange"):
             return Response(
                 200,
-                {"sessionId": "session-1", "expiresAt": "later"},
+                {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT},
                 headers={"X-Artoke-Local-Access": ACCESS},
             )
         if request.full_url.endswith("/jobs"):
@@ -268,7 +302,7 @@ def test_client_rejects_cross_job_calls_before_network_request() -> None:
     def open_request(request, timeout):
         calls.append(request)
         if request.full_url.endswith("/exchange"):
-            return Response(200, {"sessionId": "s", "expiresAt": "later"}, headers={"X-Artoke-Local-Access": ACCESS})
+            return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
         return Response(201, job_payload())
 
     client = exchanged_client(open_request)
@@ -286,7 +320,7 @@ def test_client_rejects_cross_job_response() -> None:
         nonlocal calls
         calls += 1
         if request.full_url.endswith("/exchange"):
-            return Response(200, {"sessionId": "s", "expiresAt": "later"}, headers={"X-Artoke-Local-Access": ACCESS})
+            return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
         if calls == 2:
             return Response(201, job_payload())
         return Response(200, job_payload(job_id=OTHER_JOB_ID, status="completed"))
@@ -308,7 +342,7 @@ def test_cooperative_cancellation_stops_subsequent_requests() -> None:
         nonlocal cancelled
         calls.append(request)
         cancelled = True
-        return Response(200, {"sessionId": "s", "expiresAt": "later"}, headers={"X-Artoke-Local-Access": ACCESS})
+        return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
 
     client = LocalIngestApiClient("https://artoke.com", opener=open_request, cancelled=is_cancelled)
     client.exchange(HANDOFF)
@@ -316,6 +350,16 @@ def test_cooperative_cancellation_stops_subsequent_requests() -> None:
     with pytest.raises(LocalIngestCancelled):
         client.create_job(source_metadata())
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [10**10_000, float("inf"), float("nan"), True, "15"],
+    ids=["huge-int", "inf", "nan", "bool", "string"],
+)
+def test_invalid_timeout_values_are_normalized_without_numeric_overflow(timeout) -> None:
+    with pytest.raises(LocalIngestApiError, match="timeout is invalid"):
+        LocalIngestApiClient("https://artoke.com", timeout=timeout)
 
 
 @pytest.mark.parametrize("error", [TimeoutError("late"), URLError("offline")])
@@ -373,7 +417,7 @@ def test_redirect_is_not_followed_and_is_reported_by_status() -> None:
     [
         Response(200, []),
         Response(200, body=b"<html>bad gateway</html>"),
-        Response(200, {"sessionId": "s", "expiresAt": "later", "unexpected": True}, headers={"X-Artoke-Local-Access": ACCESS}),
+        Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT, "unexpected": True}, headers={"X-Artoke-Local-Access": ACCESS}),
         Response(200, body=b"{" + b"x" * (1024 * 1024 + 1)),
     ],
 )
@@ -386,7 +430,7 @@ def test_exchange_rejects_malformed_unexpected_and_oversized_responses(response)
 def test_job_and_upload_response_shapes_are_strict() -> None:
     responses = iter(
         [
-            Response(200, {"sessionId": "s", "expiresAt": "later"}, headers={"X-Artoke-Local-Access": ACCESS}),
+            Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS}),
             Response(201, job_payload() | {"internalPath": "C:\\secret"}),
         ]
     )
@@ -401,7 +445,7 @@ def test_create_job_rejects_local_path_metadata_before_request() -> None:
 
     def open_request(request, timeout):
         calls.append(request)
-        return Response(200, {"sessionId": "s", "expiresAt": "later"}, headers={"X-Artoke-Local-Access": ACCESS})
+        return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
 
     client = exchanged_client(open_request)
     with pytest.raises(LocalIngestApiError, match="source metadata is invalid"):
@@ -425,12 +469,103 @@ def test_create_job_rejects_unsafe_or_over_limit_metadata(replacement) -> None:
 
     def open_request(request, timeout):
         calls.append(request)
-        return Response(200, {"sessionId": "s", "expiresAt": "later"}, headers={"X-Artoke-Local-Access": ACCESS})
+        return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
 
     client = exchanged_client(open_request)
     with pytest.raises(LocalIngestApiError, match="source metadata is invalid"):
         client.create_job(source_metadata() | replacement)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "duration",
+    [10**10_000, float("inf"), float("nan"), True, "4.2"],
+    ids=["huge-int", "inf", "nan", "bool", "string"],
+)
+def test_source_duration_numeric_failures_are_safe_and_never_reach_network(duration) -> None:
+    calls = []
+
+    def open_request(request, timeout):
+        calls.append(request)
+        return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
+
+    client = exchanged_client(open_request)
+    with pytest.raises(LocalIngestApiError, match="source metadata is invalid"):
+        client.create_job(source_metadata() | {"durationSeconds": duration})
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        {"sourceDurationSeconds": float("inf")},
+        {"sourceDurationSeconds": float("nan")},
+        {"sourceDurationSeconds": True},
+        {"sourceSizeBytes": True},
+        {"sourceSizeBytes": 2_147_483_649},
+        {"progress": True},
+        {"progress": 101},
+    ],
+    ids=[
+        "duration-inf",
+        "duration-nan",
+        "duration-bool",
+        "size-bool",
+        "size-over-limit",
+        "progress-bool",
+        "progress-over-limit",
+    ],
+)
+def test_job_numeric_failures_are_normalized_as_protocol_errors(replacement) -> None:
+    responses = iter(
+        [
+            Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS}),
+            Response(201, job_payload() | replacement),
+        ]
+    )
+    client = LocalIngestApiClient("https://artoke.com", opener=lambda *_a, **_k: next(responses))
+    client.exchange(HANDOFF)
+    with pytest.raises(LocalIngestApiError, match="job response is invalid"):
+        client.create_job(source_metadata())
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        {"name": ""},
+        {"name": "n" * 121},
+        {"sourceFilename": "C:\\private\\walk.mp4"},
+        {"sourceFilename": "f" * 177 + ".mp4"},
+        {"progressStage": "/home/me/stage"},
+    ],
+)
+def test_job_response_rejects_unbounded_or_path_like_server_scalars(replacement) -> None:
+    responses = iter(
+        [
+            Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS}),
+            Response(201, job_payload() | replacement),
+        ]
+    )
+    client = LocalIngestApiClient("https://artoke.com", opener=lambda *_a, **_k: next(responses))
+    client.exchange(HANDOFF)
+    with pytest.raises(LocalIngestApiError, match="job response is invalid"):
+        client.create_job(source_metadata())
+
+
+def test_huge_integer_in_raw_json_response_is_normalized_without_parser_overflow() -> None:
+    calls = 0
+
+    def open_request(request, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
+        body = json.dumps(job_payload()).replace("4.2", "9" * 10_000).encode("ascii")
+        return Response(201, body=body)
+
+    client = exchanged_client(open_request)
+    with pytest.raises(LocalIngestApiError, match="response is invalid"):
+        client.create_job(source_metadata())
 
 
 def test_publish_rejects_incomplete_or_duplicate_artifact_sets_before_request() -> None:
@@ -439,7 +574,7 @@ def test_publish_rejects_incomplete_or_duplicate_artifact_sets_before_request() 
     def open_request(request, timeout):
         calls.append(request)
         if request.full_url.endswith("/exchange"):
-            return Response(200, {"sessionId": "s", "expiresAt": "later"}, headers={"X-Artoke-Local-Access": ACCESS})
+            return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
         return Response(201, job_payload())
 
     client = exchanged_client(open_request)
@@ -450,10 +585,85 @@ def test_publish_rejects_incomplete_or_duplicate_artifact_sets_before_request() 
     assert len(calls) == 2
 
 
-def test_malformed_job_id_is_normalized_and_job_repr_hides_path_like_fields() -> None:
+@pytest.mark.parametrize(
+    "kind,limit",
+    [
+        ("bvh", 64 * 1024 * 1024),
+        ("rtmw3d_json", 45 * 1024 * 1024),
+        ("thumbnail", 5 * 1024 * 1024),
+        ("metadata", 1024 * 1024),
+    ],
+)
+def test_publish_accepts_each_exact_artifact_size_limit(kind: str, limit: int) -> None:
+    def open_request(request, timeout):
+        if request.full_url.endswith("/exchange"):
+            return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
+        if request.full_url.endswith("/jobs"):
+            return Response(201, job_payload())
+        return Response(200, job_payload(status="completed"))
+
+    client = exchanged_client(open_request)
+    client.create_job(source_metadata())
+    manifest = [item | ({"sizeBytes": limit} if item["kind"] == kind else {}) for item in artifact_manifest()]
+    assert client.publish(JOB_ID, 0, manifest).status == "completed"
+
+
+@pytest.mark.parametrize(
+    "kind,limit",
+    [
+        ("bvh", 64 * 1024 * 1024),
+        ("rtmw3d_json", 45 * 1024 * 1024),
+        ("thumbnail", 5 * 1024 * 1024),
+        ("metadata", 1024 * 1024),
+    ],
+)
+def test_publish_rejects_each_artifact_size_limit_plus_one(kind: str, limit: int) -> None:
+    calls = []
+
+    def open_request(request, timeout):
+        calls.append(request)
+        if request.full_url.endswith("/exchange"):
+            return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
+        return Response(201, job_payload())
+
+    client = exchanged_client(open_request)
+    client.create_job(source_metadata())
+    manifest = [item | ({"sizeBytes": limit + 1} if item["kind"] == kind else {}) for item in artifact_manifest()]
+    with pytest.raises(LocalIngestApiError, match="artifact metadata is invalid"):
+        client.publish(JOB_ID, 0, manifest)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        {"sha256": "A" * 64},
+        {"formatVersion": ""},
+        {"formatVersion": "v" * 41},
+    ],
+)
+def test_publish_rejects_non_server_compatible_artifact_scalars(replacement) -> None:
+    calls = []
+
+    def open_request(request, timeout):
+        calls.append(request)
+        if request.full_url.endswith("/exchange"):
+            return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
+        return Response(201, job_payload())
+
+    client = exchanged_client(open_request)
+    client.create_job(source_metadata())
+    manifest = artifact_manifest()
+    manifest[0] = manifest[0] | replacement
+    with pytest.raises(LocalIngestApiError, match="artifact metadata is invalid"):
+        client.publish(JOB_ID, 0, manifest)
+    assert len(calls) == 2
+
+
+def test_malformed_job_id_and_path_like_job_fields_are_safely_rejected() -> None:
     responses = iter(
         [
-            Response(200, {"sessionId": "s", "expiresAt": "later"}, headers={"X-Artoke-Local-Access": ACCESS}),
+            Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS}),
             Response(201, job_payload(job_id="not-a-uuid")),
         ]
     )
@@ -464,7 +674,7 @@ def test_malformed_job_id_is_normalized_and_job_repr_hides_path_like_fields() ->
 
     safe_responses = iter(
         [
-            Response(200, {"sessionId": "s", "expiresAt": "later"}, headers={"X-Artoke-Local-Access": ACCESS}),
+            Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS}),
             Response(
                 201,
                 job_payload() | {
@@ -476,6 +686,8 @@ def test_malformed_job_id_is_normalized_and_job_repr_hides_path_like_fields() ->
     )
     safe_client = LocalIngestApiClient("https://artoke.com", opener=lambda *_a, **_k: next(safe_responses))
     safe_client.exchange(HANDOFF)
-    job = safe_client.create_job(source_metadata())
-    assert "C:\\private" not in repr(job)
-    assert "/home/me" not in repr(job)
+    with pytest.raises(LocalIngestApiError, match="job response is invalid") as raised:
+        safe_client.create_job(source_metadata())
+    rendered = f"{raised.value!s} {raised.value!r}"
+    assert "C:\\private" not in rendered
+    assert "/home/me" not in rendered
