@@ -10,6 +10,7 @@ from maxmcp.local_ingest.session import (
     SessionRejected,
     UploadRejected,
 )
+from maxmcp.worker.workspace import JobWorkspace
 
 
 JOB_ID = "00000000-0000-4000-8000-000000000008"
@@ -29,6 +30,11 @@ class _BlockingStream:
         self.started.set()
         self.release.wait(timeout=2)
         return b"x" * min(size, 4)
+
+
+class _BrokenStream:
+    def read(self, _size: int) -> bytes:
+        raise OSError("disconnected")
 
 
 def test_browser_cookie_and_csrf_are_separate_unpredictable_values(tmp_path: Path) -> None:
@@ -92,6 +98,19 @@ def test_incomplete_stream_removes_partial_file(tmp_path: Path) -> None:
         session.receive_source(_ShortStream(), 12, "clip.mp4")
 
     assert list(session.workspace.path.iterdir()) == []
+    source = session.receive_source(BytesIO(b"retry"), 5, "retry.mp4")
+    assert source.read_bytes() == b"retry"
+    session.close()
+
+
+def test_write_error_releases_source_reservation_for_retry(tmp_path: Path) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID, chunk_size=4)
+
+    with pytest.raises(UploadRejected, match="source_write_failed"):
+        session.receive_source(_BrokenStream(), 4, "clip.mp4")
+
+    source = session.receive_source(BytesIO(b"good"), 4, "retry.mp4")
+    assert source.read_bytes() == b"good"
     session.close()
 
 
@@ -126,7 +145,10 @@ def test_cancel_during_upload_removes_partial_and_workspace(tmp_path: Path) -> N
     assert not session.workspace.path.exists()
 
 
-def test_replaced_workspace_symlink_is_rejected(tmp_path: Path) -> None:
+def test_replaced_workspace_symlink_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     session = CompanionSession.create(tmp_path, JOB_ID)
     workspace_path = session.workspace.path
     outside = tmp_path / "outside"
@@ -135,9 +157,113 @@ def test_replaced_workspace_symlink_is_rejected(tmp_path: Path) -> None:
     try:
         workspace_path.symlink_to(outside, target_is_directory=True)
     except OSError:
-        pytest.skip("directory symlinks require platform permission")
+        workspace_path.mkdir()
+        original_is_symlink = Path.is_symlink
+
+        def fake_is_symlink(path: Path) -> bool:
+            return path == workspace_path or original_is_symlink(path)
+
+        monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
 
     with pytest.raises(UploadRejected, match="unsafe_workspace"):
         session.receive_source(BytesIO(b"video"), 5, "clip.mp4")
 
     assert list(outside.iterdir()) == []
+
+
+def test_cleanup_failure_is_retained_and_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+    workspace = session.workspace.path
+    original = JobWorkspace.cleanup
+    attempts = 0
+
+    def flaky_cleanup(job_workspace: JobWorkspace) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("locked")
+        original(job_workspace)
+
+    monkeypatch.setattr(JobWorkspace, "cleanup", flaky_cleanup)
+
+    first = session.cancel()
+    assert first.state == "cleanup_required"
+    assert first.cleaned is False
+    assert workspace.exists()
+    second = session.cancel()
+    assert second.state == "cancelled"
+    assert second.cleaned is True
+    assert not workspace.exists()
+
+
+def test_concurrent_cancel_runs_only_one_workspace_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+    original = JobWorkspace.cleanup
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    calls = 0
+
+    def slow_cleanup(job_workspace: JobWorkspace) -> None:
+        nonlocal calls
+        calls += 1
+        cleanup_started.set()
+        release_cleanup.wait(timeout=2)
+        original(job_workspace)
+
+    monkeypatch.setattr(JobWorkspace, "cleanup", slow_cleanup)
+    first_result: list[object] = []
+    first = threading.Thread(target=lambda: first_result.append(session.cancel()))
+    first.start()
+    assert cleanup_started.wait(timeout=1)
+
+    second = session.cancel()
+    assert second.state == "cancelling"
+    assert calls == 1
+    release_cleanup.set()
+    first.join(timeout=2)
+
+    assert first_result[0].state == "cancelled"
+    assert session.snapshot().state == "cancelled"
+
+
+def test_cancel_at_finalization_cannot_also_accept_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = CompanionSession.create(tmp_path, JOB_ID)
+    reached_finalization = threading.Event()
+    release_finalization = threading.Event()
+    original = session._validate_open_file
+    outcome: list[str] = []
+
+    def barrier(path: Path, descriptor: int) -> None:
+        original(path, descriptor)
+        reached_finalization.set()
+        release_finalization.wait(timeout=2)
+
+    monkeypatch.setattr(session, "_validate_open_file", barrier)
+
+    def receive() -> None:
+        try:
+            session.receive_source(BytesIO(b"video"), 5, "clip.mp4")
+            outcome.append("accepted")
+        except UploadRejected as exc:
+            outcome.append(exc.code)
+
+    thread = threading.Thread(target=receive)
+    thread.start()
+    assert reached_finalization.wait(timeout=1)
+    cancellation = session.cancel()
+    assert cancellation.state == "cancelling"
+    release_finalization.set()
+    thread.join(timeout=2)
+
+    assert outcome == ["cancelled"]
+    assert session.snapshot().state == "cancelled"
+    assert not session.workspace.path.exists()

@@ -18,12 +18,25 @@ function setBusy(value) {
   selectAction.setAttribute("aria-disabled", String(value));
 }
 
+function encodeDisplayName(value) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+function uploadFailed(message) {
+  setBusy(false);
+  sourceInput.value = "";
+  setStatus(message, 0);
+}
+
 async function loadSession() {
   const response = await fetch("/api/session", { cache: "no-store" });
   if (!response.ok) throw new Error("session_unavailable");
   const payload = await response.json();
   csrfToken = payload.csrfToken;
-  if (payload.state === "source_received") {
+  if (payload.state === "accepted") {
     setBusy(true);
     setStatus("영상이 준비됐습니다.", 100);
   }
@@ -32,11 +45,17 @@ async function loadSession() {
 function upload(file) {
   setBusy(true);
   setStatus("영상을 이 PC로 가져오고 있습니다.", 0);
-  const request = new XMLHttpRequest();
-  request.open("POST", "/api/source");
-  request.setRequestHeader("X-CSRF-Token", csrfToken);
-  request.setRequestHeader("X-Artoke-Filename", file.name);
-  request.setRequestHeader("Content-Type", "application/octet-stream");
+  let request;
+  try {
+    request = new XMLHttpRequest();
+    request.open("POST", "/api/source");
+    request.setRequestHeader("X-CSRF-Token", csrfToken);
+    request.setRequestHeader("X-Artoke-Filename", encodeDisplayName(file.name));
+    request.setRequestHeader("Content-Type", "application/octet-stream");
+  } catch (_error) {
+    uploadFailed("파일 이름을 확인한 뒤 다시 시도해 주세요.");
+    return;
+  }
   request.upload.addEventListener("progress", (event) => {
     if (event.lengthComputable) setStatus("영상을 이 PC로 가져오고 있습니다.", event.loaded / event.total * 100);
   });
@@ -45,14 +64,16 @@ function upload(file) {
       setStatus("영상이 준비됐습니다.", 100);
       return;
     }
-    setBusy(false);
-    setStatus("영상을 가져오지 못했습니다. 다시 시도해 주세요.", 0);
+    uploadFailed("영상을 가져오지 못했습니다. 다시 시도해 주세요.");
   });
   request.addEventListener("error", () => {
-    setBusy(false);
-    setStatus("연결을 확인한 뒤 다시 시도해 주세요.", 0);
+    uploadFailed("연결을 확인한 뒤 다시 시도해 주세요.");
   });
-  request.send(file);
+  try {
+    request.send(file);
+  } catch (_error) {
+    uploadFailed("영상을 가져오지 못했습니다. 다시 시도해 주세요.");
+  }
 }
 
 sourceInput.addEventListener("change", () => {

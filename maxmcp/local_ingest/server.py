@@ -6,16 +6,26 @@ from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
+import base64
+import binascii
 import json
 from pathlib import Path
 import re
 import threading
 from urllib.parse import urlsplit
 
-from .session import CompanionSession, SessionRejected, UploadRejected
+from .session import (
+    CompanionSession,
+    SessionRejected,
+    SessionSnapshot,
+    UploadRejected,
+)
 
 
 _COOKIE_NAME = "artoke_local_ui"
+_MAX_ENCODED_DISPLAY_NAME_BYTES = 960
+_MAX_DECODED_DISPLAY_NAME_BYTES = 720
+_BASE64URL = re.compile(r"[A-Za-z0-9_-]+")
 _CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'none'; "
     "connect-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; "
@@ -40,6 +50,33 @@ def _cookie_value(raw: str | None) -> str | None:
     return morsel.value if morsel is not None else None
 
 
+def _decode_display_name(encoded: str | None) -> str:
+    if (
+        not isinstance(encoded, str)
+        or not 1 <= len(encoded) <= _MAX_ENCODED_DISPLAY_NAME_BYTES
+        or _BASE64URL.fullmatch(encoded) is None
+    ):
+        raise ValueError
+    padding = "=" * (-len(encoded) % 4)
+    try:
+        raw = base64.b64decode(
+            encoded + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        decoded = raw.decode("utf-8", errors="strict")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        raise ValueError from None
+    canonical = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    if (
+        not 1 <= len(raw) <= _MAX_DECODED_DISPLAY_NAME_BYTES
+        or not decoded
+        or canonical != encoded
+    ):
+        raise ValueError
+    return decoded
+
+
 class CompanionHTTPServer(ThreadingHTTPServer):
     """A one-session local server bound to an OS-selected IPv4 loopback port."""
 
@@ -61,6 +98,11 @@ class CompanionHTTPServer(ThreadingHTTPServer):
             chunk_size=chunk_size,
         )
         self._close_lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._serve_started = threading.Event()
+        self._serve_stopped = threading.Event()
+        self._serve_running = False
+        self._serve_failed = False
         self._closed = False
         try:
             super().__init__(("127.0.0.1", 0), _CompanionRequestHandler)
@@ -80,14 +122,39 @@ class CompanionHTTPServer(ThreadingHTTPServer):
     def origin(self) -> str:
         return f"http://{self.authority}"
 
-    def close(self) -> None:
+    @property
+    def serve_failed(self) -> bool:
+        with self._lifecycle_lock:
+            return self._serve_failed
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                self._serve_stopped.set()
+                return
+            self._serve_running = True
+            self._serve_started.set()
+        try:
+            super().serve_forever(poll_interval=poll_interval)
+        except Exception:
+            with self._lifecycle_lock:
+                self._serve_failed = True
+        finally:
+            with self._lifecycle_lock:
+                self._serve_running = False
+                self._serve_stopped.set()
+
+    def close(self) -> SessionSnapshot:
         with self._close_lock:
             if self._closed:
-                return
+                return self.session.close()
             self._closed = True
-        self.shutdown()
-        self.server_close()
-        self.session.close()
+            with self._lifecycle_lock:
+                running = self._serve_running
+            if running:
+                self.shutdown()
+            self.server_close()
+            return self.session.close()
 
 
 class _CompanionRequestHandler(BaseHTTPRequestHandler):
@@ -123,6 +190,7 @@ class _CompanionRequestHandler(BaseHTTPRequestHandler):
                     "csrfToken": self.server.session.csrf_token,
                     "state": snapshot.state,
                     "sizeBytes": snapshot.size_bytes,
+                    "cleaned": snapshot.cleaned,
                 },
             )
             return
@@ -142,8 +210,16 @@ class _CompanionRequestHandler(BaseHTTPRequestHandler):
             self._receive_source()
             return
         if path == "/api/cancel":
-            self.server.session.cancel()
-            self._send_json(HTTPStatus.OK, {"status": "cancelled"})
+            snapshot = self.server.session.cancel()
+            status = (
+                HTTPStatus.ACCEPTED
+                if snapshot.state in {"cancelling", "cleanup_required"}
+                else HTTPStatus.OK
+            )
+            self._send_json(
+                status,
+                {"status": snapshot.state, "cleaned": snapshot.cleaned},
+            )
             return
         self._json(HTTPStatus.NOT_FOUND, "not_found")
 
@@ -203,10 +279,17 @@ class _CompanionRequestHandler(BaseHTTPRequestHandler):
             return
         content_length = int(raw_length)
         try:
+            display_name = _decode_display_name(
+                self.headers.get("X-Artoke-Filename")
+            )
+        except ValueError:
+            self._json(HTTPStatus.BAD_REQUEST, "invalid_display_name")
+            return
+        try:
             self.server.session.receive_source(
                 self.rfile,
                 content_length,
-                self.headers.get("X-Artoke-Filename", "video"),
+                display_name,
             )
         except UploadRejected as exc:
             statuses = {

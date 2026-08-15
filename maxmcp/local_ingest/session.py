@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import threading
 from typing import BinaryIO
 from uuid import uuid4
@@ -52,14 +53,69 @@ def _display_name(value: str) -> str:
     return (cleaned[:_DISPLAY_NAME_LIMIT].strip() or "video")
 
 
+def _windows_handle_matches_path(path: Path, descriptor: int) -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        import msvcrt
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = wintypes.HANDLE(msvcrt.get_osfhandle(descriptor))
+        get_final_path = kernel32.GetFinalPathNameByHandleW
+        get_final_path.argtypes = (
+            wintypes.HANDLE,
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+        )
+        get_final_path.restype = wintypes.DWORD
+        buffer = ctypes.create_unicode_buffer(32_768)
+        length = get_final_path(handle, buffer, len(buffer), 0)
+        if length == 0 or length >= len(buffer):
+            return False
+        final_path = buffer.value
+        if final_path.startswith("\\\\?\\UNC\\"):
+            final_path = "\\\\" + final_path[8:]
+        elif final_path.startswith("\\\\?\\"):
+            final_path = final_path[4:]
+        if os.path.normcase(os.path.abspath(final_path)) != os.path.normcase(
+            os.path.abspath(path)
+        ):
+            return False
+
+        class FileAttributeTagInfo(ctypes.Structure):
+            _fields_ = (
+                ("file_attributes", wintypes.DWORD),
+                ("reparse_tag", wintypes.DWORD),
+            )
+
+        get_handle_info = kernel32.GetFileInformationByHandleEx
+        get_handle_info.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        )
+        get_handle_info.restype = wintypes.BOOL
+        info = FileAttributeTagInfo()
+        if not get_handle_info(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            return False
+        return not bool(info.file_attributes & 0x400)
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 @dataclass(frozen=True)
 class SessionSnapshot:
     state: str
     size_bytes: int | None
+    cleaned: bool
 
 
 class CompanionSession:
-    """Own one fresh workspace, one browser, and at most one source upload."""
+    """Own one fresh workspace, one browser, and at most one accepted source."""
 
     def __init__(
         self,
@@ -81,11 +137,11 @@ class CompanionSession:
         self.source_path: Path | None = None
         self._source_size: int | None = None
         self._browser_claimed = False
-        self._upload_claimed = False
-        self._upload_active = False
-        self._cancelled = threading.Event()
-        self._closed = False
+        self._state = "ready"
+        self._terminal_target = "cancelled"
+        self._cancel_requested = threading.Event()
         self._cleaned = False
+        self._cleanup_running = False
         self._lock = threading.Lock()
 
     @classmethod
@@ -106,7 +162,7 @@ class CompanionSession:
     def claim_browser(self, cookie: str | None) -> bool:
         """Claim the sole browser; return whether a cookie must be issued."""
         with self._lock:
-            if self._closed:
+            if self._state == "closed":
                 raise SessionRejected("browser_session_closed")
             if cookie == self.browser_cookie and self._browser_claimed:
                 return False
@@ -118,7 +174,7 @@ class CompanionSession:
     def authorize_browser(self, cookie: str | None) -> None:
         with self._lock:
             valid = (
-                not self._closed
+                self._state != "closed"
                 and self._browser_claimed
                 and cookie is not None
                 and secrets.compare_digest(cookie, self.browser_cookie)
@@ -133,15 +189,7 @@ class CompanionSession:
 
     def snapshot(self) -> SessionSnapshot:
         with self._lock:
-            if self._cancelled.is_set():
-                state = "cancelled"
-            elif self.source_path is not None:
-                state = "source_received"
-            elif self._upload_active:
-                state = "receiving"
-            else:
-                state = "waiting_for_source"
-            return SessionSnapshot(state=state, size_bytes=self._source_size)
+            return self._snapshot_locked()
 
     def receive_source(
         self,
@@ -157,21 +205,23 @@ class CompanionSession:
             raise UploadRejected("source_too_large")
 
         with self._lock:
-            if self._closed or self._cancelled.is_set():
+            if self._state in {"cancelling", "cancelled", "cleanup_required", "closed"}:
                 raise UploadRejected("cancelled")
-            if self._upload_claimed:
+            if self._state in {"receiving", "accepted"}:
                 raise UploadRejected("source_already_selected")
-            self._upload_claimed = True
-            self._upload_active = True
+            self._state = "receiving"
 
-        partial: Path | None = None
-        final: Path | None = None
+        source: Path | None = None
+        descriptor: int | None = None
+        accepted = False
+        rejection: UploadRejected | None = None
         try:
-            partial, final = self._new_source_targets()
-            remaining = content_length
-            with partial.open("xb") as destination:
+            source, descriptor = self._open_source_file()
+            with os.fdopen(descriptor, "wb", closefd=True) as destination:
+                descriptor = None
+                remaining = content_length
                 while remaining:
-                    if self._cancelled.is_set():
+                    if self._cancel_requested.is_set():
                         raise UploadRejected("cancelled")
                     chunk = stream.read(min(self.chunk_size, remaining))
                     if not chunk:
@@ -182,85 +232,155 @@ class CompanionSession:
                     remaining -= len(chunk)
                 destination.flush()
                 os.fsync(destination.fileno())
-            if self._cancelled.is_set():
-                raise UploadRejected("cancelled")
-            os.replace(partial, final)
-            with self._lock:
-                self.display_name = _display_name(display_name)
-                self.source_path = final
-                self._source_size = content_length
-            return final
-        except UploadRejected:
-            if partial is not None:
-                self._safe_unlink(partial)
-            if final is not None:
-                self._safe_unlink(final)
-            raise
+                self._validate_open_file(source, destination.fileno())
+                with self._lock:
+                    if self._state != "receiving" or self._cancel_requested.is_set():
+                        raise UploadRejected("cancelled")
+                    self.display_name = _display_name(display_name)
+                    self.source_path = source
+                    self._source_size = content_length
+                    self._state = "accepted"
+                    accepted = True
+            return source
+        except UploadRejected as exc:
+            rejection = exc
         except (OSError, ValueError):
-            if partial is not None:
-                self._safe_unlink(partial)
-            if final is not None:
-                self._safe_unlink(final)
-            raise UploadRejected("source_write_failed") from None
+            rejection = UploadRejected("source_write_failed")
         finally:
-            cleanup = False
-            with self._lock:
-                self._upload_active = False
-                cleanup = self._cancelled.is_set() and not self._cleaned
-            if cleanup:
-                self._cleanup_workspace()
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if not accepted:
+                removed = source is None or self._safe_unlink(source)
+                cleanup_now = False
+                with self._lock:
+                    cancellation = (
+                        self._state == "cancelling"
+                        or self._cancel_requested.is_set()
+                    )
+                    if not removed:
+                        self._state = "cleanup_required"
+                    elif cancellation:
+                        self._state = "cancelling"
+                        cleanup_now = True
+                    else:
+                        self._state = "ready"
+                if cleanup_now:
+                    self._finish_cleanup()
+        if rejection is not None:
+            raise rejection
+        raise UploadRejected("source_write_failed")
 
-    def cancel(self) -> None:
-        self._cancelled.set()
+    def cancel(self) -> SessionSnapshot:
+        return self._request_terminal("cancelled")
+
+    def close(self) -> SessionSnapshot:
+        return self._request_terminal("closed")
+
+    def _request_terminal(self, target: str) -> SessionSnapshot:
+        self._cancel_requested.set()
         with self._lock:
-            cleanup = not self._upload_active and not self._cleaned
-        if cleanup:
-            self._cleanup_workspace()
+            self._terminal_target = target
+            if self._state == target and self._cleaned:
+                return self._snapshot_locked()
+            if self._state == "receiving":
+                self._state = "cancelling"
+                return self._snapshot_locked()
+            if self._cleaned:
+                self._state = target
+                return self._snapshot_locked()
+            self._state = "cancelling"
+        return self._finish_cleanup()
 
-    def close(self) -> None:
-        self._cancelled.set()
+    def _finish_cleanup(self) -> SessionSnapshot:
         with self._lock:
-            self._closed = True
-            cleanup = not self._upload_active and not self._cleaned
-        if cleanup:
-            self._cleanup_workspace()
-
-    def _new_source_targets(self) -> tuple[Path, Path]:
-        workspace = self.workspace.path
-        if (
-            not workspace.is_dir()
-            or _is_link(workspace)
-            or workspace.resolve() != workspace
-            or workspace.resolve().parent != self.workspace.path.parent.resolve()
-        ):
-            raise UploadRejected("unsafe_workspace")
-        basename = str(uuid4())
-        partial = workspace / f"{basename}.part"
-        final = workspace / basename
-        if partial.parent.resolve() != workspace or final.parent.resolve() != workspace:
-            raise UploadRejected("unsafe_workspace")
-        return partial, final
-
-    def _cleanup_workspace(self) -> None:
+            if self._cleanup_running:
+                return self._snapshot_locked()
+            self._cleanup_running = True
         try:
             self.workspace.cleanup()
         except (OSError, RuntimeError):
-            return
+            with self._lock:
+                self._cleanup_running = False
+                self._state = "cleanup_required"
+                self._cleaned = False
+                return self._snapshot_locked()
         with self._lock:
+            self._cleanup_running = False
+            self._state = self._terminal_target
             self._cleaned = True
+            self.source_path = None
+            return self._snapshot_locked()
 
-    def _safe_unlink(self, path: Path) -> None:
+    def _open_source_file(self) -> tuple[Path, int]:
+        workspace = self.workspace.path
+        if not self._workspace_is_safe():
+            raise UploadRejected("unsafe_workspace")
+        source = workspace / str(uuid4())
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        for optional in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
+            flags |= int(getattr(os, optional, 0))
+        try:
+            descriptor = os.open(source, flags, 0o600)
+        except OSError:
+            raise UploadRejected("source_write_failed") from None
+        try:
+            self._validate_open_file(source, descriptor)
+        except BaseException:
+            os.close(descriptor)
+            self._safe_unlink(source)
+            raise
+        return source, descriptor
+
+    def _validate_open_file(self, path: Path, descriptor: int) -> None:
+        if not self._workspace_is_safe() or path.parent != self.workspace.path:
+            raise UploadRejected("unsafe_workspace")
+        try:
+            path_stat = path.stat(follow_symlinks=False)
+            handle_stat = os.fstat(descriptor)
+        except OSError:
+            raise UploadRejected("unsafe_workspace") from None
+        if (
+            _is_link(path)
+            or not stat.S_ISREG(path_stat.st_mode)
+            or (path_stat.st_dev, path_stat.st_ino) != (handle_stat.st_dev, handle_stat.st_ino)
+            or path.resolve() != path
+            or not _windows_handle_matches_path(path, descriptor)
+        ):
+            raise UploadRejected("unsafe_workspace")
+
+    def _workspace_is_safe(self) -> bool:
+        workspace = self.workspace.path
+        try:
+            return (
+                workspace.is_dir()
+                and not _is_link(workspace)
+                and workspace.resolve() == workspace
+                and workspace.resolve().parent == self.workspace.path.parent.resolve()
+            )
+        except OSError:
+            return False
+
+    def _safe_unlink(self, path: Path) -> bool:
         workspace = self.workspace.path
         try:
             if (
                 path.parent != workspace
-                or not workspace.is_dir()
-                or _is_link(workspace)
-                or workspace.resolve() != workspace
-                or path.is_symlink()
+                or not self._workspace_is_safe()
+                or _is_link(path)
                 or (path.exists() and path.resolve().parent != workspace)
             ):
-                return
+                return False
             path.unlink(missing_ok=True)
+            return not path.exists()
         except OSError:
-            return
+            return False
+
+    def _snapshot_locked(self) -> SessionSnapshot:
+        return SessionSnapshot(
+            state=self._state,
+            size_bytes=self._source_size,
+            cleaned=self._cleaned,
+        )
