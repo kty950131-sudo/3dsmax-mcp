@@ -29,6 +29,7 @@ _JOB_STATUSES = {
     "deleting",
 }
 _PROGRESS_STAGES = {"downloading", "extracting", "converting", "validating", "uploading"}
+_JOB_PROGRESS_STAGES = _PROGRESS_STAGES | {"queued", "completed", "failed", "cancelled"}
 _ARTIFACT_KINDS = {"bvh", "rtmw3d_json", "thumbnail", "metadata"}
 _SOURCE_KEYS = {
     "name",
@@ -545,7 +546,7 @@ class LocalIngestApiClient:
             )
             if any(value is not None and not isinstance(value, str) for value in nullable_strings):
                 raise TypeError
-            if body["progressStage"] is not None and body["progressStage"] not in _PROGRESS_STAGES:
+            if body["progressStage"] is not None and body["progressStage"] not in _JOB_PROGRESS_STAGES:
                 raise TypeError
             if body["errorCode"] is not None and not _SAFE_ERROR_CODE.fullmatch(body["errorCode"]):
                 raise TypeError

@@ -296,6 +296,47 @@ def test_progress_upload_publish_terminal_and_cleanup_use_only_task4_routes() ->
     assert not hasattr(client, "fetch_job")
 
 
+def test_job_responses_accept_exact_server_lifecycle_stages() -> None:
+    terminal_calls = 0
+
+    def open_request(request, timeout):
+        nonlocal terminal_calls
+        if request.full_url.endswith("/exchange"):
+            return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
+        if request.full_url.endswith("/jobs"):
+            return Response(201, job_payload(status="queued") | {"progressStage": "queued"})
+        if request.full_url.endswith("/publish"):
+            return Response(200, job_payload(status="completed") | {"progressStage": "completed"})
+        if request.full_url.endswith("/terminal"):
+            terminal_calls += 1
+            stage = "failed" if terminal_calls == 1 else "cancelled"
+            return Response(200, job_payload(status=stage) | {"progressStage": stage})
+        raise AssertionError("unexpected route")
+
+    client = exchanged_client(open_request)
+    assert client.create_job(source_metadata()).progress_stage == "queued"
+    assert client.publish(JOB_ID, 0, artifact_manifest()).progress_stage == "completed"
+    assert client.finish_failed(JOB_ID, "rtmw3d_failed").progress_stage == "failed"
+    assert client.finish_cancelled(JOB_ID).progress_stage == "cancelled"
+
+
+@pytest.mark.parametrize("stage", ["queued", "completed", "failed", "cancelled"])
+def test_progress_request_rejects_non_heartbeat_lifecycle_stages(stage: str) -> None:
+    calls = []
+
+    def open_request(request, timeout):
+        calls.append(request)
+        if request.full_url.endswith("/exchange"):
+            return Response(200, {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT}, headers={"X-Artoke-Local-Access": ACCESS})
+        return Response(201, job_payload(status="queued") | {"progressStage": "queued"})
+
+    client = exchanged_client(open_request)
+    client.create_job(source_metadata())
+    with pytest.raises(LocalIngestApiError, match="progress is invalid"):
+        client.report_progress(JOB_ID, stage, 10)
+    assert len(calls) == 2
+
+
 def test_client_rejects_cross_job_calls_before_network_request() -> None:
     calls = []
 
