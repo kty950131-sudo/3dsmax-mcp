@@ -86,6 +86,153 @@ def test_claim_parses_correction_revision_and_signed_urls() -> None:
     assert claim.edits_url == "https://storage.test/edits-signed"
 
 
+def _local_correction_claim_payload() -> dict:
+    return {
+        "job": {
+            "id": "job-1",
+            "sourceFilename": "walk.mp4",
+            "sourceDurationSeconds": 4.2,
+            "editRevision": 3,
+        },
+        "source": {
+            "transport": "local_ephemeral",
+            "objectPath": None,
+            "downloadUrl": None,
+            "trackingEncoding": "gzip_v1",
+            "trackingUrl": "https://storage.test/tracking-signed",
+            "editsUrl": "https://storage.test/edits-signed",
+            "thumbnailUrl": "https://storage.test/thumbnail-signed",
+            "metadataUrl": "https://storage.test/metadata-signed",
+        },
+    }
+
+
+def test_claim_defaults_to_the_private_transport_without_retained_urls() -> None:
+    client = ArtokeApiClient(
+        "https://artoke.com",
+        "secret-token",
+        opener=lambda *_args, **_kwargs: Response(200, {
+            "job": {
+                "id": "job-1",
+                "sourceFilename": "walk.mp4",
+                "sourceDurationSeconds": 4.2,
+            },
+            "source": {
+                "objectPath": "owner/job/source/walk.mp4",
+                "downloadUrl": "https://signed",
+                "trackingEncoding": "identity",
+            },
+        }),
+    )
+
+    claim = client.claim()
+
+    assert claim is not None
+    assert claim.transport == "private_storage"
+    assert claim.thumbnail_url is None
+    assert claim.metadata_url is None
+
+
+def test_claim_parses_a_source_free_local_correction() -> None:
+    client = ArtokeApiClient(
+        "https://artoke.com",
+        "secret-token",
+        opener=lambda *_args, **_kwargs: Response(
+            200, _local_correction_claim_payload()
+        ),
+    )
+
+    claim = client.claim()
+
+    assert claim is not None
+    assert claim.transport == "local_ephemeral"
+    assert claim.object_path is None
+    assert claim.download_url is None
+    assert claim.edit_revision == 3
+    assert claim.tracking_url == "https://storage.test/tracking-signed"
+    assert claim.edits_url == "https://storage.test/edits-signed"
+    assert claim.thumbnail_url == "https://storage.test/thumbnail-signed"
+    assert claim.metadata_url == "https://storage.test/metadata-signed"
+
+
+def _local_claim_at_revision_zero(payload: dict) -> dict:
+    payload["job"]["editRevision"] = 0
+    payload["source"]["trackingUrl"] = None
+    payload["source"]["editsUrl"] = None
+    return payload
+
+
+def _local_claim_with_download_url(payload: dict) -> dict:
+    payload["source"]["downloadUrl"] = "https://signed"
+    return payload
+
+
+def _local_claim_with_object_path(payload: dict) -> dict:
+    payload["source"]["objectPath"] = "owner/job/source/walk.mp4"
+    return payload
+
+
+def _local_claim_without_thumbnail(payload: dict) -> dict:
+    payload["source"]["thumbnailUrl"] = None
+    return payload
+
+
+def _local_claim_without_metadata(payload: dict) -> dict:
+    payload["source"]["metadataUrl"] = None
+    return payload
+
+
+def _local_claim_with_blank_thumbnail(payload: dict) -> dict:
+    payload["source"]["thumbnailUrl"] = ""
+    return payload
+
+
+def _claim_with_unknown_transport(payload: dict) -> dict:
+    payload["source"]["transport"] = "shared_drive"
+    return payload
+
+
+def _private_claim_with_retained_urls(payload: dict) -> dict:
+    payload["source"]["transport"] = "private_storage"
+    payload["source"]["objectPath"] = "owner/job/source/walk.mp4"
+    payload["source"]["downloadUrl"] = "https://signed"
+    return payload
+
+
+def _private_claim_without_download(payload: dict) -> dict:
+    payload["source"]["transport"] = "private_storage"
+    payload["source"]["objectPath"] = "owner/job/source/walk.mp4"
+    payload["source"]["thumbnailUrl"] = None
+    payload["source"]["metadataUrl"] = None
+    return payload
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        _local_claim_at_revision_zero,
+        _local_claim_with_download_url,
+        _local_claim_with_object_path,
+        _local_claim_without_thumbnail,
+        _local_claim_without_metadata,
+        _local_claim_with_blank_thumbnail,
+        _claim_with_unknown_transport,
+        _private_claim_with_retained_urls,
+        _private_claim_without_download,
+    ],
+)
+def test_claim_rejects_mixed_transport_shapes(mutate) -> None:
+    payload = mutate(_local_correction_claim_payload())
+    client = ArtokeApiClient(
+        "https://artoke.com",
+        "secret-token",
+        opener=lambda *_args, **_kwargs: Response(200, payload),
+    )
+
+    with pytest.raises(WorkerApiError, match="claim response is invalid"):
+        client.claim()
+
+
 def test_claim_returns_none_for_empty_queue() -> None:
     client = ArtokeApiClient(
         "https://artoke.com",

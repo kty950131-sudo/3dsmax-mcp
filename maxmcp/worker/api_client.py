@@ -23,13 +23,16 @@ class WorkerApiError(RuntimeError):
 class ClaimedJob:
     job_id: str
     source_filename: str
-    object_path: str
-    download_url: str
+    object_path: str | None
+    download_url: str | None
     duration_seconds: float
     edit_revision: int = 0
     tracking_encoding: str = "identity"
     tracking_url: str | None = None
     edits_url: str | None = None
+    transport: str = "private_storage"
+    thumbnail_url: str | None = None
+    metadata_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,16 +103,20 @@ class ArtokeApiClient:
             source = payload["source"]
             if not isinstance(job, dict) or not isinstance(source, dict):
                 raise TypeError
-            required_strings = (
-                job.get("id"), job.get("sourceFilename"),
-                source.get("objectPath"), source.get("downloadUrl"),
-            )
+            required_strings = (job.get("id"), job.get("sourceFilename"))
             if any(not isinstance(value, str) or not value for value in required_strings):
+                raise TypeError
+            transport = source.get("transport", "private_storage")
+            if transport not in {"private_storage", "local_ephemeral"}:
                 raise TypeError
             edit_revision = job.get("editRevision", 0)
             tracking_encoding = source.get("trackingEncoding", "identity")
             tracking_url = source.get("trackingUrl")
             edits_url = source.get("editsUrl")
+            object_path = source.get("objectPath")
+            download_url = source.get("downloadUrl")
+            thumbnail_url = source.get("thumbnailUrl")
+            metadata_url = source.get("metadataUrl")
             if (
                 not isinstance(edit_revision, int)
                 or isinstance(edit_revision, bool)
@@ -119,9 +126,28 @@ class ArtokeApiClient:
                 raise TypeError
             if any(
                 value is not None and (not isinstance(value, str) or not value)
-                for value in (tracking_url, edits_url)
+                for value in (
+                    tracking_url,
+                    edits_url,
+                    object_path,
+                    download_url,
+                    thumbnail_url,
+                    metadata_url,
+                )
             ):
                 raise TypeError
+            if transport == "private_storage":
+                if object_path is None or download_url is None:
+                    raise TypeError
+                if thumbnail_url is not None or metadata_url is not None:
+                    raise TypeError
+            else:
+                if edit_revision <= 0:
+                    raise TypeError
+                if object_path is not None or download_url is not None:
+                    raise TypeError
+                if thumbnail_url is None or metadata_url is None:
+                    raise TypeError
             if edit_revision > 0 and (tracking_url is None or edits_url is None):
                 raise TypeError
             if edit_revision == 0 and (tracking_url is not None or edits_url is not None):
@@ -134,12 +160,15 @@ class ArtokeApiClient:
                 raise ValueError
             return ClaimedJob(
                 job_id=job["id"], source_filename=job["sourceFilename"],
-                object_path=source["objectPath"], download_url=source["downloadUrl"],
+                object_path=object_path, download_url=download_url,
                 duration_seconds=duration_seconds,
                 edit_revision=edit_revision,
                 tracking_encoding=tracking_encoding,
                 tracking_url=tracking_url,
                 edits_url=edits_url,
+                transport=transport,
+                thumbnail_url=thumbnail_url,
+                metadata_url=metadata_url,
             )
         except (KeyError, TypeError, ValueError, OverflowError):
             raise WorkerApiError("ARTOKE claim response is invalid") from None

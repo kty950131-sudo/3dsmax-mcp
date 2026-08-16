@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 import maxmcp.worker.artifacts as artifacts_module
-from maxmcp.worker.artifacts import build_artifacts, download_source, upload_signed_artifact
+from maxmcp.worker.artifacts import (
+    build_artifacts,
+    build_artifacts_without_source,
+    download_source,
+    upload_signed_artifact,
+)
 from maxmcp.worker.motion_pipeline import PipelineArtifacts
 
 
@@ -361,3 +366,114 @@ def test_signed_upload_rejects_non_https_url(tmp_path: Path) -> None:
     artifact.write_bytes(b"bvh")
     with pytest.raises(ValueError, match="HTTPS"):
         upload_signed_artifact("file:///tmp/result", artifact, "application/octet-stream")
+
+
+def _source_free_pipeline(tmp_path: Path) -> PipelineArtifacts:
+    body = tmp_path / "walk_rtmw3d.json"
+    body.write_text('{"schema":"artoke.rtmw3d.v1"}', encoding="utf-8")
+    bvh = tmp_path / "walk.bvh"
+    bvh.write_text(
+        "HIERARCHY\nROOT Pelvis\nMOTION\nFrames: 1\nFrame Time: 0.0333333333\n",
+        encoding="utf-8",
+    )
+    trace = tmp_path / "trace.json"
+    trace.write_text('{"backend":"OpenMMLab RTMW3D-L"}', encoding="utf-8")
+    return PipelineArtifacts(body, bvh, trace, 1)
+
+
+def _retained_thumbnail(tmp_path: Path, payload: bytes | None = None) -> Path:
+    thumbnail = tmp_path / "retained.thumbnail.webp"
+    thumbnail.write_bytes(
+        payload if payload is not None else b"RIFF\x10\x00\x00\x00WEBPVP8 retained"
+    )
+    return thumbnail
+
+
+def _retained_metadata(tmp_path: Path, payload: object | None = None) -> Path:
+    metadata = tmp_path / "retained.metadata.json"
+    body = payload if payload is not None else {
+        "schema": "artoke.motion.metadata.v1",
+        "sha256": {"source": "e" * 64, "bvh": "f" * 64},
+    }
+    metadata.write_text(json.dumps(body), encoding="utf-8")
+    return metadata
+
+
+def test_source_free_build_reuses_retained_thumbnail_and_source_hash(tmp_path: Path) -> None:
+    thumbnail = _retained_thumbnail(tmp_path)
+    artifacts = build_artifacts_without_source(
+        _source_free_pipeline(tmp_path),
+        tmp_path / "result",
+        duration_seconds=4.0,
+        retained_thumbnail=thumbnail,
+        retained_metadata=_retained_metadata(tmp_path),
+        edit_revision=3,
+        tracking_encoding="gzip_v1",
+    )
+
+    assert [(item.kind, item.path.name) for item in artifacts] == [
+        ("bvh", "motion.bvh"),
+        ("rtmw3d_json", "motion.rtmw3d.json.gz"),
+        ("thumbnail", "thumbnail.webp"),
+        ("metadata", "metadata.json"),
+    ]
+    result_thumbnail = tmp_path / "result" / "thumbnail.webp"
+    assert result_thumbnail.read_bytes() == thumbnail.read_bytes()
+    metadata = json.loads((tmp_path / "result" / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["editRevision"] == 3
+    assert metadata["duration_seconds"] == 4.0
+    assert metadata["sha256"]["source"] == "e" * 64
+    written_bvh = (tmp_path / "result" / "motion.bvh").read_bytes()
+    assert metadata["sha256"]["bvh"] == hashlib.sha256(written_bvh).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schema": "artoke.motion.metadata.v1"},
+        {"sha256": {}},
+        {"sha256": {"source": "not-hex"}},
+        {"sha256": {"source": "E" * 64}},
+        {"sha256": {"source": 7}},
+        {"sha256": "e" * 64},
+        [],
+    ],
+)
+def test_source_free_build_never_fabricates_a_source_hash(
+    tmp_path: Path, payload: object
+) -> None:
+    with pytest.raises(ValueError, match="retained metadata"):
+        build_artifacts_without_source(
+            _source_free_pipeline(tmp_path),
+            tmp_path / "result",
+            duration_seconds=4.0,
+            retained_thumbnail=_retained_thumbnail(tmp_path),
+            retained_metadata=_retained_metadata(tmp_path, payload),
+            edit_revision=3,
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(b"", id="empty"),
+        pytest.param(b"JPEGnot-a-webp", id="not-riff"),
+        pytest.param(b"RIFF\x10\x00\x00\x00WAVE", id="riff-but-not-webp"),
+        pytest.param(
+            b"RIFF" + b"\x00" * 4 + b"WEBP" + b"\x00" * (5 * 1024 * 1024),
+            id="oversized",
+        ),
+    ],
+)
+def test_source_free_build_rejects_invalid_retained_thumbnails(
+    tmp_path: Path, payload: bytes
+) -> None:
+    with pytest.raises(ValueError, match="retained thumbnail"):
+        build_artifacts_without_source(
+            _source_free_pipeline(tmp_path),
+            tmp_path / "result",
+            duration_seconds=4.0,
+            retained_thumbnail=_retained_thumbnail(tmp_path, payload),
+            retained_metadata=_retained_metadata(tmp_path),
+            edit_revision=3,
+        )

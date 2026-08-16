@@ -159,16 +159,15 @@ def _bvh_info(path: Path) -> tuple[int, float]:
     return int(frames.group(1)), float(frame_time.group(1))
 
 
-def build_artifacts(
-    video: Path,
+_MAX_RETAINED_THUMBNAIL_BYTES = 5 * 1024 * 1024
+_SOURCE_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _prepare_motion_outputs(
     pipeline: PipelineArtifacts,
     output_dir: Path,
-    duration_seconds: float,
-    *,
-    edit_revision: int = 0,
-    tracking_encoding: str = "gzip_v1",
-    process_runner: Callable[..., Any] = subprocess.run,
-) -> tuple[LocalArtifact, ...]:
+    tracking_encoding: str,
+) -> tuple[Path, Path, int, list[str]]:
     if tracking_encoding not in {"identity", "gzip_v1"}:
         raise ValueError("unsupported tracking encoding")
     if pipeline.rtmw3d_json.stat().st_size > MAX_TRACKING_DECOMPRESSED_BYTES:
@@ -186,8 +185,6 @@ def build_artifacts(
         if tracking_encoding == "gzip_v1"
         else "motion.rtmw3d.json"
     )
-    thumbnail = output_dir / "thumbnail.webp"
-    metadata_path = output_dir / "metadata.json"
     shutil.copy2(pipeline.bvh, bvh)
     if tracking_encoding == "gzip_v1":
         with pipeline.rtmw3d_json.open("rb") as source, body.open("wb") as output:
@@ -205,6 +202,103 @@ def build_artifacts(
     warnings: list[str] = []
     if abs(frame_time - (1 / 30)) > 0.0001:
         warnings.append("bvh_frame_rate_not_30fps")
+    return bvh, body, frame_count, warnings
+
+
+def _write_metadata(
+    metadata_path: Path,
+    trace_path: Path,
+    frame_count: int,
+    duration_seconds: float,
+    edit_revision: int,
+    source_sha256: str,
+    bvh: Path,
+    body: Path,
+    thumbnail: Path,
+    warnings: list[str],
+) -> None:
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    metadata = {
+        "schema": "artoke.motion.metadata.v1",
+        "runtime": str(trace.get("backend", "OpenMMLab RTMW3D-L")),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "fps": 30,
+        "frame_count": frame_count,
+        "duration_seconds": duration_seconds,
+        "editRevision": edit_revision,
+        "sha256": {
+            "source": source_sha256,
+            "bvh": sha256_file(bvh),
+            "rtmw3d_json": sha256_file(body),
+            "thumbnail": sha256_file(thumbnail),
+        },
+        "warnings": warnings,
+    }
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _collect_artifacts(
+    bvh: Path,
+    body: Path,
+    thumbnail: Path,
+    metadata_path: Path,
+) -> tuple[LocalArtifact, ...]:
+    files = (
+        ("bvh", bvh),
+        ("rtmw3d_json", body),
+        ("thumbnail", thumbnail),
+        ("metadata", metadata_path),
+    )
+    return tuple(
+        LocalArtifact(kind, path, path.stat().st_size, sha256_file(path))
+        for kind, path in files
+    )
+
+
+def _retained_source_sha256(metadata_path: Path) -> str:
+    try:
+        body = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("retained metadata is invalid") from exc
+    hashes = body.get("sha256") if isinstance(body, dict) else None
+    source = hashes.get("source") if isinstance(hashes, dict) else None
+    if not isinstance(source, str) or _SOURCE_SHA256.fullmatch(source) is None:
+        raise ValueError("retained metadata is invalid")
+    return source
+
+
+def _copy_retained_thumbnail(retained: Path, destination: Path) -> None:
+    try:
+        data = retained.read_bytes()
+    except OSError as exc:
+        raise ValueError("retained thumbnail is invalid") from exc
+    if (
+        not 12 <= len(data) <= _MAX_RETAINED_THUMBNAIL_BYTES
+        or data[:4] != b"RIFF"
+        or data[8:12] != b"WEBP"
+    ):
+        raise ValueError("retained thumbnail is invalid")
+    destination.write_bytes(data)
+
+
+def build_artifacts(
+    video: Path,
+    pipeline: PipelineArtifacts,
+    output_dir: Path,
+    duration_seconds: float,
+    *,
+    edit_revision: int = 0,
+    tracking_encoding: str = "gzip_v1",
+    process_runner: Callable[..., Any] = subprocess.run,
+) -> tuple[LocalArtifact, ...]:
+    bvh, body, frame_count, warnings = _prepare_motion_outputs(
+        pipeline, output_dir, tracking_encoding
+    )
+    thumbnail = output_dir / "thumbnail.webp"
+    metadata_path = output_dir / "metadata.json"
 
     command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
@@ -221,35 +315,53 @@ def build_artifacts(
     if result.returncode != 0 or not thumbnail.is_file():
         raise RuntimeError("ffmpeg thumbnail generation failed")
 
-    trace = json.loads(pipeline.trace.read_text(encoding="utf-8"))
-    metadata = {
-        "schema": "artoke.motion.metadata.v1",
-        "runtime": str(trace.get("backend", "OpenMMLab RTMW3D-L")),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "fps": 30,
-        "frame_count": frame_count,
-        "duration_seconds": duration_seconds,
-        "editRevision": edit_revision,
-        "sha256": {
-            "source": sha256_file(video),
-            "bvh": sha256_file(bvh),
-            "rtmw3d_json": sha256_file(body),
-            "thumbnail": sha256_file(thumbnail),
-        },
-        "warnings": warnings,
-    }
-    metadata_path.write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    _write_metadata(
+        metadata_path,
+        pipeline.trace,
+        frame_count,
+        duration_seconds,
+        edit_revision,
+        sha256_file(video),
+        bvh,
+        body,
+        thumbnail,
+        warnings,
     )
+    return _collect_artifacts(bvh, body, thumbnail, metadata_path)
 
-    files = (
-        ("bvh", bvh),
-        ("rtmw3d_json", body),
-        ("thumbnail", thumbnail),
-        ("metadata", metadata_path),
+
+def build_artifacts_without_source(
+    pipeline: PipelineArtifacts,
+    output_dir: Path,
+    duration_seconds: float,
+    *,
+    retained_thumbnail: Path,
+    retained_metadata: Path,
+    edit_revision: int,
+    tracking_encoding: str = "gzip_v1",
+) -> tuple[LocalArtifact, ...]:
+    """Rebuild corrected artifacts for a job whose source video no longer exists.
+
+    The source hash is copied from the retained revision-0 metadata; it is never
+    recomputed or fabricated, so corrected metadata keeps its original provenance.
+    """
+    source_sha256 = _retained_source_sha256(retained_metadata)
+    bvh, body, frame_count, warnings = _prepare_motion_outputs(
+        pipeline, output_dir, tracking_encoding
     )
-    return tuple(
-        LocalArtifact(kind, path, path.stat().st_size, sha256_file(path))
-        for kind, path in files
+    thumbnail = output_dir / "thumbnail.webp"
+    _copy_retained_thumbnail(retained_thumbnail, thumbnail)
+    metadata_path = output_dir / "metadata.json"
+    _write_metadata(
+        metadata_path,
+        pipeline.trace,
+        frame_count,
+        duration_seconds,
+        edit_revision,
+        source_sha256,
+        bvh,
+        body,
+        thumbnail,
+        warnings,
     )
+    return _collect_artifacts(bvh, body, thumbnail, metadata_path)

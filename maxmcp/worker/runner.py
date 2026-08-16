@@ -16,6 +16,7 @@ from maxmcp.worker.artifacts import (
     MAX_TRACKING_DECOMPRESSED_BYTES,
     LocalArtifact,
     build_artifacts,
+    build_artifacts_without_source,
     download_source,
     upload_signed_artifact,
 )
@@ -40,6 +41,8 @@ CONTENT_TYPES = {
     "metadata": "application/json",
 }
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi"}
+MAX_RETAINED_THUMBNAIL_BYTES = 5 * 1024 * 1024
+MAX_RETAINED_METADATA_BYTES = 1024 * 1024
 
 
 def _upload(target: UploadTarget, artifact: LocalArtifact) -> None:
@@ -60,6 +63,7 @@ class ArtokeWorker:
         pipeline_factory: Callable[[Rtmw3dReadiness], Any] = MotionPipeline,
         downloader: Callable[..., Path] = download_source,
         artifact_builder: Callable[..., tuple[LocalArtifact, ...]] = build_artifacts,
+        source_free_artifact_builder: Callable[..., tuple[LocalArtifact, ...]] = build_artifacts_without_source,
         uploader: Callable[[UploadTarget, LocalArtifact], None] = _upload,
         correction_applier: Callable[[Path, Path, Path], Path] = apply_tracking_corrections,
         converter: Callable[[Path, Path], int] = convert_rtmw3d_file,
@@ -71,6 +75,7 @@ class ArtokeWorker:
         self._pipeline_factory = pipeline_factory
         self._downloader = downloader
         self._artifact_builder = artifact_builder
+        self._source_free_artifact_builder = source_free_artifact_builder
         self._uploader = uploader
         self._correction_applier = correction_applier
         self._converter = converter
@@ -149,7 +154,8 @@ class ArtokeWorker:
         try:
             with JobWorkspace.open(self._cache_root, claim.job_id) as workspace:
                 source = workspace.path / claim.source_filename
-                self._downloader(claim.download_url, source)
+                if claim.download_url is not None:
+                    self._downloader(claim.download_url, source)
                 if cancelled.is_set():
                     raise PipelineCancelled()
                 if claim.edit_revision > 0:
@@ -203,14 +209,38 @@ class ArtokeWorker:
 
                 phase = "artifact_failed"
                 update_stage("validating", 85)
-                artifacts = self._artifact_builder(
-                    source,
-                    pipeline_result,
-                    workspace.path / "result",
-                    claim.duration_seconds,
-                    edit_revision=claim.edit_revision,
-                    tracking_encoding=claim.tracking_encoding,
-                )
+                if claim.transport == "local_ephemeral":
+                    thumbnail = workspace.path / "retained.thumbnail.webp"
+                    retained_metadata = workspace.path / "retained.metadata.json"
+                    self._downloader(
+                        claim.thumbnail_url,
+                        thumbnail,
+                        max_bytes=MAX_RETAINED_THUMBNAIL_BYTES,
+                    )
+                    self._downloader(
+                        claim.metadata_url,
+                        retained_metadata,
+                        max_bytes=MAX_RETAINED_METADATA_BYTES,
+                        max_decompressed_json_bytes=MAX_RETAINED_METADATA_BYTES,
+                    )
+                    artifacts = self._source_free_artifact_builder(
+                        pipeline_result,
+                        workspace.path / "result",
+                        claim.duration_seconds,
+                        retained_thumbnail=thumbnail,
+                        retained_metadata=retained_metadata,
+                        edit_revision=claim.edit_revision,
+                        tracking_encoding=claim.tracking_encoding,
+                    )
+                else:
+                    artifacts = self._artifact_builder(
+                        source,
+                        pipeline_result,
+                        workspace.path / "result",
+                        claim.duration_seconds,
+                        edit_revision=claim.edit_revision,
+                        tracking_encoding=claim.tracking_encoding,
+                    )
                 targets = {item.kind: item for item in self._api.authorize_uploads(claim.job_id)}
                 if set(targets) != {item.kind for item in artifacts}:
                     raise ValueError("upload target mismatch")
