@@ -26,12 +26,28 @@ def _cache_dir() -> str:
 
 
 def _new_bridge() -> Any:
+    # bridge 가 딛고 서는 스튜디오/헬퍼 모듈을 의존 순서대로 전부 새로 읽는다.
+    # bridge 만 reload 하면 이전 세션 모듈이 sys.modules 에 남아, 거기 없는 새
+    # 함수를 임포트하는 순간 ImportError 로 죽는다 (maxbridge 에 이어 library 의
+    # load_shelf 에서 실제로 두 번째로 터졌다). compat 과 _session 은 제외 —
+    # Qt 바인딩과 살아 있는 창 핸들은 다시 읽으면 안 된다.
+    from src.helpers import artoke_sync, github_sync
+    from src.helpers import bvh as bvh_helpers
     from src.ui.studio import bridge as bridge_module
-    from src.ui.studio import maxbridge as maxbridge_module
+    from src.ui.studio import library, maxbridge, skeleton, thumb, timemap, video_jobs
 
-    # 슬롯들이 지연 임포트하는 maxbridge 도 같이 새로 읽는다 — bridge 만 reload 하면
-    # 이전 세션의 maxbridge 가 sys.modules 에 남아 새 함수가 안 보인다.
-    importlib.reload(maxbridge_module)
+    for module in (
+        bvh_helpers,
+        github_sync,
+        artoke_sync,
+        skeleton,
+        timemap,
+        library,
+        thumb,
+        video_jobs,
+        maxbridge,
+    ):
+        importlib.reload(module)
     importlib.reload(bridge_module)
     return bridge_module.StudioBridge(_cache_dir())
 
