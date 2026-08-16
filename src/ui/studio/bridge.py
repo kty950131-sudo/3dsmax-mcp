@@ -6,11 +6,12 @@
 """
 
 import json
+import os
 import traceback
 from typing import Any, Callable, Optional
 
 from src.ui.studio.compat import QtCore, QtWidgets
-from src.ui.studio.library import load_shelf, scan
+from src.ui.studio.library import cache_path, delete_clip, load_shelf, scan
 from src.ui.studio.thumb import load_pose_data
 from src.ui.studio.video_jobs import VideoJobController
 
@@ -65,6 +66,22 @@ class StudioBridge(QtCore.QObject):
     def pose_data(self, clip_path: str) -> str:
         """포즈 좌표와 뼈대. 첫 호출만 느리고 이후는 캐시다."""
         return reply(lambda: load_pose_data(clip_path, self._cache_dir))
+
+    @QtCore.Slot(str, result=str)
+    def delete_clip(self, payload_json: str) -> str:
+        """로컬 라이브러리에서 클립 삭제. 사이트에는 아무 요청도 보내지 않는다."""
+
+        def run() -> dict:
+            p = json.loads(payload_json)
+            out = delete_clip(p["folder"], p["path"])
+            # 포즈 캐시도 지운다 — 남겨두면 같은 경로의 새 클립이 옛 포즈를 쓴다
+            try:
+                os.remove(cache_path(p["path"], self._cache_dir))
+            except OSError:
+                pass
+            return out
+
+        return reply(run)
 
     @QtCore.Slot(result=str)
     def choose_video(self) -> str:

@@ -72,6 +72,30 @@ def scan(folder: str) -> list[Clip]:
     return clips
 
 
+def delete_clip(folder: str, path: str) -> dict:
+    """클립을 라이브러리 폴더에서 지운다. 변환 산출물(``*_biped.bvh``)도 같이.
+
+    사이트에는 어떤 요청도 보내지 않는다 — 로컬 폴더만 정리한다. artoke
+    동기화본을 지우면 다음 동기화 때 다시 받아진다 (원본은 사이트에 그대로).
+    """
+    folder_abs = os.path.abspath(folder)
+    target = os.path.abspath(path)
+    if os.path.commonpath([folder_abs, target]) != folder_abs:
+        raise ValueError(f"라이브러리 폴더 밖은 지우지 않습니다: {path}")
+    if not target.lower().endswith(".bvh"):
+        raise ValueError(f".bvh 만 지울 수 있습니다: {path}")
+    if not os.path.isfile(target):
+        raise FileNotFoundError(f"이미 없습니다: {path}")
+
+    removed = [os.path.basename(target)]
+    os.remove(target)
+    sibling = target[: -len(".bvh")] + "_biped.bvh"
+    if os.path.isfile(sibling):
+        os.remove(sibling)
+        removed.append(os.path.basename(sibling))
+    return {"removed": removed}
+
+
 def cache_path(clip_path: str, cache_dir: str) -> str:
     """클립 절대 경로 해시로 캐시 파일 경로를 만든다."""
     digest = hashlib.sha1(

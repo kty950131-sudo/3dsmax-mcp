@@ -180,6 +180,24 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 .status.is-error { color: #e2765e; }
 .status.is-ok { color: #7fc98a; }
 
+/* 삭제 확인 — 네이티브 confirm 대신 페이지 안 모달 (스타일 통제 + 채널 안 막음) */
+.confirm-overlay {
+  position: fixed; inset: 0; display: none;
+  align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .6); z-index: 30;
+}
+.confirm-overlay.is-open { display: flex; }
+.confirm-box {
+  width: min(420px, 90vw);
+  background: #08090B; border: 1px solid #1D232B; border-radius: 6px;
+  padding: 16px 18px;
+  font-family: "Noto Sans KR", "Segoe UI", system-ui, sans-serif;
+}
+.confirm-box .confirm-text { margin: 0 0 6px; color: #E6EBF0; font-weight: 600; letter-spacing: -0.01em; }
+.confirm-box .confirm-note { margin: 0 0 14px; color: var(--dim); font-size: 12px; line-height: 1.45; white-space: pre-line; }
+.confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.confirm-actions .danger { background: #F5B642; border-color: #F5B642; color: #1a1a1a; font-weight: 600; }
+
 .mock-note {
   position: fixed; right: 10px; bottom: 8px; font-size: 11px; color: var(--dim);
   background: rgba(0,0,0,.5); padding: 3px 8px; border-radius: 4px; pointer-events: none;
@@ -258,6 +276,17 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
     <div class="ovl">02 · ARM SPACE / LAYER</div>
     <h2>팔 간격 곡선 <span class="hint">0–45° · 클릭=추가 · 우클릭=삭제</span></h2>
     <canvas></canvas>
+  </div>
+</div>
+
+<div class="confirm-overlay">
+  <div class="confirm-box">
+    <p class="confirm-text"></p>
+    <p class="confirm-note"></p>
+    <div class="confirm-actions">
+      <button data-action="confirm-cancel">취소</button>
+      <button class="danger" data-action="confirm-delete">정말로 삭제하겠습니다</button>
+    </div>
   </div>
 </div>
 
@@ -813,6 +842,41 @@ grid.addEventListener("click", (e) => {
   else setStatus(state.selected + " — 포즈 로딩 중…");
 });
 
+/* ---------- 삭제 (우클릭 → 확인 모달) ----------
+   네이티브 confirm() 은 QWebEngine 채널을 막을 수 있어 페이지 안 모달로 받는다.
+   삭제는 로컬 라이브러리 폴더만 정리한다 — 사이트(홈페이지)에는 아무 요청도
+   보내지 않는다. */
+const confirmOverlay = document.querySelector(".confirm-overlay");
+
+function openDeleteConfirm(clip) {
+  state.pendingDelete = clip;
+  confirmOverlay.querySelector(".confirm-text").textContent =
+    "“" + clip.stem + "” 모션을 삭제할까요?";
+  let note = "라이브러리 폴더에서만 지워집니다 — 홈페이지에는 영향이 없습니다.";
+  if (clip.stem.startsWith("artoke_"))
+    note += "\nArtoke 동기화를 다시 하면 이 클립은 다시 받아집니다.";
+  confirmOverlay.querySelector(".confirm-note").textContent = note;
+  confirmOverlay.classList.add("is-open");
+}
+
+function closeDeleteConfirm() {
+  state.pendingDelete = null;
+  confirmOverlay.classList.remove("is-open");
+}
+
+grid.addEventListener("contextmenu", (e) => {
+  const card = e.target.closest(".clip-card");
+  if (!card) return;
+  e.preventDefault();
+  const clip = state.clips.find((c) => c.stem === card.dataset.stem);
+  if (clip) openDeleteConfirm(clip);
+});
+
+/* 상자 바깥 클릭 = 취소 */
+confirmOverlay.addEventListener("click", (e) => {
+  if (e.target === confirmOverlay) closeDeleteConfirm();
+});
+
 /* ---------- 타임라인 ---------- */
 const timelineEl = document.querySelector(".timeline");
 const trackEl = timelineEl.querySelector(".track");
@@ -1076,6 +1140,27 @@ document.addEventListener("click", (e) => {
         state.importCount++;
         setStatus(res.data.message, "ok");
         refreshBipeds();
+      } else setStatus(res.error, "error");
+    });
+  } else if (action === "confirm-cancel") {
+    closeDeleteConfirm();
+  } else if (action === "confirm-delete") {
+    const clip = state.pendingDelete;
+    closeDeleteConfirm();
+    if (!clip) return;
+    if (clip.stem === state.selected) state.selected = null;
+    if (!BRIDGE.obj || !clip.path) {
+      // 목업: 화면에서만 지워 그룹 재배치를 확인한다
+      state.clips = state.clips.filter((c) => c.stem !== clip.stem);
+      renderGrid();
+      setStatus("(목업) 삭제: " + clip.stem);
+      return;
+    }
+    const folder = document.querySelector('[data-field="folder"]').value;
+    bcall("delete_clip", JSON.stringify({ folder: folder, path: clip.path }), (res) => {
+      if (res.ok) {
+        setStatus("삭제: " + res.data.removed.join(", "), "ok");
+        loadClipsFromBridge();
       } else setStatus(res.error, "error");
     });
   } else if (action === "mixer") {

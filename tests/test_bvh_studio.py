@@ -728,3 +728,47 @@ def test_studio_page_groups_clips_by_category() -> None:
     assert "clip-group" in html
     # list_clips 가 {clips, categories} 를 돌려주는 새 형태를 쓴다
     assert "data.clips" in html
+
+
+# ---- 클립 삭제 (로컬 전용 — 사이트에는 아무 요청도 보내지 않는다) ----
+
+def test_delete_clip_removes_bvh_and_biped_sibling(tmp_path) -> None:
+    clip = tmp_path / "old-take.bvh"
+    clip.write_text(TWO_JOINT, encoding="utf-8")
+    (tmp_path / "old-take_biped.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    from src.ui.studio.library import delete_clip
+
+    out = delete_clip(str(tmp_path), str(clip))
+    assert sorted(out["removed"]) == ["old-take.bvh", "old-take_biped.bvh"]
+    assert not clip.exists()
+    assert not (tmp_path / "old-take_biped.bvh").exists()
+
+
+def test_delete_clip_refuses_paths_outside_folder(tmp_path) -> None:
+    outside = tmp_path / "outside.bvh"
+    outside.write_text(TWO_JOINT, encoding="utf-8")
+    library_dir = tmp_path / "lib"
+    library_dir.mkdir()
+    from src.ui.studio.library import delete_clip
+
+    with pytest.raises(ValueError):
+        delete_clip(str(library_dir), str(outside))
+    assert outside.exists()
+
+
+def test_delete_clip_refuses_non_bvh(tmp_path) -> None:
+    target = tmp_path / "artoke-manifest.json"
+    target.write_text("{}", encoding="utf-8")
+    from src.ui.studio.library import delete_clip
+
+    with pytest.raises(ValueError):
+        delete_clip(str(tmp_path), str(target))
+    assert target.exists()
+
+
+def test_studio_page_exposes_delete_confirm() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "정말로 삭제하겠습니다" in html
+    assert "delete_clip" in html
+    assert "contextmenu" in html
+    assert "홈페이지에는 영향" in html
