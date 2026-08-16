@@ -249,13 +249,20 @@ def test_correction_rebuild_skips_inference_and_publishes_exact_revision(
         elif url.endswith("/tracking"):
             destination.write_text(json.dumps(source_payload), encoding="utf-8")
         else:
-            destination.write_text(json.dumps([{
-                "frame": 0,
-                "joint": "left_wrist",
-                "x": 310.5,
-                "y": 205.0,
-                "state": "manual",
-            }]), encoding="utf-8")
+            destination.write_text(json.dumps({
+                "imageEdits": [{
+                    "frame": 0,
+                    "joint": "left_wrist",
+                    "x": 310.5,
+                    "y": 205.0,
+                    "state": "manual",
+                }],
+                "poseEdits": [{
+                    "frame": 0,
+                    "joint": "left_elbow",
+                    "rotation": [0.0, 0.0, 0.0, 1.0],
+                }],
+            }), encoding="utf-8")
         return destination
 
     def convert(source, output):
@@ -266,6 +273,19 @@ def test_correction_rebuild_skips_inference_and_publishes_exact_revision(
             encoding="utf-8",
         )
         return 1
+
+    pose_calls: list[tuple[Path, object, Path]] = []
+
+    def apply_pose(source, pose_edits, output):
+        pose_calls.append((source, pose_edits, output))
+        assert source.name == "corrected.base.bvh"
+        assert pose_edits == ({
+            "frame": 0,
+            "joint": "left_elbow",
+            "rotation": [0.0, 0.0, 0.0, 1.0],
+        },)
+        output.write_text("FINAL BVH", encoding="utf-8")
+        return output
 
     built_revision = None
     built_encoding = None
@@ -302,6 +322,7 @@ def test_correction_rebuild_skips_inference_and_publishes_exact_revision(
         artifact_builder=build,
         uploader=upload,
         converter=convert,
+        pose_applier=apply_pose,
     )
 
     assert worker.run_once() is RunResult.COMPLETED
@@ -315,6 +336,7 @@ def test_correction_rebuild_skips_inference_and_publishes_exact_revision(
     ]
     assert built_revision == 3
     assert built_encoding == tracking_encoding
+    assert len(pose_calls) == 1
     assert len(uploads) == 4
     assert api.published and api.published[2] == 3
 
@@ -377,6 +399,11 @@ def test_local_correction_rebuild_runs_without_a_source_download(tmp_path: Path)
         )
         return 1
 
+    def apply_pose(source, pose_edits, output):
+        assert pose_edits == ()
+        output.write_bytes(source.read_bytes())
+        return output
+
     _download, build, upload, uploads = dependencies(tmp_path)
     source_free_calls: list[dict[str, object]] = []
 
@@ -412,6 +439,7 @@ def test_local_correction_rebuild_runs_without_a_source_download(tmp_path: Path)
         source_free_artifact_builder=source_free_build,
         uploader=upload,
         converter=convert,
+        pose_applier=apply_pose,
     )
 
     assert worker.run_once() is RunResult.COMPLETED

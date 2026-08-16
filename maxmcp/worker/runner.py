@@ -23,7 +23,11 @@ from maxmcp.worker.artifacts import (
     upload_signed_artifact,
 )
 from maxmcp.worker.motion_pipeline import MotionPipeline, PipelineArtifacts, PipelineCancelled
-from maxmcp.worker.tracking_corrections import apply_tracking_corrections
+from maxmcp.worker.bvh_pose_corrections import apply_bvh_pose_corrections
+from maxmcp.worker.tracking_corrections import (
+    apply_tracking_corrections,
+    load_correction_snapshot,
+)
 from maxmcp.worker.workspace import JobWorkspace, cleanup_stale
 
 
@@ -65,8 +69,10 @@ class ArtokeWorker:
         artifact_builder: Callable[..., tuple[LocalArtifact, ...]] = build_artifacts,
         source_free_artifact_builder: Callable[..., tuple[LocalArtifact, ...]] = build_artifacts_without_source,
         uploader: Callable[[UploadTarget, LocalArtifact], None] = _upload,
-        correction_applier: Callable[[Path, Path, Path], Path] = apply_tracking_corrections,
+        correction_applier: Callable[..., Path] = apply_tracking_corrections,
         converter: Callable[[Path, Path], int] = convert_rtmw3d_file,
+        pose_applier: Callable[..., Path] = apply_bvh_pose_corrections,
+        snapshot_loader: Callable[..., Any] = load_correction_snapshot,
         heartbeat_interval: float = 20.0,
     ) -> None:
         self._api = api
@@ -79,6 +85,8 @@ class ArtokeWorker:
         self._uploader = uploader
         self._correction_applier = correction_applier
         self._converter = converter
+        self._pose_applier = pose_applier
+        self._snapshot_loader = snapshot_loader
         self._heartbeat_interval = heartbeat_interval
 
     def run_forever(self, stop_event: threading.Event) -> None:
@@ -176,10 +184,17 @@ class ArtokeWorker:
 
                     phase = "correction_failed"
                     update_stage("converting", 65)
+                    snapshot = self._snapshot_loader(edits)
                     corrected = workspace.path / "corrected.rtmw3d.json"
-                    self._correction_applier(original_tracking, edits, corrected)
+                    self._correction_applier(
+                        original_tracking,
+                        snapshot.image_edits,
+                        corrected,
+                    )
+                    base_bvh = workspace.path / "corrected.base.bvh"
+                    frame_count = self._converter(corrected, base_bvh)
                     bvh = workspace.path / "corrected.bvh"
-                    frame_count = self._converter(corrected, bvh)
+                    self._pose_applier(base_bvh, snapshot.pose_edits, bvh)
                     trace = workspace.path / "corrected.trace.json"
                     trace.write_text(json.dumps({
                         "backend": "OpenMMLab RTMW3D-L",
