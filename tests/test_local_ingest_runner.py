@@ -7,7 +7,11 @@ from urllib.error import HTTPError
 
 import pytest
 
-from maxmcp.local_ingest.api_client import LocalIngestApiError, UploadAuthorization
+from maxmcp.local_ingest.api_client import (
+    LocalIngestApiError,
+    SourceUploadAuthorization,
+    UploadAuthorization,
+)
 from maxmcp.local_ingest.probe import VideoProbe
 from maxmcp.local_ingest.runner import LocalIngestRunner, LocalRunRejected
 from maxmcp.local_ingest.session import CompanionSession
@@ -24,6 +28,8 @@ class _Api:
         self.calls = []
         self.publish_error: Exception | None = None
         self.publish_hook = None
+        self.source_authorize_error: Exception | None = None
+        self.source_complete_error: Exception | None = None
 
     def create_job(self, metadata):
         self.calls.append(("create", metadata))
@@ -32,6 +38,18 @@ class _Api:
     def report_progress(self, job_id, stage, progress):
         self.calls.append(("progress", stage, progress))
         return SimpleNamespace(cancel_requested=False)
+
+    def authorize_source_upload(self, job_id):
+        self.calls.append(("source_authorize",))
+        if self.source_authorize_error:
+            raise self.source_authorize_error
+        return SourceUploadAuthorization("https://storage.test/source?secret=value")
+
+    def complete_source_upload(self, job_id):
+        self.calls.append(("source_complete",))
+        if self.source_complete_error:
+            raise self.source_complete_error
+        return SimpleNamespace(job_id=job_id, status="processing")
 
     def authorize_uploads(self, job_id):
         self.calls.append(("authorize",))
@@ -139,8 +157,47 @@ def test_runner_processes_uploads_publishes_then_deletes_and_acknowledges(tmp_pa
     assert [stage for stage, _ in progress] == [
         "downloading", "extracting", "converting", "validating", "uploading"
     ]
-    assert len(uploads) == 4
-    assert [call[0] for call in api.calls][-2:] == ["publish", "cleanup"]
+    assert len(uploads) == 5
+    source_upload = uploads[0]
+    assert source_upload[0] == "https://storage.test/source?secret=value"
+    assert source_upload[1].endswith(".mp4")
+    assert source_upload[2] == "video/mp4"
+    names = [call[0] for call in api.calls]
+    assert names.index("source_authorize") < names.index("source_complete")
+    assert names.index("source_complete") < names.index("authorize")
+    assert names[-2:] == ["publish", "cleanup"]
+
+
+def test_runner_fails_when_source_authorization_is_unavailable(tmp_path: Path) -> None:
+    uploads = []
+    api = _Api()
+    api.source_authorize_error = LocalIngestApiError("ARTOKE API returned HTTP 404", status=404)
+    runner, api, _session_value = _runner(
+        tmp_path,
+        api=api,
+        signed_uploader=lambda url, path, content_type: uploads.append(url),
+    )
+
+    with pytest.raises(LocalRunRejected, match="source_upload_failed"):
+        runner.run("Motion")
+
+    assert uploads == []
+    names = [call[0] for call in api.calls]
+    assert "source_complete" not in names
+    assert ("failed", "local_processing_failed") in api.calls
+
+
+def test_runner_fails_the_job_when_the_source_upload_is_rejected(tmp_path: Path) -> None:
+    api = _Api()
+    api.source_complete_error = LocalIngestApiError("ARTOKE API returned HTTP 409", status=409)
+    runner, api, _session_value = _runner(tmp_path, api=api)
+
+    with pytest.raises(LocalRunRejected, match="source_upload_failed"):
+        runner.run("Motion")
+
+    names = [call[0] for call in api.calls]
+    assert "authorize" not in names
+    assert ("failed", "local_processing_failed") in api.calls
 
 
 def test_runner_materializes_exact_verified_bytes_under_uuid_name(tmp_path: Path) -> None:
@@ -187,7 +244,7 @@ def test_runner_retries_upload_network_failure_with_bound_and_no_secret_file(tmp
 
     runner, _api, _session_value = _runner(tmp_path, signed_uploader=flaky)
     assert runner.run("Motion").state == "completed"
-    assert attempts == 6
+    assert attempts == 7
 
 
 def test_publication_failure_retains_source_and_secret_free_retry_metadata(tmp_path: Path) -> None:
@@ -210,7 +267,9 @@ def test_publication_failure_retains_source_and_secret_free_retry_metadata(tmp_p
 
 def test_upload_failure_retains_source_and_bounded_retry_metadata(tmp_path: Path) -> None:
     attempts = 0
-    def offline(*_args):
+    def offline(url, *_args):
+        if "/source?" in url:
+            return
         nonlocal attempts
         attempts += 1
         raise TimeoutError("offline")
@@ -343,7 +402,8 @@ def test_retry_publication_reads_strict_manifest_and_uses_fresh_upload_urls(tmp_
 
     assert result.state == "completed"
     assert len([call for call in api.calls if call[0] == "authorize"]) == 1
-    assert len(uploaded) == 4
+    assert len(uploaded) == 5
+    assert len([item for item in uploaded if "/source?" in item[0]]) == 1
     assert not session.workspace.path.exists()
 
 
@@ -375,10 +435,11 @@ def test_publish_response_loss_replays_publish_before_any_reupload(tmp_path: Pat
 
 
 def test_upload_failure_persists_upload_pending_phase(tmp_path: Path) -> None:
-    runner, _api, session = _runner(
-        tmp_path,
-        signed_uploader=lambda *_args: (_ for _ in ()).throw(TimeoutError("offline")),
-    )
+    def artifact_offline(url, *_args):
+        if "/source?" in url:
+            return
+        raise TimeoutError("offline")
+    runner, _api, session = _runner(tmp_path, signed_uploader=artifact_offline)
     assert runner.run("Motion").state == "publication_pending"
     retry = json.loads((session.workspace.path / "retry.json").read_text(encoding="utf-8"))
     assert retry["phase"] == "upload_pending"
@@ -389,6 +450,8 @@ def test_upload_pending_retry_requests_fresh_urls_and_reuploads(tmp_path: Path) 
     offline = True
     uploads = []
     def upload(url, path, _content_type):
+        if "/source?" in url:
+            return
         if offline:
             raise TimeoutError("offline")
         uploads.append((url, path.name))
@@ -502,7 +565,9 @@ def test_retryable_publication_statuses_retain_for_retry(tmp_path: Path, status:
 
 
 def test_signed_upload_redirect_is_terminal_and_never_retained(tmp_path: Path) -> None:
-    def redirect(*_args):
+    def redirect(url, *_args):
+        if "/source?" in url:
+            return
         raise HTTPError("https://storage.test/?secret=value", 302, "redirect", {}, None)
     runner, api, session = _runner(tmp_path, signed_uploader=redirect)
     workspace = session.workspace.path

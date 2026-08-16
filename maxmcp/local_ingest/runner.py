@@ -233,6 +233,7 @@ class LocalIngestRunner:
                 )
                 job_id = job.job_id
                 self._progress(job_id, "downloading", 5)
+                self._upload_source(job_id, source, video.content_type)
                 pipeline_workspace = workspace.path / "pipeline"
                 pipeline_workspace.mkdir()
                 pipeline_result = self._pipeline.run(
@@ -341,6 +342,21 @@ class LocalIngestRunner:
         except (OSError, ValueError):
             destination.unlink(missing_ok=True)
             raise LocalRunRejected("source_materialization_failed") from None
+
+    def _upload_source(self, job_id: str, source: Path, content_type: str) -> None:
+        """Copy the source video to ARTOKE so the editor can overlay it.
+
+        The server keeps it for 24 hours after publication.
+        """
+        try:
+            upload = self._retry(lambda: self._api.authorize_source_upload(job_id))
+        except _NETWORK_ERRORS:
+            raise LocalRunRejected("source_upload_failed") from None
+        try:
+            self._retry(lambda: self._signed_uploader(upload.upload_url, source, content_type))
+            self._retry(lambda: self._api.complete_source_upload(job_id))
+        except _NETWORK_ERRORS:
+            raise LocalRunRejected("source_upload_failed") from None
 
     def _progress(self, job_id: str, stage: str, percent: int) -> None:
         self._ensure_not_cancelled()

@@ -119,6 +119,14 @@ class UploadAuthorization:
         return f"UploadAuthorization(kind={self.kind!r}, upload_url='<redacted>')"
 
 
+@dataclass(frozen=True, repr=False)
+class SourceUploadAuthorization:
+    upload_url: str = field(repr=False)
+
+    def __repr__(self) -> str:
+        return "SourceUploadAuthorization(upload_url='<redacted>')"
+
+
 class _RejectRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
         return None
@@ -318,6 +326,31 @@ class LocalIngestApiClient:
             return tuple(uploads)
         except (KeyError, TypeError):
             raise LocalIngestApiError("ARTOKE upload response is invalid") from None
+
+    def authorize_source_upload(self, job_id: str) -> SourceUploadAuthorization:
+        bound = self._require_job(job_id)
+        response, _ = self._request(
+            "POST",
+            f"/api/motions/local/jobs/{quote(bound, safe='')}/source",
+            None,
+        )
+        try:
+            body = _exact_object(response, {"uploadUrl"})
+            upload_url = body["uploadUrl"]
+            if not isinstance(upload_url, str) or not upload_url:
+                raise TypeError
+            return SourceUploadAuthorization(upload_url)
+        except (KeyError, TypeError):
+            raise LocalIngestApiError("ARTOKE source upload response is invalid") from None
+
+    def complete_source_upload(self, job_id: str) -> LocalJob:
+        bound = self._require_job(job_id)
+        response, _ = self._request(
+            "POST",
+            f"/api/motions/local/jobs/{quote(bound, safe='')}/source/complete",
+            None,
+        )
+        return self._parse_job(response, bound)
 
     def publish(
         self,

@@ -10,6 +10,7 @@ from maxmcp.local_ingest.api_client import (
     LocalIngestApiClient,
     LocalIngestApiError,
     LocalIngestCancelled,
+    SourceUploadAuthorization,
 )
 
 
@@ -294,6 +295,91 @@ def test_progress_upload_publish_terminal_and_cleanup_use_only_task4_routes() ->
     assert json.loads(requests[6].data) == {"status": "cancelled"}
     assert json.loads(requests[7].data) == {}
     assert not hasattr(client, "fetch_job")
+
+
+def test_source_upload_uses_the_source_routes_with_empty_bodies() -> None:
+    requests = []
+
+    def open_request(request, timeout):
+        requests.append(request)
+        if request.full_url.endswith("/exchange"):
+            return Response(
+                200,
+                {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT},
+                headers={"X-Artoke-Local-Access": ACCESS},
+            )
+        if request.full_url.endswith("/jobs"):
+            return Response(201, job_payload())
+        if request.full_url.endswith("/source/complete"):
+            return Response(200, job_payload())
+        if request.full_url.endswith("/source"):
+            return Response(200, {"uploadUrl": "https://storage.test/source?token=signed"})
+        raise AssertionError("unexpected route")
+
+    client = exchanged_client(open_request)
+    client.create_job(source_metadata())
+    source_upload = client.authorize_source_upload(JOB_ID)
+    assert isinstance(source_upload, SourceUploadAuthorization)
+    assert source_upload.upload_url == "https://storage.test/source?token=signed"
+    assert "signed" not in repr(source_upload)
+    assert client.complete_source_upload(JOB_ID).status == "processing"
+
+    assert [request.full_url.removeprefix("https://artoke.com") for request in requests] == [
+        "/api/motions/local/exchange",
+        "/api/motions/local/jobs",
+        f"/api/motions/local/jobs/{JOB_ID}/source",
+        f"/api/motions/local/jobs/{JOB_ID}/source/complete",
+    ]
+    assert requests[2].data is None
+    assert requests[3].data is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"uploadUrl": ""},
+        {"uploadUrl": 1},
+        {"uploadUrl": "https://storage.test/source", "extra": 1},
+        {"uploads": []},
+        [],
+    ],
+)
+def test_source_upload_rejects_malformed_authorization_payloads(payload: object) -> None:
+    def open_request(request, timeout):
+        if request.full_url.endswith("/exchange"):
+            return Response(
+                200,
+                {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT},
+                headers={"X-Artoke-Local-Access": ACCESS},
+            )
+        if request.full_url.endswith("/jobs"):
+            return Response(201, job_payload())
+        return Response(200, payload)
+
+    client = exchanged_client(open_request)
+    client.create_job(source_metadata())
+    with pytest.raises(LocalIngestApiError, match="source upload response is invalid"):
+        client.authorize_source_upload(JOB_ID)
+
+
+def test_source_upload_requires_the_bound_job() -> None:
+    def open_request(request, timeout):
+        if request.full_url.endswith("/exchange"):
+            return Response(
+                200,
+                {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT},
+                headers={"X-Artoke-Local-Access": ACCESS},
+            )
+        if request.full_url.endswith("/jobs"):
+            return Response(201, job_payload())
+        raise AssertionError("must not reach the network")
+
+    client = exchanged_client(open_request)
+    client.create_job(source_metadata())
+    with pytest.raises(LocalIngestApiError, match="different job"):
+        client.authorize_source_upload(OTHER_JOB_ID)
+    with pytest.raises(LocalIngestApiError, match="different job"):
+        client.complete_source_upload(OTHER_JOB_ID)
 
 
 def test_job_responses_accept_exact_server_lifecycle_stages() -> None:
