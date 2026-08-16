@@ -27,7 +27,11 @@ def _cache_dir() -> str:
 
 def _new_bridge() -> Any:
     from src.ui.studio import bridge as bridge_module
+    from src.ui.studio import maxbridge as maxbridge_module
 
+    # 슬롯들이 지연 임포트하는 maxbridge 도 같이 새로 읽는다 — bridge 만 reload 하면
+    # 이전 세션의 maxbridge 가 sys.modules 에 남아 새 함수가 안 보인다.
+    importlib.reload(maxbridge_module)
     importlib.reload(bridge_module)
     return bridge_module.StudioBridge(_cache_dir())
 
