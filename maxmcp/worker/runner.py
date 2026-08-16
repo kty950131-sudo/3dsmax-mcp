@@ -12,6 +12,8 @@ from maxmcp.rtmw3d.motion import convert_rtmw3d_file
 from maxmcp.rtmw3d.runtime import Rtmw3dReadiness, default_readiness
 from maxmcp.worker.api_client import ArtokeApiClient, UploadTarget, WorkerApiError
 from maxmcp.worker.artifacts import (
+    MAX_RETAINED_METADATA_BYTES,
+    MAX_RETAINED_THUMBNAIL_BYTES,
     MAX_TRACKING_COMPRESSED_BYTES,
     MAX_TRACKING_DECOMPRESSED_BYTES,
     LocalArtifact,
@@ -41,8 +43,6 @@ CONTENT_TYPES = {
     "metadata": "application/json",
 }
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi"}
-MAX_RETAINED_THUMBNAIL_BYTES = 5 * 1024 * 1024
-MAX_RETAINED_METADATA_BYTES = 1024 * 1024
 
 
 def _upload(target: UploadTarget, artifact: LocalArtifact) -> None:

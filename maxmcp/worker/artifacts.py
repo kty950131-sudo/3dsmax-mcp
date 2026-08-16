@@ -159,7 +159,8 @@ def _bvh_info(path: Path) -> tuple[int, float]:
     return int(frames.group(1)), float(frame_time.group(1))
 
 
-_MAX_RETAINED_THUMBNAIL_BYTES = 5 * 1024 * 1024
+MAX_RETAINED_THUMBNAIL_BYTES = 5 * 1024 * 1024
+MAX_RETAINED_METADATA_BYTES = 1024 * 1024
 _SOURCE_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -276,7 +277,7 @@ def _copy_retained_thumbnail(retained: Path, destination: Path) -> None:
     except OSError as exc:
         raise ValueError("retained thumbnail is invalid") from exc
     if (
-        not 12 <= len(data) <= _MAX_RETAINED_THUMBNAIL_BYTES
+        not 12 <= len(data) <= MAX_RETAINED_THUMBNAIL_BYTES
         or data[:4] != b"RIFF"
         or data[8:12] != b"WEBP"
     ):
