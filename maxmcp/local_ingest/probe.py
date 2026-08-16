@@ -116,7 +116,10 @@ def probe_video(
         raise ProbeRejected("video_container_mismatch")
     command = [
         "ffprobe", "-v", "error", "-show_entries",
-        "format=format_name,duration:stream=index,codec_type,codec_name,width,height,disposition",
+        # stream_disposition (not stream=...,disposition) keeps ffmpeg 8 emitting
+        # per-stream disposition objects alongside the requested stream fields.
+        "format=format_name,duration:stream=index,codec_type,codec_name,width,height"
+        ":stream_disposition=attached_pic",
         "-of", "json", str(source),
     ]
     try:
@@ -135,7 +138,9 @@ def probe_video(
         raise ProbeRejected("video_probe_failed")
     try:
         payload = json.loads(stdout)
-        if not isinstance(payload, dict) or set(payload) != {"format", "streams"}:
+        # ffmpeg 8 adds empty top-level sections (programs, stream_groups); only
+        # the format and streams sections carry validated data.
+        if not isinstance(payload, dict) or not {"format", "streams"} <= set(payload):
             raise TypeError
         format_data = payload["format"]
         streams = payload["streams"]

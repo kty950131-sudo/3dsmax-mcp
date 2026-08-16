@@ -57,6 +57,44 @@ def test_probe_uses_shell_free_bounded_ffprobe_and_returns_detected_video(tmp_pa
     assert info.content_type == "video/mp4"
 
 
+def test_probe_accepts_ffmpeg8_output_and_requests_stream_disposition(tmp_path: Path) -> None:
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"video")
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return _Result(json.dumps({
+            "programs": [],
+            "stream_groups": [],
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "vp9",
+                    "width": 608,
+                    "height": 1080,
+                    "disposition": {"attached_pic": 0},
+                },
+                {
+                    "index": 1,
+                    "codec_type": "audio",
+                    "codec_name": "opus",
+                    "disposition": {"attached_pic": 0},
+                },
+            ],
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "39.414000"},
+        }).encode())
+
+    info = probe_video(source, "clip.mp4", run=run)
+
+    assert info.codec_name == "vp9"
+    assert info.duration_seconds == 39.414
+    entries = calls[0][calls[0].index("-show_entries") + 1]
+    assert "stream_disposition=attached_pic" in entries
+    assert ",disposition" not in entries
+
+
 @pytest.mark.parametrize("duration", ["0", "-1", "nan", "inf", "301"])
 def test_probe_rejects_nonpositive_nonfinite_and_over_limit_duration(
     tmp_path: Path, duration: str
