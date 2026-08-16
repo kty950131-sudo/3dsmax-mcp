@@ -193,6 +193,7 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 
     <div class="card">
       <h2>임포트</h2>
+      <div class="row"><label>대상</label><select data-field="target"><option value="">새 바이패드 생성</option></select></div>
       <div class="row"><label>이름</label><input type="text" data-field="name" value=""></div>
       <div class="row"><label>배치 간격</label><input type="number" data-field="spacing" value="120" min="0" max="2000" step="10"></div>
       <div class="row">
@@ -578,14 +579,35 @@ function refreshBipeds() {
   if (!BRIDGE.obj) return;
   bcall("scene_bipeds", null, (res) => {
     if (!res.ok) return;
-    const sel = document.querySelector('[data-field="biped"]');
-    sel.innerHTML = "";
-    for (const name of res.data) {
-      const opt = document.createElement("option");
-      opt.textContent = name;
-      sel.appendChild(opt);
+    /* "임포트 후" 의 biped 셀렉트와 "임포트" 의 대상 셀렉트를 같은 목록으로 채운다.
+       대상 셀렉트는 맨 앞에 "새 바이패드 생성"(빈 값) 을 유지하고 선택을 보존한다. */
+    for (const field of ["biped", "target"]) {
+      const sel = document.querySelector('[data-field="' + field + '"]');
+      const prev = sel.value;
+      sel.innerHTML = "";
+      if (field === "target") {
+        const none = document.createElement("option");
+        none.value = "";
+        none.textContent = "새 바이패드 생성";
+        sel.appendChild(none);
+      }
+      for (const name of res.data) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+      }
+      if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
     }
+    updateImportButton();
   });
+}
+
+/* 대상이 기존 바이패드면 버튼이 하는 일이 달라진다 — 라벨로 알려준다 */
+function updateImportButton() {
+  const target = document.querySelector('[data-field="target"]').value;
+  document.querySelector('[data-action="import"]').textContent =
+    target ? "선택한 바이패드에 적용" : "바이패드 생성 + 임포트";
 }
 
 /* 속도 곡선이 항등이 아니면 (출력비율, 원본비율) 제어점을 프레임 단위 time_map 으로
@@ -923,17 +945,30 @@ document.addEventListener("click", (e) => {
       return;
     }
     const data = poseFor(state.selected);
+    const target = document.querySelector('[data-field="target"]').value;
     const payload = {
       path: clip.path,
-      name: document.querySelector('[data-field="name"]').value || ("Bip_" + clip.stem),
       convert: document.querySelector('[data-field="convert"]').checked,
       mirror: document.querySelector('[data-field="mirror"]').checked,
-      x_offset: state.importCount * Number(document.querySelector('[data-field="spacing"]').value || 0),
       trim_start: state.trim[0],
       trim_end: state.trim[1],
     };
     const timeMap = timeMapFromCurve(data);
     if (timeMap) payload.time_map = timeMap;
+    if (target) {
+      /* 기존 바이패드에 적용 — 이름/배치 간격은 새 바이패드 전용이라 안 보낸다 */
+      payload.biped = target;
+      setStatus("적용 중… (" + clip.stem + " → " + target + ")");
+      bcall("retarget_clip", JSON.stringify(payload), (res) => {
+        if (res.ok) {
+          setStatus(res.data.message, "ok");
+          refreshBipeds();
+        } else setStatus(res.error, "error");
+      });
+      return;
+    }
+    payload.name = document.querySelector('[data-field="name"]').value || ("Bip_" + clip.stem);
+    payload.x_offset = state.importCount * Number(document.querySelector('[data-field="spacing"]').value || 0);
     setStatus("임포트 중… (" + clip.stem + ")");
     bcall("import_clip", JSON.stringify(payload), (res) => {
       if (res.ok) {
@@ -954,6 +989,7 @@ document.addEventListener("click", (e) => {
 });
 
 document.querySelector('[data-field="search"]').addEventListener("input", renderGrid);
+document.querySelector('[data-field="target"]').addEventListener("change", updateImportButton);
 
 /* ---------- 시작 ---------- */
 state.clips = DUMMY_CLIPS;

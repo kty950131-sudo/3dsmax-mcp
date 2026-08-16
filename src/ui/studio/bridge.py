@@ -104,6 +104,29 @@ class StudioBridge(QtCore.QObject):
 
         return reply(run)
 
+    @QtCore.Slot(str, result=str)
+    def retarget_clip(self, payload_json: str) -> str:
+        """기존 바이패드에 클립 로드 — 새 바이패드를 만들지 않는다."""
+
+        def run() -> dict:
+            from src.ui.studio.maxbridge import retarget_clip
+
+            p = json.loads(payload_json)
+            msg = retarget_clip(
+                p["path"],
+                p["biped"],
+                bool(p.get("convert", True)),
+                speed=float(p.get("speed", 1.0)),
+                trim=(float(p.get("trim_start", 0.0)), float(p.get("trim_end", 1.0))),
+                time_map=p.get("time_map"),
+                mirror=bool(p.get("mirror", False)),
+            )
+            if msg.startswith("ERROR"):
+                raise RuntimeError(msg)
+            return {"message": msg}
+
+        return reply(run)
+
     @QtCore.Slot(result=str)
     def scene_bipeds(self) -> str:
         def run() -> list[str]:
