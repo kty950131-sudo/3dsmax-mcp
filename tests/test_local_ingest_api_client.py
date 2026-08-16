@@ -26,6 +26,7 @@ def job_payload(*, job_id: str = JOB_ID, status: str = "processing") -> dict[str
     return {
         "id": job_id,
         "name": "Walk",
+        "previewCharacterSlug": "metahuman-rig",
         "status": status,
         "sourceFilename": "walk.mp4",
         "sourceDurationSeconds": 4.2,
@@ -234,6 +235,49 @@ def test_create_job_sends_scoped_bearer_and_binds_the_returned_job() -> None:
     assert request.full_url == "https://artoke.com/api/motions/local/jobs"
     assert request.get_header("Authorization") == f"Bearer {ACCESS}"
     assert json.loads(request.data) == metadata
+
+
+def test_create_job_accepts_preview_character_from_current_server_response() -> None:
+    responses = iter(
+        [
+            Response(
+                200,
+                {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT},
+                headers={"X-Artoke-Local-Access": ACCESS},
+            ),
+            Response(201, job_payload()),
+        ]
+    )
+    client = LocalIngestApiClient(
+        "https://artoke.com",
+        opener=lambda *_args, **_kwargs: next(responses),
+    )
+    client.exchange(HANDOFF)
+
+    job = client.create_job(source_metadata())
+
+    assert job.preview_character_slug == "metahuman-rig"
+
+
+def test_create_job_rejects_invalid_preview_character_slug() -> None:
+    responses = iter(
+        [
+            Response(
+                200,
+                {"sessionId": SESSION_ID, "expiresAt": EXPIRES_AT},
+                headers={"X-Artoke-Local-Access": ACCESS},
+            ),
+            Response(201, job_payload() | {"previewCharacterSlug": "../private"}),
+        ]
+    )
+    client = LocalIngestApiClient(
+        "https://artoke.com",
+        opener=lambda *_args, **_kwargs: next(responses),
+    )
+    client.exchange(HANDOFF)
+
+    with pytest.raises(LocalIngestApiError, match="job response is invalid"):
+        client.create_job(source_metadata())
 
 
 def test_progress_upload_publish_terminal_and_cleanup_use_only_task4_routes() -> None:

@@ -41,6 +41,7 @@ _SOURCE_KEYS = {
 }
 _ARTIFACT_KEYS = {"kind", "sizeBytes", "sha256", "formatVersion"}
 _SAFE_ERROR_CODE = re.compile(r"^[a-z0-9_]{1,64}$")
+_PREVIEW_CHARACTER_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _VIDEO_EXTENSION = {
     "video/mp4": ".mp4",
     "video/quicktime": ".mov",
@@ -88,6 +89,7 @@ class LocalSession:
 class LocalJob:
     job_id: str
     name: str
+    preview_character_slug: str
     status: str
     source_filename: str
     source_duration_seconds: float | None
@@ -524,6 +526,7 @@ class LocalIngestApiClient:
         keys = {
             "id",
             "name",
+            "previewCharacterSlug",
             "status",
             "sourceFilename",
             "sourceDurationSeconds",
@@ -542,10 +545,17 @@ class LocalIngestApiClient:
             job_id = _canonical_job_id(body["id"])
             if expected_job_id is not None and job_id != expected_job_id:
                 raise TypeError
-            required_strings = (body["name"], body["sourceFilename"], body["createdAt"])
+            required_strings = (
+                body["name"],
+                body["previewCharacterSlug"],
+                body["sourceFilename"],
+                body["createdAt"],
+            )
             if any(not isinstance(value, str) or not value for value in required_strings):
                 raise TypeError
             if body["name"] != body["name"].strip() or len(body["name"]) > 120:
+                raise TypeError
+            if not _PREVIEW_CHARACTER_SLUG.fullmatch(body["previewCharacterSlug"]):
                 raise TypeError
             if (
                 len(body["sourceFilename"]) > 180
@@ -586,6 +596,7 @@ class LocalIngestApiClient:
             return LocalJob(
                 job_id=job_id,
                 name=body["name"],
+                preview_character_slug=body["previewCharacterSlug"],
                 status=body["status"],
                 source_filename=body["sourceFilename"],
                 source_duration_seconds=duration_value,
