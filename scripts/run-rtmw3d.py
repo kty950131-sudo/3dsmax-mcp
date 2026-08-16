@@ -18,19 +18,128 @@ BODY23_NAMES = (
 )
 
 
-def build_frame_record(index, raw_points, raw_scores, smoothed_points) -> dict:
+def person_bbox(
+    points,
+    scores,
+    image_width: int,
+    image_height: int,
+    previous=None,
+):
+    """Build a padded single-person crop from reliable image-space joints."""
+    import numpy as np
+
+    points = np.asarray(points, dtype=np.float32)
+    scores = np.asarray(scores, dtype=np.float32)
+    reliable = (scores >= 0.35) & np.isfinite(points[:, :2]).all(axis=1)
+    if np.count_nonzero(reliable) < 6:
+        return None
+
+    visible = points[reliable, :2]
+    minimum = visible.min(axis=0)
+    maximum = visible.max(axis=0)
+    span = maximum - minimum
+    if np.any(span < 16.0):
+        return None
+    padding = span * 0.2
+    current = np.array([
+        max(0.0, minimum[0] - padding[0]),
+        max(0.0, minimum[1] - padding[1]),
+        min(float(image_width), maximum[0] + padding[0]),
+        min(float(image_height), maximum[1] + padding[1]),
+    ], dtype=np.float32)
+    if (
+        not np.isfinite(current).all()
+        or current[2] - current[0] < 16.0
+        or current[3] - current[1] < 16.0
+    ):
+        return None
+    if previous is not None:
+        current = np.asarray(previous, dtype=np.float32) * 0.25 + current * 0.75
+    return current.astype(np.float32)
+
+
+def extract_prediction_arrays(prediction):
+    """Keep RTMW3D camera-space pose and image-space joints separate."""
+    import numpy as np
+
+    pose_points = np.asarray(prediction.keypoints[0, :23], dtype=np.float32)
+    image_points = np.asarray(
+        prediction.transformed_keypoints[0, :23, :2],
+        dtype=np.float32,
+    )
+    scores = np.nan_to_num(
+        np.asarray(prediction.keypoint_scores[0, :23], dtype=np.float32),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    return pose_points.copy(), image_points.copy(), scores.copy()
+
+
+def interpolate_unreliable_points(points, scores, threshold: float = 0.2):
+    """Fill low-confidence gaps from the nearest reliable frames on both sides."""
+    import numpy as np
+
+    points = np.asarray(points, dtype=np.float32)
+    scores = np.asarray(scores, dtype=np.float32)
+    output = points.copy()
+    frame_indices = np.arange(points.shape[0], dtype=np.float32)
+    for joint in range(points.shape[1]):
+        reliable = (scores[:, joint] >= threshold) & np.isfinite(points[:, joint]).all(axis=1)
+        known = np.flatnonzero(reliable)
+        if known.size == 0:
+            known = np.flatnonzero(np.isfinite(points[:, joint]).all(axis=1))
+        if known.size == 0:
+            output[:, joint] = 0.0
+            continue
+        for axis in range(points.shape[2]):
+            output[:, joint, axis] = np.interp(
+                frame_indices,
+                known,
+                points[known, joint, axis],
+            )
+    return output
+
+
+def smooth_pose_sequence(points, alpha: float = 0.65):
+    """Smooth root-relative pose without attenuating hip-center travel."""
+    import numpy as np
+
+    points = np.asarray(points, dtype=np.float32)
+    if points.shape[0] < 3:
+        return points.copy()
+
+    root = None
+    source = points
+    if points.shape[1] > 12:
+        root = (points[:, 11] + points[:, 12]) * 0.5
+        source = points - root[:, None, :]
+
+    forward = source.copy()
+    backward = source.copy()
+    for index in range(1, points.shape[0]):
+        forward[index] = forward[index - 1] * (1.0 - alpha) + source[index] * alpha
+    for index in range(points.shape[0] - 2, -1, -1):
+        backward[index] = backward[index + 1] * (1.0 - alpha) + source[index] * alpha
+    output = (forward + backward) * 0.5
+    if root is not None:
+        output += root[:, None, :]
+    return output.astype(np.float32)
+
+
+def build_frame_record(index, image_points, raw_scores, smoothed_points) -> dict:
     keypoints = {}
     image_keypoints = {}
     scores = {}
     for point_index, name in enumerate(BODY23_NAMES):
-        raw = raw_points[point_index]
+        image = image_points[point_index]
         smoothed = smoothed_points[point_index]
         keypoints[name] = [
             float(smoothed[0]),
             -float(smoothed[1]),
             -float(smoothed[2]),
         ]
-        image_keypoints[name] = [float(raw[0]), float(raw[1])]
+        image_keypoints[name] = [float(image[0]), float(image[1])]
         scores[name] = float(max(0.0, min(1.0, raw_scores[point_index])))
     return {
         "index": index,
@@ -81,8 +190,11 @@ def main() -> None:
     if not fps > 0:
         fps = 30.0
 
-    frames = []
-    previous = None
+    pose_points_by_frame = []
+    image_points_by_frame = []
+    raw_scores_by_frame = []
+    tracked_bbox = None
+    missed_crop_frames = 0
     index = 0
     image_size = None
     while True:
@@ -91,21 +203,58 @@ def main() -> None:
             break
         height, width = image.shape[:2]
         image_size = {"width": int(width), "height": int(height)}
-        bbox = np.array([[0.0, 0.0, float(width), float(height)]], dtype=np.float32)
-        result = inference_topdown(model, image, bbox)[0].pred_instances
-        raw_points = result.keypoints[0, :23]
-        raw_scores = result.keypoint_scores[0, :23]
-        current = raw_points.copy()
-        if previous is not None:
-            reliable = raw_scores[:, None] >= 0.2
-            smoothed = previous * 0.35 + current * 0.65
-            current = np.where(reliable, smoothed, previous)
-        previous = current
-        frames.append(build_frame_record(index, raw_points, raw_scores, current))
+        active_bbox = tracked_bbox if tracked_bbox is not None else np.array(
+            [0.0, 0.0, float(width), float(height)],
+            dtype=np.float32,
+        )
+        result = inference_topdown(model, image, active_bbox[None, :])[0].pred_instances
+        pose_points, image_points, raw_scores = extract_prediction_arrays(result)
+
+        next_bbox = person_bbox(
+            image_points,
+            raw_scores,
+            width,
+            height,
+            previous=tracked_bbox,
+        )
+        if next_bbox is not None:
+            tracked_bbox = next_bbox
+            missed_crop_frames = 0
+        else:
+            missed_crop_frames += 1
+            if missed_crop_frames >= 3:
+                tracked_bbox = None
+
+        pose_points_by_frame.append(pose_points)
+        image_points_by_frame.append(image_points)
+        raw_scores_by_frame.append(raw_scores.copy())
         index += 1
     capture.release()
-    if not frames:
+    if not pose_points_by_frame:
         raise RuntimeError("추론할 영상 프레임이 없습니다")
+
+    pose_points = np.stack(pose_points_by_frame)
+    image_points = np.stack(image_points_by_frame)
+    raw_scores = np.nan_to_num(
+        np.stack(raw_scores_by_frame),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    interpolated_pose = interpolate_unreliable_points(pose_points, raw_scores)
+    interpolated_image = interpolate_unreliable_points(image_points, raw_scores)
+    smoothed = smooth_pose_sequence(interpolated_pose)
+    if not np.isfinite(interpolated_image).all() or not np.isfinite(smoothed).all():
+        raise RuntimeError("RTMW3D 결과에 유효하지 않은 좌표가 포함되어 있습니다")
+    frames = [
+        build_frame_record(
+            index,
+            interpolated_image[index],
+            raw_scores[index],
+            smoothed[index],
+        )
+        for index in range(len(pose_points_by_frame))
+    ]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({
