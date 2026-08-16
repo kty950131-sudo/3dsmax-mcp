@@ -581,3 +581,94 @@ def test_load_pose_data_recomputes_when_clip_mtime_changes(tmp_path) -> None:
     os.utime(str(clip), (future, future))
     data = load_pose_data(str(clip), str(cache_dir))
     assert data["frames"] == 2
+
+
+# ---- 기존 바이패드 리타깃 (retarget_clip) ----
+# maxbridge 는 pymxs 전용이지만 _rt() 를 통해서만 런타임을 만지므로
+# 가짜 런타임을 꽂아 Max 밖에서도 분기 로직을 검증할 수 있다.
+
+from unittest.mock import MagicMock
+
+from src.ui.studio import maxbridge
+
+
+def _fake_rt(load_ok: bool = True, figure_mode: bool = False) -> MagicMock:
+    rt = MagicMock()
+    rt.classOf.return_value = rt.Vertical_Horizontal_Turn
+    controller = rt.getTMController.return_value
+    controller.figureMode = figure_mode
+    controller.mixerMode = False
+    rt.biped.loadMocapFile.return_value = load_ok
+    rt.biped.numLayers.return_value = 0
+    rt.getNodeByName.return_value.name = "Bip_walk"
+    return rt
+
+
+def test_studio_page_exposes_retarget_controls() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-field="target"' in html
+    assert "retarget_clip" in html
+    assert "새 바이패드 생성" in html
+
+
+def test_retarget_clip_requires_existing_biped(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    rt.getNodeByName.return_value = None
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.retarget_clip(str(src), "Bip_none", convert=False)
+    assert msg.startswith("ERROR")
+    rt.biped.loadMocapFile.assert_not_called()
+
+
+def test_retarget_clip_loads_onto_existing_controller(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
+    assert msg.startswith("OK")
+    rt.biped.createNew.assert_not_called()
+    rt.biped.loadMocapFile.assert_called_once()
+    rt.delete.assert_not_called()
+
+
+def test_retarget_clip_rejects_figure_mode(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt(figure_mode=True)
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
+    assert msg.startswith("ERROR")
+    rt.biped.loadMocapFile.assert_not_called()
+
+
+def test_retarget_clip_keeps_biped_on_load_failure(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt(load_ok=False)
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
+    assert msg.startswith("ERROR")
+    # 기존 바이패드는 사용자 소유다 — 실패해도 지우지 않는다 (import_clip 과 다른 점)
+    rt.delete.assert_not_called()
+
+
+def test_retarget_clip_bakes_current_position_into_offset(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    rt.getNodeByName.return_value.transform.position.x = 42.0
+    seen: dict = {}
+
+    def fake_convert(path, x_offset=0.0, speed=1.0, trim=(0.0, 1.0), time_map=None):
+        seen["x_offset"] = x_offset
+        return path, True
+
+    monkeypatch.setattr(maxbridge, "convert_clip", fake_convert)
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=True)
+    assert msg.startswith("OK")
+    # 제자리 유지: 대상 바이패드의 현재 X 를 변환 오프셋으로 굽는다
+    assert seen["x_offset"] == 42.0
