@@ -25,8 +25,13 @@ _TIMEOUT = 30
 
 def fetch_manifest(
     base: str = DEFAULT_BASE, etag: Optional[str] = None
-) -> tuple[Optional[list[dict]], Optional[str]]:
-    """모션 목록과 새 ETag 를 돌려준다. 304(변경 없음)면 목록은 None 이다."""
+) -> tuple[Optional[dict], Optional[str]]:
+    """매니페스트 전체와 새 ETag 를 돌려준다. 304(변경 없음)면 매니페스트는 None 이다.
+
+    목록('motions')만 잘라 주지 않는 이유: 매니페스트에는 사이트의 분류
+    ('categories')도 실려 오고, 라이브러리가 그걸로 클립을 사이트와 같은
+    선반으로 그룹핑한다.
+    """
     request = urllib.request.Request(f"{base}/manifest.json")
     if etag:
         request.add_header("If-None-Match", etag)
@@ -38,10 +43,9 @@ def fetch_manifest(
         if exc.code == 304:
             return None, etag
         raise RuntimeError(f"manifest 요청 실패 (HTTP {exc.code}): {base}/manifest.json") from exc
-    motions = data.get("motions")
-    if not isinstance(motions, list):
+    if not isinstance(data.get("motions"), list):
         raise RuntimeError("manifest.json 형식이 다릅니다 — 'motions' 배열이 없음")
-    return motions, new_etag
+    return data, new_etag
 
 
 def download_motion(name: str, dest_file: Path, base: str = DEFAULT_BASE) -> None:
@@ -62,13 +66,18 @@ def sync_motions(
     """
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
-    remote, new_etag = fetch_manifest(base, etag)
-    if remote is None:
+    manifest, new_etag = fetch_manifest(base, etag)
+    if manifest is None:
         return {"downloaded": [], "remote_total": -1, "etag": new_etag, "unchanged": True}
+    remote = manifest["motions"]
     local_sizes = {p.name: p.stat().st_size for p in dest.glob("*.bvh")}
     todo = plan_sync(remote, local_sizes, prefix)
     for entry in todo:
         download_motion(entry["name"], dest / (prefix + entry["name"]), base=base)
+    # 매니페스트를 폴더에 남긴다 — 라이브러리가 오프라인에서도 분류를 알 수 있게.
+    (dest / "artoke-manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return {
         "downloaded": [prefix + e["name"] for e in todo],
         "remote_total": len(remote),

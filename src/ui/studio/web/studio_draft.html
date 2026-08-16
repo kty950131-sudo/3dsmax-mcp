@@ -77,17 +77,31 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 /* 본문 2단 */
 .body { display: grid; grid-template-columns: 1fr 420px; gap: var(--gap); min-height: 0; }
 
-/* 클립 그리드 */
+/* 클립 그리드 — 사이트(viewer)와 같은 대분류→소분류 선반으로 그룹핑한다.
+   분류는 Artoke 동기화가 남긴 artoke-manifest.json 에서 오고, 로컬 생성분은
+   맨 아래 "미분류" 로 모인다. */
 .clip-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
-  gap: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   overflow-y: auto;
-  align-content: start;
-  padding: 4px;
+  padding: 8px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 6px;
+}
+.clip-group-label {
+  margin: 0 0 6px;
+  font-size: 10px;
+  letter-spacing: .14em;
+  color: var(--pose);
+  text-transform: uppercase;
+}
+.clip-group-label .ko { color: var(--dim); letter-spacing: 0; text-transform: none; margin-left: 6px; }
+.clip-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 10px;
 }
 .clip-card {
   border: 1px solid transparent;
@@ -289,20 +303,33 @@ function connectBridge() {
   return true;
 }
 
-/* ---------- 더미 클립 목록 ---------- */
+/* ---------- 더미 클립 목록 ----------
+   category/sub 는 실제 데이터에서 artoke-manifest.json 이 준다. 더미에도 채워
+   그룹핑 디자인을 브라우저에서 확인할 수 있게 한다. 일부는 일부러 미분류다. */
 const DUMMY_CLIPS = [
-  { stem: "artoke_walk-forward",   tags: ["artoke", "walk-forward"], kind: "walk",   rendered: true },
-  { stem: "artoke_run-fast",       tags: ["artoke", "run-fast"],     kind: "run",    rendered: true },
-  { stem: "artoke_idle-breath",    tags: ["artoke", "idle-breath"],  kind: "idle"  },
-  { stem: "attack-combo_00",       tags: ["attack-combo"],           kind: "kick"  },
-  { stem: "spin-kick",             tags: ["spin-kick"],              kind: "kick"  },
-  { stem: "jump-land",             tags: ["jump-land"],              kind: "jump"  },
-  { stem: "crouch-move",           tags: ["crouch-move"],            kind: "crouch"},
-  { stem: "wave-hello",            tags: ["wave-hello"],             kind: "wave"  },
+  { stem: "artoke_walk-forward",   tags: ["artoke", "walk-forward"], kind: "walk",   rendered: true, category: "locomotion", sub: "walk" },
+  { stem: "artoke_run-fast",       tags: ["artoke", "run-fast"],     kind: "run",    rendered: true, category: "locomotion", sub: "run" },
+  { stem: "artoke_idle-breath",    tags: ["artoke", "idle-breath"],  kind: "idle",   category: "idle", sub: "base" },
+  { stem: "attack-combo_00",       tags: ["attack-combo"],           kind: "kick",   category: "attack", sub: "unarmed" },
+  { stem: "spin-kick",             tags: ["spin-kick"],              kind: "kick",   category: "attack", sub: "unarmed" },
+  { stem: "jump-land",             tags: ["jump-land"],              kind: "jump",   category: "locomotion", sub: "jump" },
+  { stem: "crouch-move",           tags: ["crouch-move"],            kind: "crouch", category: "locomotion", sub: "traversal" },
+  { stem: "wave-hello",            tags: ["wave-hello"],             kind: "wave",   category: "emote", sub: "greet" },
   { stem: "broken-export_03",      tags: ["broken-export"],          kind: null    },
   { stem: "turn-left-90",          tags: ["turn-left-90"],           kind: "walk"  },
   { stem: "sit-down",              tags: ["sit-down"],               kind: "sit"   },
-  { stem: "artoke_sprint-stop",    tags: ["artoke", "sprint-stop"],  kind: "run"   },
+  { stem: "artoke_sprint-stop",    tags: ["artoke", "sprint-stop"],  kind: "run",    category: "locomotion", sub: "sprint" },
+];
+
+const DUMMY_CATEGORIES = [
+  { slug: "locomotion", label: "이동", subs: [
+    { slug: "walk", label: "걷기" }, { slug: "run", label: "달리기" },
+    { slug: "sprint", label: "질주" }, { slug: "jump", label: "점프" },
+    { slug: "traversal", label: "특수 이동" },
+  ]},
+  { slug: "attack", label: "공격", subs: [{ slug: "unarmed", label: "맨손" }] },
+  { slug: "idle", label: "대기", subs: [{ slug: "base", label: "기본 대기" }] },
+  { slug: "emote", label: "감정 표현", subs: [{ slug: "greet", label: "인사" }] },
 ];
 
 /* ---------- 더미 골격 ---------- */
@@ -467,6 +494,7 @@ function drawPose(canvas, data, index, azimuth) {
 /* ---------- 상태 ---------- */
 const state = {
   clips: [],
+  categories: [],         // 사이트의 선반 구조 (artoke-manifest.json 에서)
   poseCache: new Map(),
   pending: new Set(),      // 브리지에 포즈를 요청해 놓고 기다리는 클립
   importCount: 0,          // 배치 간격 = importCount x spacing (원본 .ms 와 같은 규칙)
@@ -518,16 +546,17 @@ function poseFor(stem) {
 function loadClipsFromBridge(selectPath) {
   const folder = document.querySelector('[data-field="folder"]').value;
   bcall("list_clips", folder, (res) => {
-    if (res.ok && res.data.length) {
-      state.clips = res.data;
+    if (res.ok && res.data.clips.length) {
+      state.clips = res.data.clips;
+      state.categories = res.data.categories || [];
       state.poseCache.clear();
       state.pending.clear();
       if (selectPath) {
-        const selected = res.data.find((clip) => clip.path === selectPath);
+        const selected = res.data.clips.find((clip) => clip.path === selectPath);
         if (selected) state.selected = selected.stem;
       }
       renderGrid();
-      setStatus("라이브러리 " + res.data.length + "개 클립 (실제 데이터)", "ok");
+      setStatus("라이브러리 " + res.data.clips.length + "개 클립 (실제 데이터)", "ok");
       refreshBipeds();
     } else {
       setStatus(res.ok ? "폴더에 .bvh 가 없습니다: " + folder : res.error, "error");
@@ -658,6 +687,54 @@ function posterOf(stem) {
 }
 
 /* ---------- 그리드 ---------- */
+function makeCard(clip) {
+  const card = document.createElement("div");
+  card.className = "clip-card";
+  card.dataset.stem = clip.stem;
+  /* 브리지 클립(path 있음)은 포즈 요청이 실패했을 때만 is-broken 이 붙는다
+     (poseFor 콜백). 더미 클립은 kind 가 없으면 파싱 실패 시나리오다. */
+  if (!clip.path && !clip.kind) {
+    card.classList.add("is-broken");
+    card.title = "BVH 파싱 실패 — 목록에서 빼지 않고 사유를 표시한다";
+  }
+  if (state.poseCache.get(clip.stem) === null && clip.path) {
+    card.classList.add("is-broken");
+  }
+  if (clip.stem === state.selected) card.classList.add("is-selected");
+  // Max 배치가 찍은 PNG 가 있으면 그걸 쓰고, 없으면 canvas 로 계산해 그린다.
+  // PNG 가 없다고 빈칸을 만들지 않는다 — 라이브러리는 Max 없이도 즉시 열려야 한다.
+  if (clip.rendered) card.classList.add("is-rendered");
+  card.innerHTML =
+    "<canvas></canvas><span class='thumb-badge'>MAX</span>" +
+    "<div class='name'></div><div class='tags'></div>";
+  card.querySelector(".name").textContent = clip.stem;
+  card.querySelector(".tags").textContent = clip.tags.join(" · ");
+  return card;
+}
+
+/* 사이트(viewer)와 같은 선반: 대분류→소분류 순서대로, 빈 그룹은 건너뛰고,
+   매니페스트에 없는 클립(로컬 생성분)은 맨 아래 "미분류" 로 모은다. */
+function shelveClips(shown) {
+  const groups = [];
+  const taken = new Set();
+  for (const cat of state.categories) {
+    for (const sub of cat.subs || []) {
+      const items = shown.filter((c) => c.category === cat.slug && c.sub === sub.slug);
+      if (!items.length) continue;
+      groups.push({ en: cat.slug + " / " + sub.slug, ko: cat.label + " · " + sub.label, items });
+      for (const c of items) taken.add(c.stem);
+    }
+    const loose = shown.filter((c) => c.category === cat.slug && !taken.has(c.stem));
+    if (loose.length) {
+      groups.push({ en: cat.slug, ko: cat.label, items: loose });
+      for (const c of loose) taken.add(c.stem);
+    }
+  }
+  const rest = shown.filter((c) => !taken.has(c.stem));
+  if (rest.length) groups.push({ en: "unshelved", ko: "미분류 · 로컬 생성", items: rest });
+  return groups;
+}
+
 function renderGrid() {
   const q = (document.querySelector('[data-field="search"]').value || "").trim().toLowerCase();
   grid.innerHTML = "";
@@ -668,30 +745,25 @@ function renderGrid() {
     grid.innerHTML = '<div style="color:var(--dim);padding:16px">일치하는 클립이 없습니다.</div>';
     return;
   }
-  for (const clip of shown) {
-    const card = document.createElement("div");
-    card.className = "clip-card";
-    card.dataset.stem = clip.stem;
-    /* 브리지 클립(path 있음)은 포즈 요청이 실패했을 때만 is-broken 이 붙는다
-       (poseFor 콜백). 더미 클립은 kind 가 없으면 파싱 실패 시나리오다. */
-    if (!clip.path && !clip.kind) {
-      card.classList.add("is-broken");
-      card.title = "BVH 파싱 실패 — 목록에서 빼지 않고 사유를 표시한다";
+  for (const group of shelveClips(shown)) {
+    const section = document.createElement("div");
+    section.className = "clip-group";
+    section.innerHTML = '<p class="clip-group-label"></p><div class="clip-cards"></div>';
+    const label = section.querySelector(".clip-group-label");
+    label.textContent = group.en;
+    const ko = document.createElement("span");
+    ko.className = "ko";
+    ko.textContent = group.ko;
+    label.appendChild(ko);
+    const cards = section.querySelector(".clip-cards");
+    for (const clip of group.items) cards.appendChild(makeCard(clip));
+    // 캔버스는 문서에 붙은 뒤에 그린다 — 떨어진 채 그리면 rect 가 0×0 이라
+    // 1픽셀을 카드 크기로 늘린 단색 사각형이 된다.
+    grid.appendChild(section);
+    for (const card of cards.children) {
+      const stem = card.dataset.stem;
+      drawPose(card.querySelector("canvas"), poseFor(stem), posterOf(stem), 0);
     }
-    if (state.poseCache.get(clip.stem) === null && clip.path) {
-      card.classList.add("is-broken");
-    }
-    if (clip.stem === state.selected) card.classList.add("is-selected");
-    // Max 배치가 찍은 PNG 가 있으면 그걸 쓰고, 없으면 canvas 로 계산해 그린다.
-    // PNG 가 없다고 빈칸을 만들지 않는다 — 라이브러리는 Max 없이도 즉시 열려야 한다.
-    if (clip.rendered) card.classList.add("is-rendered");
-    card.innerHTML =
-      "<canvas></canvas><span class='thumb-badge'>MAX</span>" +
-      "<div class='name'></div><div class='tags'></div>";
-    card.querySelector(".name").textContent = clip.stem;
-    card.querySelector(".tags").textContent = clip.tags.join(" · ");
-    grid.appendChild(card);
-    drawPose(card.querySelector("canvas"), poseFor(clip.stem), posterOf(clip.stem), 0);
   }
 }
 
@@ -1022,6 +1094,7 @@ document.querySelector('[data-field="target"]').addEventListener("change", updat
 
 /* ---------- 시작 ---------- */
 state.clips = DUMMY_CLIPS;
+state.categories = DUMMY_CATEGORIES;
 renderGrid();
 renderTimeline();
 drawSpeed();

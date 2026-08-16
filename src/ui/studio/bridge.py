@@ -10,7 +10,7 @@ import traceback
 from typing import Any, Callable, Optional
 
 from src.ui.studio.compat import QtCore, QtWidgets
-from src.ui.studio.library import scan
+from src.ui.studio.library import load_shelf, scan
 from src.ui.studio.thumb import load_pose_data
 from src.ui.studio.video_jobs import VideoJobController
 
@@ -44,11 +44,21 @@ class StudioBridge(QtCore.QObject):
 
     @QtCore.Slot(str, result=str)
     def list_clips(self, folder: str) -> str:
+        """클립 목록 + 사이트의 분류. 그리드가 대분류→소분류로 그룹핑한다."""
         return reply(
-            lambda: [
-                {"stem": clip.stem, "path": clip.path, "tags": list(clip.tags)}
-                for clip in scan(folder)
-            ]
+            lambda: {
+                "clips": [
+                    {
+                        "stem": clip.stem,
+                        "path": clip.path,
+                        "tags": list(clip.tags),
+                        "category": clip.category,
+                        "sub": clip.sub,
+                    }
+                    for clip in scan(folder)
+                ],
+                "categories": load_shelf(folder)["categories"],
+            }
         )
 
     @QtCore.Slot(str, result=str)

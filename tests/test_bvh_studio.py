@@ -684,3 +684,47 @@ def test_curve_panels_use_figma_design_tokens() -> None:
     assert "#08090b" in html
     assert "#f5b642" in html
     assert "noto sans kr" in html
+
+
+# ---- 라이브러리 분류 (artoke-manifest.json 사이드카) ----
+
+def test_scan_attaches_category_from_sidecar(tmp_path) -> None:
+    (tmp_path / "artoke_run-jump.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    (tmp_path / "my-local-take.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    (tmp_path / "artoke-manifest.json").write_text(
+        json.dumps(
+            {
+                "categories": [
+                    {"slug": "locomotion", "label": "이동",
+                     "subs": [{"slug": "run", "label": "달리기"}]}
+                ],
+                "motions": [
+                    {"name": "run-jump.bvh", "category": "locomotion", "sub": "run"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    from src.ui.studio.library import scan
+
+    clips = {c.stem: c for c in scan(str(tmp_path))}
+    assert clips["artoke_run-jump"].category == "locomotion"
+    assert clips["artoke_run-jump"].sub == "run"
+    # 로컬에서 만든 클립은 매니페스트에 없다 — 미분류로 남는다
+    assert clips["my-local-take"].category is None
+
+
+def test_scan_without_sidecar_leaves_clips_unshelved(tmp_path) -> None:
+    (tmp_path / "solo.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    from src.ui.studio.library import scan
+
+    clips = scan(str(tmp_path))
+    assert clips[0].category is None and clips[0].sub is None
+
+
+def test_studio_page_groups_clips_by_category() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "미분류" in html
+    assert "clip-group" in html
+    # list_clips 가 {clips, categories} 를 돌려주는 새 형태를 쓴다
+    assert "data.clips" in html
