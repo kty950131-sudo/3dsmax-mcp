@@ -141,11 +141,25 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 .timeline .ticks { position: absolute; left: 0; right: 0; bottom: 1px; height: 10px; color: var(--dim); font-size: 10px; }
 .timeline .ticks span { position: absolute; transform: translateX(-50%); }
 
-/* 곡선 */
+/* 곡선 — 여기만 피그마 정본(BVH Studio / Tracking Editor) 디자인 언어를 따른다.
+   배경 #08090B · 정상 #48A9C5 · 선택 #F5B642 · Noto Sans KR · Ease Out 160–240ms.
+   나머지 화면은 아직 자리표시자다. */
 .curves { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
-.curve { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
-.curve h2 { margin: 0 0 6px; font-size: 12px; color: var(--dim); font-weight: 600; display: flex; justify-content: space-between; }
-.curve h2 .hint { font-weight: 400; }
+.curve {
+  background: #08090B;
+  border: 1px solid #1D232B;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: "Noto Sans KR", "Segoe UI", system-ui, sans-serif;
+  transition: border-color 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+.curve:hover { border-color: #2D3946; }
+.curve .ovl { color: #48A9C5; font-size: 10px; letter-spacing: .14em; margin-bottom: 3px; }
+.curve h2 {
+  margin: 0 0 6px; font-size: 12px; color: #E6EBF0; font-weight: 600;
+  letter-spacing: -0.01em; line-height: 1.4; display: flex; justify-content: space-between;
+}
+.curve h2 .hint { font-weight: 400; color: #5B6672; letter-spacing: 0; }
 .curve canvas { width: 100%; height: 118px; display: block; touch-action: none; cursor: crosshair; }
 
 .status { color: var(--dim); font-size: 12px; min-height: 18px; padding: 0 2px; }
@@ -222,10 +236,12 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 
 <div class="curves">
   <div class="curve" data-kind="speed">
+    <div class="ovl">01 · SPEED / TIME-MAP</div>
     <h2>속도 곡선 <span class="hint">클릭=추가 · 우클릭=삭제 · 드래그=이동</span></h2>
     <canvas></canvas>
   </div>
   <div class="curve" data-kind="armspace">
+    <div class="ovl">02 · ARM SPACE / LAYER</div>
     <h2>팔 간격 곡선 <span class="hint">0–45° · 클릭=추가 · 우클릭=삭제</span></h2>
     <canvas></canvas>
   </div>
@@ -808,13 +824,14 @@ function sampleCurve(pts, x) {
 /* ---------- 곡선 ---------- */
 function curveSetup(el, points, opts) {
   const canvas = el.querySelector("canvas");
+  let active = -1;                             // 드래그 중인 제어점 (피그마: 앰버 링)
 
   function draw() {
     const { ctx, w, h } = fitCanvas(canvas);
     ctx.clearRect(0, 0, w, h);
     const P = (p) => [p[0] * w, h - p[1] / opts.max * h];
 
-    ctx.strokeStyle = "#33333a"; ctx.lineWidth = 1;
+    ctx.strokeStyle = "#141A21"; ctx.lineWidth = 1;
     ctx.beginPath();
     for (let i = 1; i < 4; i++) {
       ctx.moveTo(0, h * i / 4); ctx.lineTo(w, h * i / 4);
@@ -822,7 +839,10 @@ function curveSetup(el, points, opts) {
     }
     ctx.stroke();
 
-    ctx.strokeStyle = "#f08c3c"; ctx.lineWidth = 2;
+    /* 피그마 모션 언어의 궤적 표기 — 점선 시안 */
+    ctx.strokeStyle = "#48A9C5"; ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    ctx.setLineDash([1.5, 6]);
     ctx.beginPath();
     const x0 = points[0][0], x1 = points[points.length - 1][0];
     const STEPS = 72;                          // 스플라인을 촘촘히 샘플해 그린다
@@ -832,12 +852,18 @@ function curveSetup(el, points, opts) {
       i ? ctx.lineTo(s[0], s[1]) : ctx.moveTo(s[0], s[1]);
     }
     ctx.stroke();
+    ctx.setLineDash([]);
 
-    ctx.fillStyle = "#ffffff";
-    for (const p of points) {
+    points.forEach((p, i) => {
       const s = P(p);
+      const isActive = i === active;
+      ctx.fillStyle = isActive ? "#F5B642" : "#48A9C5";
       ctx.beginPath(); ctx.arc(s[0], s[1], 4, 0, Math.PI * 2); ctx.fill();
-    }
+      if (isActive) {                          // 선택 링 (피그마: 드래그 보정 상태)
+        ctx.strokeStyle = "#F5B642"; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(s[0], s[1], 9, 0, Math.PI * 2); ctx.stroke();
+      }
+    });
   }
 
   canvas.addEventListener("pointerdown", (e) => {
@@ -873,9 +899,12 @@ function curveSetup(el, points, opts) {
     const onUp = () => {
       canvas.removeEventListener("pointermove", onMove);
       canvas.removeEventListener("pointerup", onUp);
+      active = -1;
+      draw();
     };
     canvas.addEventListener("pointermove", onMove);
     canvas.addEventListener("pointerup", onUp);
+    active = idx;
     draw();
   });
 

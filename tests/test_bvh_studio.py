@@ -672,3 +672,15 @@ def test_retarget_clip_bakes_current_position_into_offset(tmp_path, monkeypatch)
     assert msg.startswith("OK")
     # 제자리 유지: 대상 바이패드의 현재 X 를 변환 오프셋으로 굽는다
     assert seen["x_offset"] == 42.0
+
+
+def test_curve_panels_use_figma_design_tokens() -> None:
+    """커브 패널은 피그마 정본(BVH Studio / Tracking Editor) 디자인 언어를 따른다.
+
+    스펙: docs/superpowers/specs/2026-08-10-bvh-studio-2d-tracking-editor-design.md
+    — 배경 #08090B, 정상 #48A9C5, 선택 #F5B642, Noto Sans KR, Ease Out 160–240ms.
+    """
+    html = STUDIO_PAGE.read_text(encoding="utf-8").lower()
+    assert "#08090b" in html
+    assert "#f5b642" in html
+    assert "noto sans kr" in html
