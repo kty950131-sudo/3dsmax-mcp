@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import re
-import threading
-import time
 from typing import Callable, Sequence
-import webbrowser
 
 from maxmcp.local_ingest.api_client import LocalIngestApiClient, LocalIngestApiError
+from maxmcp.local_ingest.dialog import FileDialogError, pick_video_file
 from maxmcp.local_ingest.runner import (
     LocalIngestRunner,
     LocalRunRejected,
     LocalRunResult,
 )
-from maxmcp.local_ingest.server import CompanionHTTPServer
+from maxmcp.local_ingest.session import CompanionSession, UploadRejected
 from maxmcp.rtmw3d.runtime import default_readiness
 from maxmcp.worker.motion_pipeline import MotionPipeline
 from maxmcp.worker.workspace import WorkspaceProcessLock, cleanup_stale
@@ -28,13 +27,13 @@ EXIT_SUCCESS = 0
 EXIT_INVALID_URI = 2
 EXIT_ALREADY_RUNNING = 3
 EXIT_EXCHANGE_FAILED = 4
-EXIT_BROWSER_LAUNCH_FAILED = 5
+EXIT_FILE_DIALOG_FAILED = 5
 EXIT_INTERNAL_FAILURE = 6
 
 _MAX_URI_LENGTH = 256
 _URI_PREFIXES = ("artoke-motion://ingest?", "artoke-motion://ingest/?")
 _TOKEN_QUERY = re.compile(r"token=([0-9a-f]{64})")
-_POLL_INTERVAL_SECONDS = 0.2
+_SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".avi"}
 
 
 class IngestUriError(ValueError):
@@ -75,8 +74,8 @@ def _default_api(base_url: str) -> LocalIngestApiClient:
     return LocalIngestApiClient(base_url)
 
 
-def _default_server(cache_root: Path, session_id: str) -> CompanionHTTPServer:
-    return CompanionHTTPServer(cache_root, session_id)
+def _default_session(cache_root: Path, session_id: str) -> CompanionSession:
+    return CompanionSession.create(cache_root, session_id)
 
 
 def _default_runner(session, api) -> LocalIngestRunner:
@@ -100,11 +99,10 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     api_factory: Callable[[str], object] = _default_api,
-    server_factory: Callable[[Path, str], object] = _default_server,
+    session_factory: Callable[[Path, str], object] = _default_session,
     runner_factory: Callable[[object, object], object] = _default_runner,
     lock_factory: Callable[[Path], object] = _default_lock,
-    browser_opener: Callable[[str], bool] = webbrowser.open,
-    sleeper: Callable[[float], None] = time.sleep,
+    file_picker: Callable[[], Path | None] = pick_video_file,
     stale_cleaner: Callable[[Path], object] = cleanup_stale,
 ) -> int:
     args = _parser().parse_args(argv)
@@ -124,7 +122,7 @@ def main(
         _report("companion_already_running")
         return EXIT_ALREADY_RUNNING
 
-    server = None
+    session = None
     try:
         try:
             stale_cleaner(args.cache_root)
@@ -133,7 +131,7 @@ def main(
 
         try:
             api = api_factory(args.url)
-            session = api.exchange(token)
+            handoff = api.exchange(token)
         except (LocalIngestApiError, ValueError):
             _report("handoff_exchange_failed")
             return EXIT_EXCHANGE_FAILED
@@ -141,25 +139,29 @@ def main(
             del token
 
         try:
-            server = server_factory(args.cache_root, session.session_id)
+            session = session_factory(args.cache_root, handoff.session_id)
         except (OSError, RuntimeError, ValueError):
             _report("internal_failure")
             return EXIT_INTERNAL_FAILURE
-        threading.Thread(target=server.serve_forever, daemon=True).start()
 
         try:
-            opened = browser_opener(f"{server.origin}/")
-        except webbrowser.Error:
-            opened = False
-        if not opened:
-            _report("browser_launch_failed")
-            return EXIT_BROWSER_LAUNCH_FAILED
+            selected = file_picker()
+        except FileDialogError:
+            _report("file_dialog_failed")
+            return EXIT_FILE_DIALOG_FAILED
+        if selected is None:
+            return EXIT_SUCCESS
 
-        return _serve_until_terminal(server, api, runner_factory, sleeper)
+        rejection = _feed_selected_source(session, selected)
+        if rejection is not None:
+            _report(rejection)
+            return EXIT_INTERNAL_FAILURE
+
+        return _process_accepted(session, api, runner_factory)
     finally:
-        if server is not None:
+        if session is not None:
             try:
-                server.close()
+                session.close()
             except (OSError, RuntimeError):
                 pass
         try:
@@ -168,29 +170,24 @@ def main(
             pass
 
 
-def _serve_until_terminal(server, api, runner_factory, sleeper) -> int:
+def _feed_selected_source(session, selected: Path) -> str | None:
+    if selected.suffix.lower() not in _SUPPORTED_EXTENSIONS:
+        return "video_container_mismatch"
     try:
-        while True:
-            if server.serve_failed:
-                _report("local_server_failed")
-                return EXIT_INTERNAL_FAILURE
-            snapshot = server.session.snapshot()
-            if snapshot.state == "accepted":
-                return _process_accepted(server, api, runner_factory)
-            if snapshot.state in {"cancelled", "closed"}:
-                return EXIT_SUCCESS
-            if snapshot.state == "cleanup_required":
-                _report("cleanup_required")
-                return EXIT_INTERNAL_FAILURE
-            sleeper(_POLL_INTERVAL_SECONDS)
-    except KeyboardInterrupt:
-        return EXIT_SUCCESS
+        with open(selected, "rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            session.receive_source(stream, size, selected.name)
+    except UploadRejected as exc:
+        return exc.code
+    except OSError:
+        return "source_read_failed"
+    return None
 
 
-def _process_accepted(server, api, runner_factory) -> int:
-    name = server.session.display_name or "Local motion"
+def _process_accepted(session, api, runner_factory) -> int:
+    name = session.display_name or "Local motion"
     try:
-        runner = runner_factory(server.session, api)
+        runner = runner_factory(session, api)
         result: LocalRunResult = runner.run(name)
     except LocalRunRejected as exc:
         _report(exc.code)

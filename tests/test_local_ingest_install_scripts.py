@@ -122,7 +122,7 @@ def test_console_entry_point_is_declared() -> None:
     assert scripts["artoke-motion"] == "maxmcp.local_ingest.__main__:main"
 
 
-def test_wheel_packages_local_ingest_modules_assets_and_entry_point(
+def test_wheel_packages_local_ingest_modules_and_entry_point(
     tmp_path: Path,
 ) -> None:
     wheel_builder = pytest.importorskip("hatchling.builders.wheel")
@@ -132,8 +132,8 @@ def test_wheel_packages_local_ingest_modules_assets_and_entry_point(
     with zipfile.ZipFile(artifacts[0]) as wheel:
         names = set(wheel.namelist())
         assert "maxmcp/local_ingest/__main__.py" in names
-        for asset in ("index.html", "app.js", "styles.css"):
-            assert f"maxmcp/local_ingest/web/{asset}" in names
+        assert "maxmcp/local_ingest/dialog.py" in names
+        assert not any("local_ingest/web/" in name for name in names)
         entry_points = next(
             name for name in names if name.endswith(".dist-info/entry_points.txt")
         )

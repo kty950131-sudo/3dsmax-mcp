@@ -1,4 +1,4 @@
-"""Single-browser state and bounded source reception for the local companion."""
+"""Session state and bounded source reception for the local companion."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from io import BufferedIOBase
 import os
 from pathlib import Path
 import re
-import secrets
 import stat
 import threading
 from typing import BinaryIO, Iterator
@@ -22,14 +21,6 @@ DEFAULT_CHUNK_SIZE = 1024 * 1024
 _DISPLAY_NAME_LIMIT = 180
 _UNSAFE_DISPLAY_CHARACTERS = re.compile(r"[\\/\x00-\x1f\x7f]")
 _WHITESPACE = re.compile(r"\s+")
-
-
-class SessionRejected(RuntimeError):
-    """A stable, safe browser-session rejection."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
 
 
 class UploadRejected(RuntimeError):
@@ -125,7 +116,7 @@ class VerifiedSourceLease:
 
 
 class CompanionSession:
-    """Own one fresh workspace, one browser, and at most one accepted source."""
+    """Own one fresh workspace and at most one accepted source."""
 
     def __init__(
         self,
@@ -141,15 +132,12 @@ class CompanionSession:
         self.workspace = workspace
         self.max_source_bytes = max_source_bytes
         self.chunk_size = chunk_size
-        self.browser_cookie = secrets.token_urlsafe(32)
-        self.csrf_token = secrets.token_urlsafe(32)
         workspace_stat = workspace.path.stat(follow_symlinks=False)
         self._workspace_identity = (workspace_stat.st_dev, workspace_stat.st_ino)
         self.display_name: str | None = None
         self._source_path: Path | None = None
         self._source_descriptor: int | None = None
         self._source_size: int | None = None
-        self._browser_claimed = False
         self._state = "ready"
         self._terminal_target = "cancelled"
         self._cancel_requested = threading.Event()
@@ -173,34 +161,6 @@ class CompanionSession:
             max_source_bytes=max_source_bytes,
             chunk_size=chunk_size,
         )
-
-    def claim_browser(self, cookie: str | None) -> bool:
-        """Claim the sole browser; return whether a cookie must be issued."""
-        with self._lock:
-            if self._state == "closed":
-                raise SessionRejected("browser_session_closed")
-            if cookie == self.browser_cookie and self._browser_claimed:
-                return False
-            if cookie is None and not self._browser_claimed:
-                self._browser_claimed = True
-                return True
-        raise SessionRejected("browser_session_in_use")
-
-    def authorize_browser(self, cookie: str | None) -> None:
-        with self._lock:
-            valid = (
-                self._state != "closed"
-                and self._browser_claimed
-                and cookie is not None
-                and secrets.compare_digest(cookie, self.browser_cookie)
-            )
-        if not valid:
-            raise SessionRejected("browser_session_required")
-
-    def authorize_mutation(self, cookie: str | None, csrf: str | None) -> None:
-        self.authorize_browser(cookie)
-        if csrf is None or not secrets.compare_digest(csrf, self.csrf_token):
-            raise SessionRejected("csrf_rejected")
 
     def snapshot(self) -> SessionSnapshot:
         with self._lock:

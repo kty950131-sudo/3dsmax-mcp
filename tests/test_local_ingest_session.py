@@ -8,7 +8,6 @@ import pytest
 
 from maxmcp.local_ingest.session import (
     CompanionSession,
-    SessionRejected,
     UploadRejected,
 )
 from maxmcp.worker.workspace import JobWorkspace
@@ -36,32 +35,6 @@ class _BlockingStream:
 class _BrokenStream:
     def read(self, _size: int) -> bytes:
         raise OSError("disconnected")
-
-
-def test_browser_cookie_and_csrf_are_separate_unpredictable_values(tmp_path: Path) -> None:
-    session = CompanionSession.create(tmp_path, JOB_ID)
-
-    assert session.claim_browser(None) is True
-    assert session.claim_browser(session.browser_cookie) is False
-    assert session.browser_cookie != session.csrf_token
-    assert len(session.browser_cookie) >= 32
-    assert len(session.csrf_token) >= 32
-
-    with pytest.raises(SessionRejected, match="browser_session"):
-        session.claim_browser("another-browser")
-    session.close()
-
-
-def test_mutation_requires_matching_cookie_and_csrf(tmp_path: Path) -> None:
-    session = CompanionSession.create(tmp_path, JOB_ID)
-    session.claim_browser(None)
-
-    session.authorize_mutation(session.browser_cookie, session.csrf_token)
-    with pytest.raises(SessionRejected, match="browser_session"):
-        session.authorize_mutation("wrong", session.csrf_token)
-    with pytest.raises(SessionRejected, match="csrf"):
-        session.authorize_mutation(session.browser_cookie, "wrong")
-    session.close()
 
 
 def test_source_streams_to_generated_name_and_keeps_bounded_display_name(tmp_path: Path) -> None:
