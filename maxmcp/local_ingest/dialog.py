@@ -22,11 +22,17 @@ class FileDialogError(RuntimeError):
     """The native file dialog could not be shown or answered safely."""
 
 
-def _show(buffer: ctypes.Array) -> Tuple[int, int]:
+def _show(
+    buffer: ctypes.Array,
+    load_library: Callable[..., object] | None = None,
+) -> Tuple[int, int]:
     """Run GetOpenFileNameW into ``buffer``; return (result, extended error)."""
     if os.name != "nt":
         raise FileDialogError("file_dialog_unsupported")
     from ctypes import wintypes
+
+    if load_library is None:
+        load_library = ctypes.WinDLL
 
     class OpenFileNameW(ctypes.Structure):
         _fields_ = (
@@ -55,7 +61,11 @@ def _show(buffer: ctypes.Array) -> Tuple[int, int]:
             ("FlagsEx", wintypes.DWORD),
         )
 
-    comdlg32 = ctypes.WinDLL("comdlg32", use_last_error=True)
+    user32 = load_library("user32", use_last_error=True)
+    user32.GetForegroundWindow.argtypes = ()
+    user32.GetForegroundWindow.restype = wintypes.HWND
+
+    comdlg32 = load_library("comdlg32", use_last_error=True)
     comdlg32.GetOpenFileNameW.argtypes = (ctypes.POINTER(OpenFileNameW),)
     comdlg32.GetOpenFileNameW.restype = wintypes.BOOL
     comdlg32.CommDlgExtendedError.argtypes = ()
@@ -63,6 +73,7 @@ def _show(buffer: ctypes.Array) -> Tuple[int, int]:
 
     options = OpenFileNameW()
     options.lStructSize = ctypes.sizeof(OpenFileNameW)
+    options.hwndOwner = user32.GetForegroundWindow()
     options.lpstrFilter = _FILTER
     options.nFilterIndex = 1
     options.lpstrFile = ctypes.cast(buffer, wintypes.LPWSTR)
