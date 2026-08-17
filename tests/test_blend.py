@@ -335,6 +335,70 @@ def test_bake_only_covers_one_cycle_not_the_whole_take(tmp_path):
     assert max(steps) < 1.6, f"프레임이 건너뛰었다 — 최대 간격 {max(steps)}"
 
 
+def test_bake_loops_without_a_seam(tmp_path):
+    """마지막 프레임에서 첫 프레임으로 넘어가는 것이 평범한 한 걸음이어야 한다.
+
+    창의 끝을 `시작 + cycleFrames` 로 잡으면(cycleFrames 는 간격의 **중앙값**이라
+    그 클립의 실제 다음 접지와 어긋난다) 그 지점만 튄다 — 실측으로 이음새 변화량이
+    내부 걸음의 49배였고, 프레임 수·프레임 간격·방위각은 전부 정상이라 그것만 봐서는
+    지나친다.
+
+    소스를 사인파로 만들면 올바른 창은 이음새가 안 보이고, 경계가 어긋난 창은 바로
+    드러난다. 핵심은 **cycleFrames(중앙값)를 실제 접지 간격과 다르게** 두는 것이다 —
+    둘이 같으면 옛 코드도 우연히 맞는 창을 잡아서 테스트가 버그를 놓친다(실제로
+    처음 쓴 픽스처가 그랬다). walk-fr 이 바로 그 상태다: 중앙값 24 인데 실제 간격은
+    24, 19, 31, 22, 15, 28, 25 로 흩어져 있다.
+    """
+    period = 20  # 실제 보폭. phase.json 의 cycleFrames 는 15 라고 거짓말한다.
+    rows = [
+        [0.0, 0.0, 0.0, 0.0, 30.0 * math.sin(2 * math.pi * (i % period) / period), 0.0,
+         0.0, 0.0, 0.0]
+        for i in range(80)
+    ]
+    dirs = ["f", "fr", "r", "br", "b", "bl", "l", "fl"]
+    for d in dirs:
+        (tmp_path / f"walk-{d}.bvh").write_text(minimal_bvh(rows), encoding="utf-8")
+    (tmp_path / "artoke-manifest.json").write_text(
+        json.dumps(
+            {"motions": [{"name": f"walk-{d}.bvh", "category": "locomotion"} for d in dirs]}
+        ),
+        encoding="utf-8",
+    )
+    # 실제 접지 간격은 20 인데 cycleFrames 는 15 다. 중앙값만 믿고 `시작 + 15` 로
+    # 자르면 주기 20 짜리 파형의 3/4 만 담겨 이음새가 크게 벌어진다.
+    (tmp_path / "phase.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "clips": {
+                    f"walk-{d}.bvh": {
+                        "leftContacts": [0, 20, 40, 60],
+                        "rightContacts": [10],
+                        "cycleFrames": 15,
+                        "fps": 30,
+                        "metresPerSecond": 1.3,
+                        "rigHeight": 100.0,
+                    }
+                    for d in dirs
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = bake_blend_file(str(tmp_path), 0.0, 0.0)
+    written = parse_bvh(open(out["path"], encoding="utf-8").read())
+    os.unlink(out["path"])
+
+    yaws = [row[4] for row in written.frames]
+    inner = [abs(b - a) for a, b in zip(yaws, yaws[1:])]
+    seam = abs(yaws[0] - yaws[-1])
+    median = sorted(inner)[len(inner) // 2]
+    assert median > 0
+    # 실제 버그는 49배로 났다. 3배면 이음새가 걸음 하나 안에 들어온다.
+    assert seam < median * 3, f"이음새 {seam:.2f}° 가 내부 걸음 중앙값 {median:.2f}° 를 넘는다"
+
+
 def test_bake_blend_file_says_why_without_a_manifest(tmp_path):
     with pytest.raises(ValueError, match="artoke-manifest"):
         bake_blend_file(str(tmp_path), 0.0, 0.0)

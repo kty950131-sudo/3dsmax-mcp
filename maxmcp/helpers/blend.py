@@ -156,15 +156,33 @@ def cycle_window(bvh: BvhFile, phase_entry: dict) -> BvhFile:
     사이트 쪽은 `AnimationUtils.subclip` 으로 같은 일을 먼저 한다
     (`blend-preview.tsx`) — 여기서도 같은 경계로 잘라야 두 출력이 같은 물건이 된다.
 
-    시작점은 첫 왼발 접지다: 모든 소스가 같은 위상에서 시작해야 섞을 때 발이 맞는다.
+    시작점은 왼발 접지다: 모든 소스가 같은 위상에서 시작해야 섞을 때 발이 맞는다.
+
+    끝점은 **실제 다음 접지**다. `cycleFrames` 는 접지 간격의 중앙값이라
+    `시작 + cycleFrames` 는 그 클립의 실제 다음 접지와 몇 프레임 어긋나고, 그러면
+    잘린 창의 끝 포즈가 시작 포즈와 다른 위상이 된다 — 반복 재생에서 그 지점만 튄다.
+    실측으로 이음새 변화량이 내부 걸음의 18~77배였다.
+
+    어느 접지 쌍을 쓸지는 **중앙값에 가장 가까운 간격**으로 고른다. 실제 간격을 그냥
+    쓰면 접지 검출이 한 걸음을 놓친 클립(추출기가 walk-fr, run-bl 에 경고를 낸다)에서
+    두 걸음짜리 창이 잡힌다.
     """
-    frames = phase_entry.get("cycleFrames", 0)
-    if frames <= 0:
+    median = phase_entry.get("cycleFrames", 0)
+    contacts = [c for c in (phase_entry.get("leftContacts") or []) if 0 <= c < len(bvh.frames)]
+    if median <= 0 or len(contacts) < 2:
         return bvh
-    start = (phase_entry.get("leftContacts") or [0])[0]
-    end = min(len(bvh.frames), start + frames)
-    if end - start < 2:
+
+    best: tuple[int, int] | None = None
+    best_error = None
+    for start, end in zip(contacts, contacts[1:]):
+        if end - start < 2:
+            continue
+        error = abs((end - start) - median)
+        if best_error is None or error < best_error:
+            best, best_error = (start, end), error
+    if best is None:
         return bvh
+    start, end = best
     return BvhFile(root=bvh.root, frame_time=bvh.frame_time, frames=bvh.frames[start:end])
 
 
