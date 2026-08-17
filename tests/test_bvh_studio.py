@@ -796,6 +796,38 @@ def test_broken_local_shelf_does_not_lose_the_site_shelf(tmp_path) -> None:
     assert scan(str(tmp_path))[0].category == "locomotion"
 
 
+def test_scan_marks_clips_the_sync_did_not_bring(tmp_path) -> None:
+    # 동기화가 받아온 클립은 지워도 다시 받아지지만, 로컬 전용 클립은 되돌릴 곳이
+    # 없다. 카드에 다르게 표시하려면 스캔이 그 차이를 알려 줘야 한다.
+    (tmp_path / "artoke_run-jump.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    (tmp_path / "attack-branch-01.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    from maxmcp.ui.studio.library import scan
+
+    clips = {c.stem: c for c in scan(str(tmp_path))}
+    assert clips["artoke_run-jump"].local is False
+    assert clips["attack-branch-01"].local is True
+
+
+def test_studio_page_marks_local_clips() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    # 파란 표시 — 색과 클래스와 배지가 다 있어야 실제로 보인다
+    assert "--local:" in html
+    assert ".clip-card.is-local" in html
+    assert "local-badge" in html
+    # 선택이 로컬 테두리를 이겨야 지금 고른 카드를 알 수 있다
+    assert ".clip-card.is-local.is-selected" in html
+
+
+def test_studio_page_has_three_chip_rows() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    for field in ("category", "sub", "detail"):
+        assert f'data-field="{field}"' in html
+    # 빈 선반을 점선으로 그린다 — 사이트와 같은 처리
+    assert "is-empty" in html
+    # 위 단계를 바꾸면 아래 단계를 푼다
+    assert "state.sub = \"\";" in html
+
+
 def test_studio_page_shelves_three_levels() -> None:
     html = STUDIO_PAGE.read_text(encoding="utf-8")
     # 세부 선반을 그리고, 세부가 없는 클립은 역할 선반에 남긴다
@@ -950,7 +982,7 @@ def test_studio_page_shows_categories_as_chips() -> None:
     """카테고리는 드롭다운에 숨기지 않고 헤더에 펼쳐 둔다 (한 번 클릭)."""
     html = STUDIO_PAGE.read_text(encoding="utf-8")
     assert "cat-chip" in html
-    assert "renderCategoryBar" in html
+    assert "renderShelfChips" in html
     # 드롭다운은 걷어낸다 — 같은 필터가 두 곳에 있으면 상태가 갈린다
     assert "<select data-field=\"category\"" not in html
 

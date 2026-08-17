@@ -135,6 +135,28 @@ def test_sync_writes_manifest_sidecar(tmp_path, server) -> None:
     assert sidecar["motions"][0]["category"] == "locomotion"
 
 
+def test_sync_leaves_local_only_clips_alone(tmp_path, server) -> None:
+    """가져오기가 이 PC 에만 있는 클립을 지우지 않는다.
+
+    사이트에 올리지 않기로 한 클립은 동기화가 다시 받아 주지 않으므로, 여기서
+    한 번 지워지면 되돌릴 곳이 없다. 지금 구현은 받기만 하고 지우지 않는데,
+    그건 코드를 읽어야만 알 수 있는 성질이라 못 박아 둔다.
+    """
+    local_clip = tmp_path / "attack-branch-01.bvh"
+    local_clip.write_bytes(b"HIERARCHY\nROOT Hips\n-- local only --\n")
+    shelf = tmp_path / "local-shelf.json"
+    shelf.write_text('{"categories": [], "motions": []}', encoding="utf-8")
+    before = local_clip.read_bytes()
+
+    result = sync_motions(str(tmp_path), base=server)
+
+    assert local_clip.exists(), "로컬 전용 클립이 동기화에 지워졌다"
+    assert local_clip.read_bytes() == before, "로컬 전용 클립이 덮어써졌다"
+    assert shelf.exists(), "로컬 분류 파일이 동기화에 지워졌다"
+    # 로컬 클립이 있다고 해서 받아야 할 것을 안 받으면 안 된다
+    assert sorted(result["downloaded"]) == ["artoke_run.bvh", "artoke_walk.bvh"]
+
+
 def test_fetch_manifest_bad_shape_raises(tmp_path, server) -> None:
     _Handler.manifest = {"nope": True}
     try:

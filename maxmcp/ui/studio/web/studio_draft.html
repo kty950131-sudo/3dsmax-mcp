@@ -18,6 +18,8 @@
   --dim: #8e8e98;
   --accent: #f08c3c;
   --pose: #48a9c5;
+  /* 이 PC 에만 있는 클립. --pose 청록과 헷갈리지 않게 확실한 파랑으로 둔다. */
+  --local: #5b8dfa;
   --gap: 12px;
 }
 * { box-sizing: border-box; }
@@ -37,9 +39,18 @@ body {
 .topbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .topbar input[type="text"] { flex: 0 1 auto; }
 
-/* 필터 줄 — 카테고리 칩과 검색. 동작 버튼과 섞지 않는다. */
-.filterbar { display: flex; gap: 8px; align-items: center; }
+/* 필터 줄 — 선반 칩과 검색. 동작 버튼과 섞지 않는다.
+   칩이 세 줄로 늘어나므로 검색 칸은 가운데가 아니라 위에 맞춘다. */
+.filterbar { display: flex; gap: 8px; align-items: flex-start; }
+.shelf-chips { display: flex; flex-direction: column; gap: 5px; flex: 1 1 auto; min-width: 0; }
 .cat-bar { display: flex; gap: 6px; flex: 1 1 auto; flex-wrap: wrap; min-width: 0; }
+/* 아래 줄일수록 들여쓰고 작게. 세 줄이 같은 무게면 어느 것이 어느 것의 하위인지
+   읽을 때마다 다시 따져야 한다. */
+.cat-bar.is-sub { padding-left: 4px; }
+.cat-bar.is-detail { padding-left: 16px; }
+.cat-bar.is-sub .cat-chip,
+.cat-bar.is-detail .cat-chip { padding: 3px 9px; font-size: 12px; }
+.cat-bar[hidden] { display: none; }
 .cat-chip {
   background: transparent;
   border: 1px solid var(--line);
@@ -56,6 +67,11 @@ body {
 .cat-chip .n { color: var(--dim); margin-left: 5px; font-size: 11px; }
 .cat-chip.is-on { background: var(--pose); border-color: var(--pose); color: #0d1418; font-weight: 600; }
 .cat-chip.is-on .n { color: #0d1418; opacity: .72; }
+/* 클립이 아직 없는 선반. 지우지 않고 점선으로 둔다 — 사이트와 같은 이유로,
+   빈자리가 다음에 만들 클립을 가리킨다. 있는 것만 보이면 라이브러리가 다 찬
+   것처럼 보인다. */
+.cat-chip.is-empty { border-style: dashed; color: #5a5a63; }
+.cat-chip.is-empty:hover { color: var(--dim); border-color: var(--dim); }
 
 input[type="text"], input[type="number"], select {
   background: var(--panel);
@@ -156,6 +172,21 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 }
 .clip-card .thumb-badge { display: none; }
 .clip-card.is-rendered .thumb-badge { display: block; }
+
+/* 로컬 전용 클립 — 사이트에서 가져온 것이 아니라 이 PC 에만 있다. 지우면
+   되돌릴 곳이 없고 동기화가 다시 받아 주지도 않으므로 눈에 띄어야 한다.
+   MAX 배지는 오른쪽 위라 이쪽은 왼쪽 위에 둔다. */
+.clip-card.is-local { border-color: var(--local); }
+/* 선택이 로컬 테두리를 이긴다 — 지금 고른 것이 어느 카드인지가 먼저다.
+   배지는 그대로 남아서 로컬이라는 사실은 선택 중에도 사라지지 않는다. */
+.clip-card.is-local.is-selected { border-color: var(--accent); }
+.clip-card .local-badge {
+  display: none;
+  position: absolute; top: 10px; left: 10px;
+  background: rgba(0,0,0,.6); color: var(--local);
+  font-size: 10px; padding: 1px 5px; border-radius: 3px;
+}
+.clip-card.is-local .local-badge { display: block; }
 
 /* 우측 패널 */
 /* 오른쪽 열은 창보다 길어질 수 있다 — 프리뷰·임포트·임포트 후가 세로로 쌓인다.
@@ -267,7 +298,14 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 <!-- 필터는 동작 버튼과 줄을 나눈다. 한 줄에 섞여 있으면 "폴더를 바꾸는 것"과
      "보고 있는 범위를 좁히는 것"이 같은 무게로 보여서 매번 읽고 골라야 한다. -->
 <div class="filterbar">
-  <div class="cat-bar" data-field="category" role="group" aria-label="카테고리"></div>
+  <!-- 사이트(viewer)의 ShelfChips 와 같은 3 줄. 카테고리를 고르면 역할 줄이,
+       역할을 고르면 세부 줄이 열린다. 줄을 항상 세 개 그려 두지 않는 것은
+       고르지 않았을 때 보여 줄 내용이 없어서다. -->
+  <div class="shelf-chips">
+    <div class="cat-bar" data-field="category" role="group" aria-label="카테고리"></div>
+    <div class="cat-bar is-sub" data-field="sub" role="group" aria-label="역할" hidden></div>
+    <div class="cat-bar is-detail" data-field="detail" role="group" aria-label="세부" hidden></div>
+  </div>
   <input type="text" data-field="search" placeholder="검색 / 태그">
 </div>
 
@@ -427,15 +465,15 @@ const DUMMY_CLIPS = [
   { stem: "artoke_walk-forward",   tags: ["artoke", "walk-forward"], kind: "walk",   rendered: true, category: "locomotion", sub: "walk" },
   { stem: "artoke_run-fast",       tags: ["artoke", "run-fast"],     kind: "run",    rendered: true, category: "locomotion", sub: "run" },
   { stem: "artoke_idle-breath",    tags: ["artoke", "idle-breath"],  kind: "idle",   category: "idle", sub: "base" },
-  { stem: "attack-normal-01",      tags: ["attack-normal-01"],       kind: "kick",   category: "attack", sub: "combo", detail: "hit1" },
-  { stem: "attack-normal-02",      tags: ["attack-normal-02"],       kind: "kick",   category: "attack", sub: "combo", detail: "hit2" },
-  { stem: "spin-kick",             tags: ["spin-kick"],              kind: "kick",   category: "attack", sub: "combo" },
-  { stem: "attack-dash-start",     tags: ["attack-dash-start"],      kind: "run",    category: "attack", sub: "dash", detail: "start" },
-  { stem: "jump-land",             tags: ["jump-land"],              kind: "jump",   category: "locomotion", sub: "jump", detail: "land" },
-  { stem: "wave-hello",            tags: ["wave-hello"],             kind: "wave",   category: "emote", sub: "greet" },
-  { stem: "broken-export_03",      tags: ["broken-export"],          kind: null    },
-  { stem: "turn-left-90",          tags: ["turn-left-90"],           kind: "walk"  },
-  { stem: "sit-down",              tags: ["sit-down"],               kind: "sit"   },
+  { stem: "attack-normal-01",      tags: ["attack-normal-01"],       kind: "kick",   local: true, category: "attack", sub: "combo", detail: "hit1" },
+  { stem: "attack-normal-02",      tags: ["attack-normal-02"],       kind: "kick",   local: true, category: "attack", sub: "combo", detail: "hit2" },
+  { stem: "spin-kick",             tags: ["spin-kick"],              kind: "kick",   local: true, category: "attack", sub: "combo" },
+  { stem: "attack-dash-start",     tags: ["attack-dash-start"],      kind: "run",    local: true, category: "attack", sub: "dash", detail: "start" },
+  { stem: "jump-land",             tags: ["jump-land"],              kind: "jump",   local: true, category: "locomotion", sub: "jump", detail: "land" },
+  { stem: "wave-hello",            tags: ["wave-hello"],             kind: "wave",   local: true, category: "emote", sub: "greet" },
+  { stem: "broken-export_03",      tags: ["broken-export"],          kind: null,     local: true },
+  { stem: "turn-left-90",          tags: ["turn-left-90"],           kind: "walk",   local: true },
+  { stem: "sit-down",              tags: ["sit-down"],               kind: "sit",    local: true },
   { stem: "artoke_sprint-stop",    tags: ["artoke", "sprint-stop"],  kind: "run",    category: "locomotion", sub: "sprint" },
 ];
 
@@ -630,7 +668,10 @@ function drawPose(canvas, data, index, azimuth) {
 const state = {
   clips: [],
   categories: [],         // 사이트의 선반 구조 (artoke-manifest.json 에서)
-  category: "",           // 고른 대분류 ("" = 전체). DOM 이 아니라 여기가 정본이다.
+  // 고른 선반 ("" = 그 단계는 안 좁힘). DOM 이 아니라 여기가 정본이다.
+  category: "",
+  sub: "",
+  detail: "",
   poseCache: new Map(),
   pending: new Set(),      // 브리지에 포즈를 요청해 놓고 기다리는 클립
   importCount: 0,          // 배치 간격 = importCount x spacing (원본 .ms 와 같은 규칙)
@@ -772,7 +813,7 @@ function loadClipsFromBridge(selectPath) {
         const selected = res.data.clips.find((clip) => clip.path === selectPath);
         if (selected) state.selected = selected.stem;
       }
-      renderCategoryBar();
+      renderShelfChips();
       renderGrid();
       setStatus("라이브러리 " + res.data.clips.length + "개 클립 (실제 데이터)", "ok");
       refreshBipeds();
@@ -986,8 +1027,12 @@ function makeCard(clip) {
   // Max 배치가 찍은 PNG 가 있으면 그걸 쓰고, 없으면 canvas 로 계산해 그린다.
   // PNG 가 없다고 빈칸을 만들지 않는다 — 라이브러리는 Max 없이도 즉시 열려야 한다.
   if (clip.rendered) card.classList.add("is-rendered");
+  // 사이트에서 내려온 클립은 접두사가 붙어 저장된다. 접두사가 없으면 이 PC 에만
+  // 있는 것이고, 동기화가 다시 받아 주지 않으므로 파랗게 표시한다.
+  if (clip.local) card.classList.add("is-local");
   card.innerHTML =
     "<canvas></canvas><span class='thumb-badge'>MAX</span>" +
+    "<span class='local-badge' title='이 PC 에만 있는 클립 — 동기화로 복구되지 않습니다'>LOCAL</span>" +
     "<div class='name'></div><div class='tags'></div>";
   card.querySelector(".name").textContent = clip.stem;
   card.querySelector(".tags").textContent = clipMeta(clip.stem);
@@ -1008,45 +1053,96 @@ function clipMeta(stem) {
 /* 헤더 카테고리 필터의 "미분류" 값. 빈 문자열은 "전체"라 쓸 수 없다. */
 const UNSHELVED = "__unshelved";
 
-/* 헤더 셀렉트를 현재 클립이 실제로 쓰는 대분류로만 채운다. 사이트의 분류표는
-   비어 있는 선반까지 들고 있어서(공격>활 등), 그대로 옮기면 고를 게 없는 항목이
-   대부분인 목록이 된다. 선택은 보존한다 — 폴더를 새로고침할 때마다 전체로
-   돌아가면 필터를 걸어 둔 의미가 없다. */
-function renderCategoryBar() {
-  const bar = document.querySelector('[data-field="category"]');
-  const counts = new Map();
-  for (const clip of state.clips) {
-    const key = clip.category || UNSHELVED;
-    counts.set(key, (counts.get(key) || 0) + 1);
+function countClips(predicate) {
+  return state.clips.filter(predicate).length;
+}
+
+function addChip(bar, { value, label, count, on, empty }) {
+  const button = document.createElement("button");
+  button.className = "cat-chip" + (on ? " is-on" : "") + (empty ? " is-empty" : "");
+  button.dataset.value = value;
+  button.setAttribute("aria-pressed", String(on));
+  button.textContent = label;
+  if (count !== null) {
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = count;
+    button.appendChild(n);
+  }
+  bar.appendChild(button);
+}
+
+/* 사이트(viewer)의 ShelfChips 와 같은 세 줄: 카테고리 -> 역할 -> 세부.
+   위 단계를 고르기 전까지 아래 줄은 열리지 않는다.
+
+   빈 선반도 점선으로 그린다. 예전에는 클립이 실제로 있는 선반만 그렸는데,
+   사이트와 다르게 보이는 데다 "이 라이브러리에 뭐가 비어 있는가" 를 볼 수 없었다.
+   비어 있는 칸이 다음에 만들 클립을 가리킨다는 것이 사이트 쪽 판단이고, 같은
+   분류표를 쓰는 이상 여기서 다르게 굴 이유가 없다.
+
+   선택은 보존한다 — 폴더를 새로고침할 때마다 전체로 돌아가면 좁혀 둔 의미가 없다. */
+function renderShelfChips() {
+  // 고르고 있던 칸이 분류표에서 사라졌으면(폴더를 바꿨거나 분류가 갱신됐거나)
+  // 그 단계부터 풀어 준다. 안 그러면 존재하지 않는 칸을 고른 채 빈 화면만 본다.
+  let picked = state.category === UNSHELVED ? null : findCategory(state.category);
+  if (state.category && state.category !== UNSHELVED && !picked) state.category = "";
+  let pickedSub = picked && (picked.subs || []).find((s) => s.slug === state.sub);
+  if (state.sub && !pickedSub) { state.sub = ""; pickedSub = null; }
+  const details = (pickedSub && pickedSub.details) || null;
+  if (state.detail && !(details || []).some((d) => d.slug === state.detail)) state.detail = "";
+
+  const catBar = document.querySelector('[data-field="category"]');
+  catBar.innerHTML = "";
+  addChip(catBar, { value: "", label: "전체", count: state.clips.length, on: !state.category });
+  for (const cat of state.categories) {
+    const n = countClips((c) => c.category === cat.slug);
+    addChip(catBar, {
+      value: cat.slug, label: cat.label, count: n,
+      on: state.category === cat.slug, empty: n === 0,
+    });
+  }
+  // 미분류는 분류표에 없는 칸이라 클립이 있을 때만 그린다 — 빈 "미분류" 는
+  // 채울 대상이 아니라서 점선으로 남겨 둘 이유가 없다.
+  const loose = countClips((c) => !c.category);
+  if (loose) {
+    addChip(catBar, {
+      value: UNSHELVED, label: "미분류", count: loose, on: state.category === UNSHELVED,
+    });
   }
 
-  const chips = [{ value: "", label: "전체", count: state.clips.length }];
-  for (const cat of state.categories) {
-    if (counts.has(cat.slug)) {
-      chips.push({ value: cat.slug, label: cat.label, count: counts.get(cat.slug) });
+  const subBar = document.querySelector('[data-field="sub"]');
+  subBar.innerHTML = "";
+  subBar.hidden = !picked;
+  if (picked) {
+    addChip(subBar, { value: "", label: "전체", count: null, on: !state.sub });
+    for (const sub of picked.subs || []) {
+      const n = countClips((c) => c.category === picked.slug && c.sub === sub.slug);
+      addChip(subBar, {
+        value: sub.slug, label: sub.label, count: n,
+        on: state.sub === sub.slug, empty: n === 0,
+      });
     }
   }
-  if (counts.has(UNSHELVED)) {
-    chips.push({ value: UNSHELVED, label: "미분류", count: counts.get(UNSHELVED) });
-  }
 
-  // 고르고 있던 칸이 사라졌으면(폴더를 바꿨거나 마지막 클립을 지웠거나) 전체로
-  // 돌아간다. 안 그러면 아무것도 없는 칸을 고른 채 빈 화면만 보게 된다.
-  if (!chips.some((chip) => chip.value === state.category)) state.category = "";
-
-  bar.innerHTML = "";
-  for (const chip of chips) {
-    const button = document.createElement("button");
-    button.className = "cat-chip" + (chip.value === state.category ? " is-on" : "");
-    button.dataset.cat = chip.value;
-    button.setAttribute("aria-pressed", String(chip.value === state.category));
-    button.textContent = chip.label;
-    const count = document.createElement("span");
-    count.className = "n";
-    count.textContent = chip.count;
-    button.appendChild(count);
-    bar.appendChild(button);
+  const detailBar = document.querySelector('[data-field="detail"]');
+  detailBar.innerHTML = "";
+  detailBar.hidden = !details;
+  if (details) {
+    addChip(detailBar, { value: "", label: "전체", count: null, on: !state.detail });
+    for (const det of details) {
+      const n = countClips(
+        (c) => c.category === picked.slug && c.sub === pickedSub.slug && c.detail === det.slug
+      );
+      addChip(detailBar, {
+        value: det.slug, label: det.label, count: n,
+        on: state.detail === det.slug, empty: n === 0,
+      });
+    }
   }
+}
+
+function findCategory(slug) {
+  return slug ? state.categories.find((c) => c.slug === slug) : null;
 }
 
 /* 사이트(viewer)와 같은 선반: 카테고리→역할→세부 순서대로, 빈 그룹은 건너뛰고,
@@ -1093,7 +1189,9 @@ function renderGrid() {
   const shown = state.clips.filter(
     (c) =>
       (!q || c.stem.toLowerCase().includes(q) || c.tags.some((t) => t.includes(q))) &&
-      (!cat || (cat === UNSHELVED ? !c.category : c.category === cat))
+      (!cat || (cat === UNSHELVED ? !c.category : c.category === cat)) &&
+      (!state.sub || c.sub === state.sub) &&
+      (!state.detail || c.detail === state.detail)
   );
   if (!shown.length) {
     grid.innerHTML = '<div style="color:var(--dim);padding:16px">일치하는 클립이 없습니다.</div>';
@@ -1556,11 +1654,24 @@ document.addEventListener("click", (e) => {
 });
 
 document.querySelector('[data-field="search"]').addEventListener("input", renderGrid);
-document.querySelector('[data-field="category"]').addEventListener("click", (e) => {
+/* 세 줄을 감싼 곳에서 한 번에 받는다. 위 단계를 바꾸면 아래 단계는 푼다 —
+   "공격>돌진>시작" 을 보다가 "이동" 으로 옮겼는데 돌진/시작이 남아 있으면
+   아무것도 안 나오고, 왜 비었는지는 화면에 안 적혀 있다. */
+document.querySelector(".shelf-chips").addEventListener("click", (e) => {
   const chip = e.target.closest(".cat-chip");
   if (!chip) return;
-  state.category = chip.dataset.cat;
-  renderCategoryBar();
+  const field = chip.closest("[data-field]").dataset.field;
+  if (field === "category") {
+    state.category = chip.dataset.value;
+    state.sub = "";
+    state.detail = "";
+  } else if (field === "sub") {
+    state.sub = chip.dataset.value;
+    state.detail = "";
+  } else {
+    state.detail = chip.dataset.value;
+  }
+  renderShelfChips();
   renderGrid();
 });
 document.querySelector('[data-field="target"]').addEventListener("change", updateImportButton);
@@ -1577,7 +1688,7 @@ document.querySelector('[data-field="blend-speed"]').addEventListener("input", (
 /* ---------- 시작 ---------- */
 state.clips = DUMMY_CLIPS;
 state.categories = DUMMY_CATEGORIES;
-renderCategoryBar();
+renderShelfChips();
 renderGrid();
 renderTimeline();
 drawSpeed();

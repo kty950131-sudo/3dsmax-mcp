@@ -29,6 +29,10 @@ class Clip(NamedTuple):
     category: Optional[str] = None
     sub: Optional[str] = None
     detail: Optional[str] = None
+    # 동기화가 받아온 것이 아니라 이 PC 에만 있는 클립. 동기화 접두사가 없으면
+    # 로컬이다 — 사이트에서 내려온 클립은 예외 없이 접두사를 달고 저장된다.
+    # 카드에 표시하려고 들고 다닌다: 사이트에 없는 클립은 지우면 되돌릴 곳이 없다.
+    local: bool = False
 
 
 def extract_tags(stem: str) -> tuple[str, ...]:
@@ -85,7 +89,8 @@ def scan(folder: str) -> list[Clip]:
             continue
         # 동기화본은 <prefix><매니페스트 이름> 으로 저장된다 — 접두사를 벗겨 찾는다.
         # 로컬 클립은 접두사가 없으므로 파일명 그대로가 키다.
-        key = name[len(DEFAULT_PREFIX):] if name.startswith(DEFAULT_PREFIX) else name
+        synced = name.startswith(DEFAULT_PREFIX)
+        key = name[len(DEFAULT_PREFIX):] if synced else name
         category, sub, detail = shelf["by_name"].get(key, (None, None, None))
         clips.append(
             Clip(
@@ -95,6 +100,7 @@ def scan(folder: str) -> list[Clip]:
                 category=category,
                 sub=sub,
                 detail=detail,
+                local=not synced,
             )
         )
     return clips

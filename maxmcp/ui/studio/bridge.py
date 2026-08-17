@@ -56,6 +56,7 @@ class StudioBridge(QtCore.QObject):
                         "category": clip.category,
                         "sub": clip.sub,
                         "detail": clip.detail,
+                        "local": clip.local,
                     }
                     for clip in scan(folder)
                 ],
