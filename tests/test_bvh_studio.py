@@ -914,3 +914,62 @@ def test_timeline_is_not_collapsible() -> None:
     """타임라인은 40px 뿐이고 트림 상태를 늘 보여준다 — 숨길 이유가 없다."""
     html = STUDIO_PAGE.read_text(encoding="utf-8")
     assert 'data-action="toggle-timeline"' not in html
+
+
+# ---- 팔 간격 곡선 연결 (임포트와 같은 동작으로 적용) ----
+
+def test_import_clip_applies_arm_space_to_the_biped_it_made(tmp_path, monkeypatch) -> None:
+    """속도 곡선처럼 팔 간격도 임포트 한 번으로 걸린다.
+
+    바이패드 이름을 JS 로 되돌려 다시 호출하게 하면, 이름이 겹치거나 임포트가
+    부분 실패했을 때 엉뚱한 바이패드에 레이어가 얹힌다. 만든 자리에서 건다.
+    """
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.import_clip(
+        str(src), "Bip_x", convert=False, x_offset=0.0, arm_points=[(0, 12.0), (30, 20.0)]
+    )
+    assert msg.startswith("OK")
+    rt.biped.createLayer.assert_called_once()
+    assert rt.biped.addNewKey.call_count == 4  # 좌우 팔 × 키 2개
+
+
+def test_import_clip_without_arm_points_touches_no_layer(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    maxbridge.import_clip(str(src), "Bip_x", convert=False, x_offset=0.0)
+    rt.biped.createLayer.assert_not_called()
+
+
+def test_import_clip_ignores_a_flat_zero_arm_curve(tmp_path, monkeypatch) -> None:
+    """곡선을 0 에 둔 채 임포트하면 레이어를 만들지 않는다 — 기본값이 곧 '안 씀'이다."""
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    maxbridge.import_clip(
+        str(src), "Bip_x", convert=False, x_offset=0.0, arm_points=[(0, 0.0), (30, 0.0)]
+    )
+    rt.biped.createLayer.assert_not_called()
+
+
+def test_retarget_clip_applies_arm_space_too(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False, arm_points=[(0, 15.0)])
+    assert msg.startswith("OK")
+    rt.biped.createLayer.assert_called_once()
+
+
+def test_studio_page_sends_the_arm_curve_with_the_import() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "arm_points" in html
+    assert "armKeysFromCurve" in html
+    # 팔 간격도 이제 임포트에 실제로 걸리므로 접힘 요약이 알려야 한다
+    assert "팔 간격" in html.split("function curveSummary")[1].split("\n}")[0]

@@ -124,6 +124,7 @@ class StudioBridge(QtCore.QObject):
                 trim=(float(p.get("trim_start", 0.0)), float(p.get("trim_end", 1.0))),
                 time_map=p.get("time_map"),
                 mirror=bool(p.get("mirror", False)),
+                arm_points=[(int(f), float(d)) for f, d in p.get("arm_points", [])],
             )
             if msg.startswith("ERROR"):
                 raise RuntimeError(msg)
@@ -147,6 +148,7 @@ class StudioBridge(QtCore.QObject):
                 trim=(float(p.get("trim_start", 0.0)), float(p.get("trim_end", 1.0))),
                 time_map=p.get("time_map"),
                 mirror=bool(p.get("mirror", False)),
+                arm_points=[(int(f), float(d)) for f, d in p.get("arm_points", [])],
             )
             if msg.startswith("ERROR"):
                 raise RuntimeError(msg)

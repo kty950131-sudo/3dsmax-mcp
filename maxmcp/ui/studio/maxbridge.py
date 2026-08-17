@@ -79,6 +79,7 @@ def import_clip(
     trim: tuple[float, float] = (0.0, 1.0),
     time_map: Optional[Sequence[float]] = None,
     mirror: bool = False,
+    arm_points: Optional[Sequence[tuple[int, float]]] = None,
 ) -> str:
     """바이패드를 만들고 클립을 올린다."""
     if not os.path.isfile(src_path):
@@ -123,6 +124,10 @@ def import_clip(
         except Exception:
             pass
 
+    # 속도 곡선이 파일에 구워져 함께 들어오듯, 팔 간격도 임포트 한 번으로 걸린다.
+    if arm_points:
+        _arm_space(rt, controller, arm_points, bip.name)
+
     msg = f"OK: {bip.name}"
     if not upright:
         msg += " | 경고: T포즈 골격이 아님(_tpose 파일 권장) — 자세가 틀어질 수 있음"
@@ -137,6 +142,7 @@ def retarget_clip(
     trim: tuple[float, float] = (0.0, 1.0),
     time_map: Optional[Sequence[float]] = None,
     mirror: bool = False,
+    arm_points: Optional[Sequence[tuple[int, float]]] = None,
 ) -> str:
     """기존 바이패드에 클립을 올린다 — 새로 만들지 않는다.
 
@@ -191,6 +197,10 @@ def retarget_clip(
         except Exception:
             pass
 
+    # 위에서 옛 ArmSpace 를 이미 지웠으므로 여기서 새 곡선만 얹으면 된다.
+    if arm_points:
+        _arm_space(rt, controller, arm_points, bip.name)
+
     msg = f"OK: {bip.name} 애니메이션 교체"
     if not upright:
         msg += " | 경고: T포즈 골격이 아님(_tpose 파일 권장) — 자세가 틀어질 수 있음"
@@ -210,26 +220,19 @@ class _animate:
         self._rt.animate = False
 
 
-def apply_arm_space(bip_name: str, points: Sequence[tuple[int, float]]) -> str:
-    """ArmSpace 레이어에 시각별 팔 벌림 키를 찍는다.
+def _arm_space(rt, controller, points: Sequence[tuple[int, float]], label: str) -> str:
+    """ArmSpace 레이어를 다시 만든다. 컨트롤러를 이미 들고 있는 쪽이 부른다.
 
-    points 는 (프레임, 각도) 쌍. 원본 .ms 는 프레임 0 에 키 하나만 찍었고,
-    여기서는 같은 API 로 여러 시각에 찍는다.
+    이름으로 다시 찾지 않는 이유: 임포트 직후에는 방금 만든 바이패드를 손에
+    쥐고 있는데, 이름으로 되찾으면 같은 이름이 둘일 때 엉뚱한 쪽에 레이어가
+    얹힌다.
     """
-    rt = _rt()
-    bip = rt.getNodeByName(bip_name)
-    if bip is None:
-        return f"ERROR: 바이패드를 찾을 수 없음: {bip_name}"
-    controller = _tm_controller(rt, bip)
-    if rt.classOf(controller) != rt.Vertical_Horizontal_Turn:
-        return f"ERROR: not a biped root: {bip_name}"
-
     for i in range(int(rt.biped.numLayers(controller)), 0, -1):
         if rt.biped.getLayerName(controller, i) == "ArmSpace":
             rt.biped.deleteLayer(controller, i)
 
     if not points or all(deg == 0 for _, deg in points):
-        return f"OK: {bip_name} 팔 간격 없음"
+        return f"OK: {label} 팔 간격 없음"
 
     layer_index = int(rt.biped.numLayers(controller)) + 1
     rt.biped.createLayer(controller, layer_index, "ArmSpace")
@@ -247,7 +250,23 @@ def apply_arm_space(bip_name: str, points: Sequence[tuple[int, float]]) -> str:
             rt.biped.addNewKey(right.controller, frame)
 
     # ArmSpace 를 현재 레이어로 남긴다 — 0 번으로 되돌리면 오프셋이 사라진다
-    return f"OK: {bip_name} 팔 간격 키 {len(points)}개"
+    return f"OK: {label} 팔 간격 키 {len(points)}개"
+
+
+def apply_arm_space(bip_name: str, points: Sequence[tuple[int, float]]) -> str:
+    """씬의 바이패드를 이름으로 찾아 ArmSpace 레이어를 건다.
+
+    points 는 (프레임, 각도) 쌍. 원본 .ms 는 프레임 0 에 키 하나만 찍었고,
+    여기서는 같은 API 로 여러 시각에 찍는다.
+    """
+    rt = _rt()
+    bip = rt.getNodeByName(bip_name)
+    if bip is None:
+        return f"ERROR: 바이패드를 찾을 수 없음: {bip_name}"
+    controller = _tm_controller(rt, bip)
+    if rt.classOf(controller) != rt.Vertical_Horizontal_Turn:
+        return f"ERROR: not a biped root: {bip_name}"
+    return _arm_space(rt, controller, points, bip_name)
 
 
 def send_to_mixer(bip_name: str, clips_dir: str) -> str:

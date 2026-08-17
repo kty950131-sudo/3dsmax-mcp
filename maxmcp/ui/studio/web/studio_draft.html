@@ -598,7 +598,9 @@ const state = {
     catch (e) { return true; }
   })(),
   speedPoints:  [[0, 0], [1, 1]],
-  armPoints:    [[0, 0.22], [1, 0.22]],
+  // 0 에서 시작한다. 곡선을 임포트에 실제로 걸게 되었으므로, 기본값이 0 이
+  // 아니면 아무도 요청하지 않은 팔 벌림이 모든 임포트에 붙는다.
+  armPoints:    [[0, 0], [1, 0]],
   videoJob: null,
   videoTimer: null,
 };
@@ -781,6 +783,25 @@ function timeMapFromCurve(data) {
     prev = v;
   }
   return map;
+}
+
+/* 팔 간격 곡선의 최대 각도. 곡선 y(0~1) 를 여기에 곱해 도(度)로 만든다. */
+const ARM_MAX_DEG = 45;
+
+/* 팔 간격 곡선을 (프레임, 각도) 키로 편다.
+   x 축은 임포트된 클립의 프레임 범위에 맞춘다 — 트림하면 짧아지고 속도 곡선을
+   걸면 time_map 길이가 된다. 원본 프레임 수로 찍으면 키가 클립 밖으로 나간다. */
+function armKeysFromCurve(data, timeMap) {
+  const pts = state.armPoints;
+  if (!pts.some((p) => p[1] > 0)) return null;      // 0 에 눕혀 두면 안 건다
+  const frames = timeMap
+    ? timeMap.length
+    : data && data.frames
+      ? Math.max(1, Math.round(data.frames * (state.trim[1] - state.trim[0])))
+      : 0;
+  if (!frames) return null;
+  const last = Math.max(0, frames - 1);
+  return pts.map((p) => [Math.round(p[0] * last), p[1] * ARM_MAX_DEG]);
 }
 
 /* 호버가 끝나면 0번이 아니라 대표 프레임으로 되돌아간다 */
@@ -1096,13 +1117,16 @@ function sampleCurve(pts, x) {
 const CURVES_OPEN_KEY = "bvhStudio.curvesOpen";
 const curvePanel = document.querySelector(".curve-panel");
 
-/* 접혀 있을 때 헤더에 걸어 둘 문구.
-   속도 곡선만 본다 — 그것만 time_map 으로 임포트에 실제로 전달된다. 팔 간격
-   곡선은 지금 화면에 그려지기만 하고 어디에도 보내지지 않으므로, 여기서
-   경고하면 있지도 않은 효과를 예고하는 셈이 된다. */
+/* 접혀 있을 때 헤더에 걸어 둘 문구. 둘 다 임포트에 실제로 전달되므로 —
+   속도는 time_map, 팔 간격은 ArmSpace 레이어 — 걸려 있으면 보여야 한다. */
 function curveSummary() {
-  if (speedCurveIsIdentity()) return "";
-  return "속도 곡선 제어점 " + state.speedPoints.length + "개 적용 중";
+  const on = [];
+  if (!speedCurveIsIdentity()) {
+    on.push("속도 곡선 제어점 " + state.speedPoints.length + "개");
+  }
+  const armMax = Math.max(...state.armPoints.map((p) => p[1]));
+  if (armMax > 0) on.push("팔 간격 " + Math.round(armMax * ARM_MAX_DEG) + "°");
+  return on.length ? on.join(" · ") + " 적용 중" : "";
 }
 
 function renderCurvePanel() {
@@ -1290,6 +1314,8 @@ document.addEventListener("click", (e) => {
     };
     const timeMap = timeMapFromCurve(data);
     if (timeMap) payload.time_map = timeMap;
+    const armKeys = armKeysFromCurve(data, timeMap);
+    if (armKeys) payload.arm_points = armKeys;
     if (target) {
       /* 기존 바이패드에 적용 — 이름/배치 간격은 새 바이패드 전용이라 안 보낸다 */
       payload.biped = target;
