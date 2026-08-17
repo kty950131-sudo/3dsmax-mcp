@@ -796,6 +796,23 @@ def test_broken_local_shelf_does_not_lose_the_site_shelf(tmp_path) -> None:
     assert scan(str(tmp_path))[0].category == "locomotion"
 
 
+def test_studio_search_is_not_trapped_inside_the_open_shelf() -> None:
+    """검색은 라이브러리를 찾는다. 고른 선반 안만 뒤지면 고장 난 것처럼 보인다.
+
+    3 단 칩이 생기면서 검색이 선반 세 개와 곱해졌다. 공격>돌진 을 보다가 walk 를
+    치면 걷기 클립이 있는데도 빈 화면이 나왔고, 칩은 그 옆에서 "공격 48" 이라고
+    적혀 있었다.
+    """
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "function widenIfShelfHasNoMatch()" in html
+    # 검색은 좁히기 전 집합에서 하고, 좁히기는 따로 건다
+    assert "queryMatches().filter(inShelf)" in html
+    # 칩 숫자도 검색 결과 기준이라야 그리드와 말이 맞는다
+    assert "count: queryMatches().length" in html
+    # 한국어 선반 이름으로도 찾힌다 — 클립 이름은 전부 영어다
+    assert "function shelfLabels(clip)" in html
+
+
 def test_studio_page_remembers_folders() -> None:
     """폴더는 타이핑 말고 고를 수 있어야 한다."""
     html = STUDIO_PAGE.read_text(encoding="utf-8")

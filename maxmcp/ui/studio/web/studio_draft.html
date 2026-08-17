@@ -1135,8 +1135,60 @@ function clipMeta(stem) {
 /* 헤더 카테고리 필터의 "미분류" 값. 빈 문자열은 "전체"라 쓸 수 없다. */
 const UNSHELVED = "__unshelved";
 
+function currentQuery() {
+  return (document.querySelector('[data-field="search"]').value || "").trim().toLowerCase();
+}
+
+/* 클립이 얹힌 선반의 한국어 이름들. 클립 이름은 전부 영어라 이게 없으면
+   "돌진" 으로는 아무것도 못 찾는다 — 화면에는 온통 한국어 선반 이름인데. */
+function shelfLabels(clip) {
+  const category = state.categories.find((c) => c.slug === clip.category);
+  if (!category) return [];
+  const sub = (category.subs || []).find((s) => s.slug === clip.sub);
+  const detail = sub && (sub.details || []).find((d) => d.slug === clip.detail);
+  return [category.label, sub && sub.label, detail && detail.label].filter(Boolean);
+}
+
+/* 검색어에 맞는 클립. 선반 좁히기는 여기서 하지 않는다 — 칩이 "검색 결과가
+   어느 선반에 있는지" 를 세려면 좁히기 전 집합이 필요하다. */
+function queryMatches() {
+  const q = currentQuery();
+  if (!q) return state.clips;
+  return state.clips.filter(
+    (clip) =>
+      clip.stem.toLowerCase().includes(q) ||
+      clip.tags.some((tag) => String(tag).toLowerCase().includes(q)) ||
+      shelfLabels(clip).some((label) => label.toLowerCase().includes(q))
+  );
+}
+
+/* 칩이 고른 범위 안인가. */
+function inShelf(clip) {
+  return (
+    (!state.category ||
+      (state.category === UNSHELVED ? !clip.category : clip.category === state.category)) &&
+    (!state.sub || clip.sub === state.sub) &&
+    (!state.detail || clip.detail === state.detail)
+  );
+}
+
+/* 검색어를 넣었는데 고른 선반에 결과가 하나도 없으면 선반 선택을 푼다.
+
+   3 단 칩이 생기면서 검색이 "지금 서 있는 선반 안" 으로 좁혀졌다. 공격>돌진 을
+   보다가 walk 를 치면 라이브러리에 걷기 클립이 있는데도 빈 화면만 나오고,
+   무엇이 왜 걸러졌는지는 어디에도 안 적혀 있다. 칩이 눈에 띄게 풀리므로 무슨
+   일이 일어났는지는 화면이 말해 준다. 결과가 있는 선반은 그대로 둔다 — 선반
+   안에서 좁혀 찾는 것도 여전히 되어야 한다. */
+function widenIfShelfHasNoMatch() {
+  if (!currentQuery()) return;
+  if (queryMatches().some(inShelf)) return;
+  state.category = "";
+  state.sub = "";
+  state.detail = "";
+}
+
 function countClips(predicate) {
-  return state.clips.filter(predicate).length;
+  return queryMatches().filter(predicate).length;
 }
 
 function addChip(bar, { value, label, count, on, empty }) {
@@ -1175,7 +1227,10 @@ function renderShelfChips() {
 
   const catBar = document.querySelector('[data-field="category"]');
   catBar.innerHTML = "";
-  addChip(catBar, { value: "", label: "전체", count: state.clips.length, on: !state.category });
+  // 숫자는 검색 결과 기준이다. 라이브러리 전체를 세면 "공격 48" 옆에서 그리드가
+  // "일치하는 클립이 없습니다" 라고 말하는 모순이 생긴다 — 그 모순이 검색이
+  // 고장 난 것처럼 보이게 만들었다.
+  addChip(catBar, { value: "", label: "전체", count: queryMatches().length, on: !state.category });
   for (const cat of state.categories) {
     const n = countClips((c) => c.category === cat.slug);
     addChip(catBar, {
@@ -1265,16 +1320,8 @@ function shelveClips(shown) {
 }
 
 function renderGrid() {
-  const q = (document.querySelector('[data-field="search"]').value || "").trim().toLowerCase();
   grid.innerHTML = "";
-  const cat = state.category;
-  const shown = state.clips.filter(
-    (c) =>
-      (!q || c.stem.toLowerCase().includes(q) || c.tags.some((t) => t.includes(q))) &&
-      (!cat || (cat === UNSHELVED ? !c.category : c.category === cat)) &&
-      (!state.sub || c.sub === state.sub) &&
-      (!state.detail || c.detail === state.detail)
-  );
+  const shown = queryMatches().filter(inShelf);
   if (!shown.length) {
     grid.innerHTML = '<div style="color:var(--dim);padding:16px">일치하는 클립이 없습니다.</div>';
     return;
@@ -1737,7 +1784,13 @@ document.addEventListener("click", (e) => {
   }
 });
 
-document.querySelector('[data-field="search"]').addEventListener("input", renderGrid);
+document.querySelector('[data-field="search"]').addEventListener("input", () => {
+  // 칩도 같이 다시 그린다 — 숫자가 검색 결과를 따라가야 하고, 선반이 풀렸다면
+  // 그 사실이 보여야 한다.
+  widenIfShelfHasNoMatch();
+  renderShelfChips();
+  renderGrid();
+});
 /* 세 줄을 감싼 곳에서 한 번에 받는다. 위 단계를 바꾸면 아래 단계는 푼다 —
    "공격>돌진>시작" 을 보다가 "이동" 으로 옮겼는데 돌진/시작이 남아 있으면
    아무것도 안 나오고, 왜 비었는지는 화면에 안 적혀 있다. */
