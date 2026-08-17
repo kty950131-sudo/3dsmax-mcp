@@ -5,8 +5,8 @@
 창을 앞으로 올리고 페이지만 새로 읽는다.
 """
 
-import importlib
 import os
+import sys
 from typing import Any
 
 from maxmcp.ui.studio import _session
@@ -25,34 +25,37 @@ def _cache_dir() -> str:
         return os.path.join(tempfile.gettempdir(), "bvh_studio_cache")
 
 
-def _new_bridge() -> Any:
-    # bridge 가 딛고 서는 스튜디오/헬퍼 모듈을 의존 순서대로 전부 새로 읽는다.
-    # bridge 만 reload 하면 이전 세션 모듈이 sys.modules 에 남아, 거기 없는 새
-    # 함수를 임포트하는 순간 ImportError 로 죽는다 (maxbridge 에 이어 library 의
-    # load_shelf 에서 실제로 두 번째로 터졌다). compat 과 _session 은 제외 —
-    # Qt 바인딩과 살아 있는 창 핸들은 다시 읽으면 안 된다.
-    from maxmcp.helpers import artoke_sync, blend, github_sync, quat
-    from maxmcp.helpers import bvh as bvh_helpers
-    from maxmcp.ui.studio import bridge as bridge_module
-    from maxmcp.ui.studio import library, maxbridge, skeleton, thumb, timemap, video_jobs
+# 다시 읽으면 안 되는 모듈. Qt 바인딩과 살아 있는 창 핸들이라, 새로 읽으면
+# 이전 창을 가리키던 참조가 끊긴다.
+_KEEP = ("maxmcp.ui.studio.compat", "maxmcp.ui.studio._session")
 
-    for module in (
-        bvh_helpers,
-        # quat → blend → artoke_sync 순서를 지킨다: blend 가 quat 을 쓰고,
-        # artoke_sync 가 blend 의 PHASE_NAME 을 모듈 최상단에서 가져온다.
-        quat,
-        blend,
-        github_sync,
-        artoke_sync,
-        skeleton,
-        timemap,
-        library,
-        thumb,
-        video_jobs,
-        maxbridge,
-    ):
-        importlib.reload(module)
-    importlib.reload(bridge_module)
+
+def _forget_maxmcp_modules(modules: dict) -> list[str]:
+    """``maxmcp`` 모듈을 캐시에서 지운다. 지운 이름을 돌려준다.
+
+    이전에는 모듈 목록을 손으로 의존 순서대로 적어 두고 ``importlib.reload`` 를
+    돌렸다. 그 순서는 세 번 깨졌다 — 새 의존이 생길 때마다(``blend``→``quat``,
+    ``library``→``load_shelf``, ``bvh``→``quat_mul``) 목록을 같이 고쳐야 하는데,
+    안 고치면 낡은 모듈을 상대로 새 이름을 임포트하다 ImportError 로 죽는다.
+    Max 안에서만, 그것도 다음 실행에서 터지므로 여기서는 안 보인다.
+
+    캐시에서 지우면 다음 임포트가 의존 순서를 알아서 맞춘다 — 지킬 불변식이
+    사라지는 쪽이 지키기 쉬운 불변식보다 낫다.
+    """
+    doomed = [
+        name
+        for name in list(modules)
+        if (name == "maxmcp" or name.startswith("maxmcp.")) and name not in _KEEP
+    ]
+    for name in doomed:
+        del modules[name]
+    return doomed
+
+
+def _new_bridge() -> Any:
+    _forget_maxmcp_modules(sys.modules)
+    from maxmcp.ui.studio import bridge as bridge_module
+
     return bridge_module.StudioBridge(_cache_dir())
 
 

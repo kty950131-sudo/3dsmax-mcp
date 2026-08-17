@@ -796,6 +796,57 @@ def test_broken_local_shelf_does_not_lose_the_site_shelf(tmp_path) -> None:
     assert scan(str(tmp_path))[0].category == "locomotion"
 
 
+def test_launch_forgets_stale_maxmcp_modules() -> None:
+    """다시 실행할 때 이전 세션 모듈을 캐시에서 지운다.
+
+    손으로 적은 reload 순서는 세 번 깨졌다. 새 의존이 생기면(bvh 가 quat 의
+    새 함수를 쓰는 등) 낡은 모듈을 상대로 임포트하다 Max 안에서만 ImportError 로
+    죽는데, 그건 다음 실행 때까지 안 보인다.
+    """
+    from maxmcp.ui.studio.launch import _forget_maxmcp_modules
+
+    modules = {
+        "maxmcp": object(),
+        "maxmcp.helpers.quat": object(),
+        "maxmcp.helpers.bvh": object(),
+        "maxmcp.ui.studio.bridge": object(),
+        # Qt 바인딩과 살아 있는 창 핸들은 남긴다 — 다시 읽으면 이전 창을 잃는다
+        "maxmcp.ui.studio.compat": object(),
+        "maxmcp.ui.studio._session": object(),
+        # 남의 모듈은 건드리지 않는다
+        "json": object(),
+        "maxmcp_unrelated": object(),
+    }
+    dropped = _forget_maxmcp_modules(modules)
+
+    assert set(modules) == {
+        "maxmcp.ui.studio.compat",
+        "maxmcp.ui.studio._session",
+        "json",
+        "maxmcp_unrelated",
+    }
+    assert "maxmcp.helpers.quat" in dropped
+
+
+def test_launch_does_not_hand_order_reloads() -> None:
+    # 순서를 손으로 적어 두면 새 의존이 생길 때마다 같이 고쳐야 하고,
+    # 안 고치면 Max 안에서만 터진다. 목록이 돌아오면 이 테스트가 알려 준다.
+    # 주석에는 옛 방식이 왜 틀렸는지가 적혀 있으므로 문자열이 아니라 실제
+    # import 문을 본다.
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "maxmcp/ui/studio/launch.py").read_text(
+        encoding="utf-8"
+    )
+    imported = {
+        alias.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert "importlib" not in imported
+
+
 def test_scan_marks_clips_the_sync_did_not_bring(tmp_path) -> None:
     # 동기화가 받아온 클립은 지워도 다시 받아지지만, 로컬 전용 클립은 되돌릴 곳이
     # 없다. 카드에 다르게 표시하려면 스캔이 그 차이를 알려 줘야 한다.
