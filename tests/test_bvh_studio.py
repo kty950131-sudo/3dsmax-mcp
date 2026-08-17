@@ -973,3 +973,11 @@ def test_studio_page_sends_the_arm_curve_with_the_import() -> None:
     assert "armKeysFromCurve" in html
     # 팔 간격도 이제 임포트에 실제로 걸리므로 접힘 요약이 알려야 한다
     assert "팔 간격" in html.split("function curveSummary")[1].split("\n}")[0]
+
+
+def test_studio_page_links_blend_preview() -> None:
+    """블렌드 검수는 사이트 뷰어가 본체다 — 스튜디오는 여는 버튼만 단다(스펙)."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-action="blend-preview"' in html
+    assert "viewer?blend=locomotion" in html
+    assert "open_external" in html

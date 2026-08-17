@@ -253,6 +253,7 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
   <button data-action="refresh">새로고침</button>
   <button data-action="sync">Artoke에서 가져오기</button>
   <button class="video-add" data-action="add-video">영상 추가</button>
+  <button data-action="blend-preview" title="8방향 세트가 엔진에서 제대로 섞일지 뷰어에서 검수">블렌드 검수</button>
 </div>
 
 <!-- 필터는 동작 버튼과 줄을 나눈다. 한 줄에 섞여 있으면 "폴더를 바꾸는 것"과
@@ -1337,6 +1338,11 @@ document.addEventListener("click", (e) => {
         setStatus(res.data.message, "ok");
         refreshBipeds();
       } else setStatus(res.error, "error");
+    });
+  } else if (action === "blend-preview") {
+    if (!BRIDGE.obj) { setStatus("(목업) 블렌드 검수는 Max 안에서 브라우저를 엽니다."); return; }
+    bcall("open_external", "https://artoke.com/viewer?blend=locomotion", (res) => {
+      setStatus(res.ok ? "브라우저에서 블렌드 검수를 열었습니다." : res.error, res.ok ? "ok" : "error");
     });
   } else if (action === "toggle-curves") {
     setCurvesOpen(!state.curvesOpen);

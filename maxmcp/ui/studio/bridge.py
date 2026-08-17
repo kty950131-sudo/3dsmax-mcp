@@ -83,6 +83,25 @@ class StudioBridge(QtCore.QObject):
 
         return reply(run)
 
+    @QtCore.Slot(str, result=str)
+    def open_external(self, url: str) -> str:
+        """기본 브라우저로 URL을 연다.
+
+        QWebEngine 안에서 window.open 은 새 창을 우리 웹뷰에 띄우려 들거나
+        조용히 무시된다 — 외부 브라우저가 목적이면 QDesktopServices 가 정도다.
+        https 만 받는다: 슬롯은 JS 쪽 어떤 문자열로도 불릴 수 있는 경계다.
+        """
+
+        def run() -> dict:
+            if not url.startswith("https://"):
+                raise ValueError(f"https URL만 엽니다: {url}")
+            from maxmcp.ui.studio.compat import QtCore as _qtcore, QtGui
+
+            QtGui.QDesktopServices.openUrl(_qtcore.QUrl(url))
+            return {"opened": url}
+
+        return reply(run)
+
     @QtCore.Slot(result=str)
     def choose_video(self) -> str:
         def run() -> dict:
