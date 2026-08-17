@@ -796,6 +796,40 @@ def test_broken_local_shelf_does_not_lose_the_site_shelf(tmp_path) -> None:
     assert scan(str(tmp_path))[0].category == "locomotion"
 
 
+def test_studio_clears_the_grid_when_a_folder_yields_nothing() -> None:
+    """폴더를 바꿔 아무것도 못 읽으면 이전 폴더 클립을 지운다.
+
+    남겨 두면 경로를 바꾸고 새로고침해도 그리드가 그대로라 폴더가 안 바뀐 것처럼
+    보인다. 더 나쁜 것은 남은 카드의 path 가 옛 폴더를 가리켜서, 그 상태로
+    임포트하면 보고 있지도 않은 폴더의 파일이 들어간다는 점이다.
+    """
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    # 성공 여부와 무관하게 목록을 갈아끼운다
+    assert "const clips = res.ok ? res.data.clips : [];" in html
+    assert "state.clips = clips;" in html
+    # 경로가 틀린 것과 파일이 없는 것은 할 일이 다르다
+    assert "그런 폴더가 없습니다" in html
+    assert "폴더에 .bvh 가 없습니다" in html
+
+
+def test_list_clips_reports_whether_the_folder_exists() -> None:
+    # scan 은 없는 폴더와 빈 폴더를 똑같이 빈 목록으로 돌려준다. 화면이 둘을
+    # 갈라 안내하려면 브리지가 알려 줘야 한다.
+    source = (Path(__file__).resolve().parents[1] / "maxmcp/ui/studio/bridge.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"exists": os.path.isdir(folder),' in source
+
+
+def test_empty_grid_says_why_it_is_empty() -> None:
+    # 폴더가 비었는지, 검색어가 걸렀는지, 선반이 걸렀는지에 따라 할 일이 다르다.
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "이 폴더에 클립이 없습니다." in html
+    assert "고른 선반에 클립이 없습니다" in html
+    # 검색어는 사용자가 친 글자라 textContent 로 넣는다
+    assert "note.textContent =" in html
+
+
 def test_studio_search_is_not_trapped_inside_the_open_shelf() -> None:
     """검색은 라이브러리를 찾는다. 고른 선반 안만 뒤지면 고장 난 것처럼 보인다.
 

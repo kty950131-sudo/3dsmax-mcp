@@ -885,22 +885,36 @@ function loadClipsFromBridge(selectPath) {
   state.folder = folder;
   refreshBlendTiers();
   bcall("list_clips", folder, (res) => {
-    if (res.ok && res.data.clips.length) {
+    /* 실패해도 이전 폴더 클립을 화면에 남기지 않는다.
+
+       남겨 두면 경로를 바꾸고 새로고침해도 그리드가 그대로라, 폴더가 안 바뀐
+       것처럼 보인다 (오타 난 경로에서 실제로 그랬다). 더 나쁜 것은 남은 카드의
+       path 가 옛 폴더를 가리킨다는 점이다 — 그 상태로 임포트하면 지금 보고 있는
+       폴더가 아닌 파일이 들어간다. */
+    const clips = res.ok ? res.data.clips : [];
+    state.clips = clips;
+    state.categories = res.ok ? res.data.categories || [] : [];
+    state.poseCache.clear();
+    state.pending.clear();
+    if (!clips.length) state.selected = null;
+    if (selectPath) {
+      const selected = clips.find((clip) => clip.path === selectPath);
+      if (selected) state.selected = selected.stem;
+    }
+    renderShelfChips();
+    renderGrid();
+
+    if (clips.length) {
       rememberFolder(folder);
-      state.clips = res.data.clips;
-      state.categories = res.data.categories || [];
-      state.poseCache.clear();
-      state.pending.clear();
-      if (selectPath) {
-        const selected = res.data.clips.find((clip) => clip.path === selectPath);
-        if (selected) state.selected = selected.stem;
-      }
-      renderShelfChips();
-      renderGrid();
-      setStatus("라이브러리 " + res.data.clips.length + "개 클립 (실제 데이터)", "ok");
+      setStatus("라이브러리 " + clips.length + "개 클립 (실제 데이터)", "ok");
       refreshBipeds();
+    } else if (!res.ok) {
+      setStatus(res.error, "error");
+    } else if (res.data.exists === false) {
+      // 경로를 고쳐야 하는 경우와 파일을 넣어야 하는 경우는 할 일이 다르다.
+      setStatus("그런 폴더가 없습니다: " + folder, "error");
     } else {
-      setStatus(res.ok ? "폴더에 .bvh 가 없습니다: " + folder : res.error, "error");
+      setStatus("폴더에 .bvh 가 없습니다: " + folder, "error");
     }
   });
 }
@@ -1323,7 +1337,22 @@ function renderGrid() {
   grid.innerHTML = "";
   const shown = queryMatches().filter(inShelf);
   if (!shown.length) {
-    grid.innerHTML = '<div style="color:var(--dim);padding:16px">일치하는 클립이 없습니다.</div>';
+    /* 빈 화면은 왜 비었는지 말해야 한다. 폴더에 클립이 없는 것, 검색어가 걸러낸
+       것, 선반이 걸러낸 것은 할 일이 서로 다른데 예전에는 셋 다 같은 한 줄이었다.
+       검색어는 사용자가 친 글자라 textContent 로 넣는다. */
+    const note = document.createElement("div");
+    note.style.cssText = "color:var(--dim);padding:16px";
+    if (!state.clips.length) {
+      note.textContent = "이 폴더에 클립이 없습니다.";
+    } else if (currentQuery()) {
+      note.textContent =
+        '"' + currentQuery() + '" 와 맞는 클립이 없습니다 — 라이브러리에는 ' +
+        state.clips.length + "개 있습니다.";
+    } else {
+      note.textContent =
+        "고른 선반에 클립이 없습니다 — 라이브러리에는 " + state.clips.length + "개 있습니다.";
+    }
+    grid.appendChild(note);
     return;
   }
   for (const group of shelveClips(shown)) {

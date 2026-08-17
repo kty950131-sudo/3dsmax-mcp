@@ -61,6 +61,10 @@ class StudioBridge(QtCore.QObject):
                     for clip in scan(folder)
                 ],
                 "categories": load_shelf(folder)["categories"],
+                # 폴더가 없는 것과 폴더에 .bvh 가 없는 것은 사용자가 할 일이
+                # 다르다 — 앞은 경로를 고쳐야 하고 뒤는 파일을 넣어야 한다.
+                # scan 은 둘 다 빈 목록이라 여기서 갈라 준다.
+                "exists": os.path.isdir(folder),
             }
         )
 
