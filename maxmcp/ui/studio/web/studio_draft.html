@@ -28,7 +28,7 @@ body {
   font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
   height: 100vh;
   display: grid;
-  grid-template-rows: auto 1fr auto auto;
+  grid-template-rows: auto auto 1fr auto auto;
   gap: var(--gap);
   padding: var(--gap);
 }
@@ -36,6 +36,26 @@ body {
 /* 상단 바 */
 .topbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .topbar input[type="text"] { flex: 0 1 auto; }
+
+/* 필터 줄 — 카테고리 칩과 검색. 동작 버튼과 섞지 않는다. */
+.filterbar { display: flex; gap: 8px; align-items: center; }
+.cat-bar { display: flex; gap: 6px; flex: 1 1 auto; flex-wrap: wrap; min-width: 0; }
+.cat-chip {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  padding: 4px 11px;
+  border-radius: 999px;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 160ms cubic-bezier(0, 0, 0.2, 1),
+              border-color 160ms cubic-bezier(0, 0, 0.2, 1);
+}
+.cat-chip:hover { color: var(--text); border-color: var(--dim); }
+.cat-chip .n { color: var(--dim); margin-left: 5px; font-size: 11px; }
+.cat-chip.is-on { background: var(--pose); border-color: var(--pose); color: #0d1418; font-weight: 600; }
+.cat-chip.is-on .n { color: #0d1418; opacity: .72; }
 
 input[type="text"], input[type="number"], select {
   background: var(--panel);
@@ -211,7 +231,12 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
   <button data-action="refresh">새로고침</button>
   <button data-action="sync">Artoke에서 가져오기</button>
   <button class="video-add" data-action="add-video">영상 추가</button>
-  <select data-field="category" aria-label="카테고리"><option value="">전체</option></select>
+</div>
+
+<!-- 필터는 동작 버튼과 줄을 나눈다. 한 줄에 섞여 있으면 "폴더를 바꾸는 것"과
+     "보고 있는 범위를 좁히는 것"이 같은 무게로 보여서 매번 읽고 골라야 한다. -->
+<div class="filterbar">
+  <div class="cat-bar" data-field="category" role="group" aria-label="카테고리"></div>
   <input type="text" data-field="search" placeholder="검색 / 태그">
 </div>
 
@@ -525,6 +550,7 @@ function drawPose(canvas, data, index, azimuth) {
 const state = {
   clips: [],
   categories: [],         // 사이트의 선반 구조 (artoke-manifest.json 에서)
+  category: "",           // 고른 대분류 ("" = 전체). DOM 이 아니라 여기가 정본이다.
   poseCache: new Map(),
   pending: new Set(),      // 브리지에 포즈를 요청해 놓고 기다리는 클립
   importCount: 0,          // 배치 간격 = importCount x spacing (원본 .ms 와 같은 규칙)
@@ -585,7 +611,7 @@ function loadClipsFromBridge(selectPath) {
         const selected = res.data.clips.find((clip) => clip.path === selectPath);
         if (selected) state.selected = selected.stem;
       }
-      refreshCategoryFilter();
+      renderCategoryBar();
       renderGrid();
       setStatus("라이브러리 " + res.data.clips.length + "개 클립 (실제 데이터)", "ok");
       refreshBipeds();
@@ -750,33 +776,41 @@ const UNSHELVED = "__unshelved";
    비어 있는 선반까지 들고 있어서(공격>활 등), 그대로 옮기면 고를 게 없는 항목이
    대부분인 목록이 된다. 선택은 보존한다 — 폴더를 새로고침할 때마다 전체로
    돌아가면 필터를 걸어 둔 의미가 없다. */
-function refreshCategoryFilter() {
-  const select = document.querySelector('[data-field="category"]');
-  const previous = select.value;
+function renderCategoryBar() {
+  const bar = document.querySelector('[data-field="category"]');
   const counts = new Map();
   for (const clip of state.clips) {
     const key = clip.category || UNSHELVED;
     counts.set(key, (counts.get(key) || 0) + 1);
   }
-  select.innerHTML = "";
-  const all = document.createElement("option");
-  all.value = "";
-  all.textContent = "전체 (" + state.clips.length + ")";
-  select.appendChild(all);
+
+  const chips = [{ value: "", label: "전체", count: state.clips.length }];
   for (const cat of state.categories) {
-    if (!counts.has(cat.slug)) continue;
-    const option = document.createElement("option");
-    option.value = cat.slug;
-    option.textContent = cat.label + " (" + counts.get(cat.slug) + ")";
-    select.appendChild(option);
+    if (counts.has(cat.slug)) {
+      chips.push({ value: cat.slug, label: cat.label, count: counts.get(cat.slug) });
+    }
   }
   if (counts.has(UNSHELVED)) {
-    const option = document.createElement("option");
-    option.value = UNSHELVED;
-    option.textContent = "미분류 (" + counts.get(UNSHELVED) + ")";
-    select.appendChild(option);
+    chips.push({ value: UNSHELVED, label: "미분류", count: counts.get(UNSHELVED) });
   }
-  if ([...select.options].some((o) => o.value === previous)) select.value = previous;
+
+  // 고르고 있던 칸이 사라졌으면(폴더를 바꿨거나 마지막 클립을 지웠거나) 전체로
+  // 돌아간다. 안 그러면 아무것도 없는 칸을 고른 채 빈 화면만 보게 된다.
+  if (!chips.some((chip) => chip.value === state.category)) state.category = "";
+
+  bar.innerHTML = "";
+  for (const chip of chips) {
+    const button = document.createElement("button");
+    button.className = "cat-chip" + (chip.value === state.category ? " is-on" : "");
+    button.dataset.cat = chip.value;
+    button.setAttribute("aria-pressed", String(chip.value === state.category));
+    button.textContent = chip.label;
+    const count = document.createElement("span");
+    count.className = "n";
+    count.textContent = chip.count;
+    button.appendChild(count);
+    bar.appendChild(button);
+  }
 }
 
 /* 사이트(viewer)와 같은 선반: 대분류→소분류 순서대로, 빈 그룹은 건너뛰고,
@@ -805,7 +839,7 @@ function shelveClips(shown) {
 function renderGrid() {
   const q = (document.querySelector('[data-field="search"]').value || "").trim().toLowerCase();
   grid.innerHTML = "";
-  const cat = document.querySelector('[data-field="category"]').value;
+  const cat = state.category;
   const shown = state.clips.filter(
     (c) =>
       (!q || c.stem.toLowerCase().includes(q) || c.tags.some((t) => t.includes(q))) &&
@@ -1216,13 +1250,19 @@ document.addEventListener("click", (e) => {
 });
 
 document.querySelector('[data-field="search"]').addEventListener("input", renderGrid);
-document.querySelector('[data-field="category"]').addEventListener("change", renderGrid);
+document.querySelector('[data-field="category"]').addEventListener("click", (e) => {
+  const chip = e.target.closest(".cat-chip");
+  if (!chip) return;
+  state.category = chip.dataset.cat;
+  renderCategoryBar();
+  renderGrid();
+});
 document.querySelector('[data-field="target"]').addEventListener("change", updateImportButton);
 
 /* ---------- 시작 ---------- */
 state.clips = DUMMY_CLIPS;
 state.categories = DUMMY_CATEGORIES;
-refreshCategoryFilter();
+renderCategoryBar();
 renderGrid();
 renderTimeline();
 drawSpeed();

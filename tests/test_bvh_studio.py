@@ -854,3 +854,19 @@ def test_studio_page_exposes_category_filter() -> None:
     html = STUDIO_PAGE.read_text(encoding="utf-8")
     assert 'data-field="category"' in html
     assert "전체" in html
+
+
+def test_studio_header_splits_actions_from_filters() -> None:
+    """헤더는 두 줄이다 — 하는 일(동작)과 보는 범위(필터)를 섞지 않는다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'class="topbar"' in html
+    assert 'class="filterbar"' in html
+
+
+def test_studio_page_shows_categories_as_chips() -> None:
+    """카테고리는 드롭다운에 숨기지 않고 헤더에 펼쳐 둔다 (한 번 클릭)."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "cat-chip" in html
+    assert "renderCategoryBar" in html
+    # 드롭다운은 걷어낸다 — 같은 필터가 두 곳에 있으면 상태가 갈린다
+    assert "<select data-field=\"category\"" not in html
