@@ -419,16 +419,19 @@ function connectBridge() {
 }
 
 /* ---------- 더미 클립 목록 ----------
-   category/sub 는 실제 데이터에서 artoke-manifest.json 이 준다. 더미에도 채워
-   그룹핑 디자인을 브라우저에서 확인할 수 있게 한다. 일부는 일부러 미분류다. */
+   category/sub/detail 은 실제 데이터에서 artoke-manifest.json (사이트) 과
+   local-shelf.json (로컬 전용) 이 준다. 더미에도 채워 그룹핑 디자인을 브라우저에서
+   확인할 수 있게 한다. 세부까지 간 것, 역할까지만 간 것, 미분류를 섞어 뒀다 —
+   셋 다 실제로 나오는 모양이라 하나라도 빠지면 그리드를 판단할 수 없다. */
 const DUMMY_CLIPS = [
   { stem: "artoke_walk-forward",   tags: ["artoke", "walk-forward"], kind: "walk",   rendered: true, category: "locomotion", sub: "walk" },
   { stem: "artoke_run-fast",       tags: ["artoke", "run-fast"],     kind: "run",    rendered: true, category: "locomotion", sub: "run" },
   { stem: "artoke_idle-breath",    tags: ["artoke", "idle-breath"],  kind: "idle",   category: "idle", sub: "base" },
-  { stem: "attack-combo_00",       tags: ["attack-combo"],           kind: "kick",   category: "attack", sub: "unarmed" },
-  { stem: "spin-kick",             tags: ["spin-kick"],              kind: "kick",   category: "attack", sub: "unarmed" },
-  { stem: "jump-land",             tags: ["jump-land"],              kind: "jump",   category: "locomotion", sub: "jump" },
-  { stem: "crouch-move",           tags: ["crouch-move"],            kind: "crouch", category: "locomotion", sub: "traversal" },
+  { stem: "attack-normal-01",      tags: ["attack-normal-01"],       kind: "kick",   category: "attack", sub: "combo", detail: "hit1" },
+  { stem: "attack-normal-02",      tags: ["attack-normal-02"],       kind: "kick",   category: "attack", sub: "combo", detail: "hit2" },
+  { stem: "spin-kick",             tags: ["spin-kick"],              kind: "kick",   category: "attack", sub: "combo" },
+  { stem: "attack-dash-start",     tags: ["attack-dash-start"],      kind: "run",    category: "attack", sub: "dash", detail: "start" },
+  { stem: "jump-land",             tags: ["jump-land"],              kind: "jump",   category: "locomotion", sub: "jump", detail: "land" },
   { stem: "wave-hello",            tags: ["wave-hello"],             kind: "wave",   category: "emote", sub: "greet" },
   { stem: "broken-export_03",      tags: ["broken-export"],          kind: null    },
   { stem: "turn-left-90",          tags: ["turn-left-90"],           kind: "walk"  },
@@ -436,14 +439,31 @@ const DUMMY_CLIPS = [
   { stem: "artoke_sprint-stop",    tags: ["artoke", "sprint-stop"],  kind: "run",    category: "locomotion", sub: "sprint" },
 ];
 
+/* 사이트 분류표(viewer-models.ts)의 일부. 전부 옮기지 않는 것은 의도다 — 더미는
+   그룹핑을 눈으로 보려고 있는 것이고, 정본은 언제나 매니페스트다. */
 const DUMMY_CATEGORIES = [
-  { slug: "locomotion", label: "이동", subs: [
-    { slug: "walk", label: "걷기" }, { slug: "run", label: "달리기" },
-    { slug: "sprint", label: "질주" }, { slug: "jump", label: "점프" },
-    { slug: "traversal", label: "특수 이동" },
+  { slug: "idle", label: "대기", subs: [
+    { slug: "base", label: "기본 자세" }, { slug: "reaction", label: "반응" },
   ]},
-  { slug: "attack", label: "공격", subs: [{ slug: "unarmed", label: "맨손" }] },
-  { slug: "idle", label: "대기", subs: [{ slug: "base", label: "기본 대기" }] },
+  { slug: "locomotion", label: "이동", subs: [
+    { slug: "walk", label: "걷기" }, { slug: "jog", label: "조깅" },
+    { slug: "run", label: "달리기" }, { slug: "sprint", label: "전력질주" },
+    { slug: "turn", label: "방향 전환" },
+    { slug: "jump", label: "점프", details: [
+      { slug: "takeoff", label: "도약" }, { slug: "air", label: "공중" },
+      { slug: "land", label: "착지" },
+    ]},
+  ]},
+  { slug: "attack", label: "공격", subs: [
+    { slug: "combo", label: "기본 연계", details: [
+      { slug: "hit1", label: "1타" }, { slug: "hit2", label: "2타" },
+      { slug: "hit3", label: "3타" }, { slug: "finish", label: "마무리" },
+    ]},
+    { slug: "dash", label: "돌진", details: [
+      { slug: "start", label: "시작" }, { slug: "loop", label: "지속" },
+      { slug: "end", label: "종료" },
+    ]},
+  ]},
   { slug: "emote", label: "감정 표현", subs: [{ slug: "greet", label: "인사" }] },
 ];
 
@@ -1029,23 +1049,37 @@ function renderCategoryBar() {
   }
 }
 
-/* 사이트(viewer)와 같은 선반: 대분류→소분류 순서대로, 빈 그룹은 건너뛰고,
-   매니페스트에 없는 클립(로컬 생성분)은 맨 아래 "미분류" 로 모은다. */
+/* 사이트(viewer)와 같은 선반: 카테고리→역할→세부 순서대로, 빈 그룹은 건너뛰고,
+   매니페스트에 없는 클립(로컬 생성분)은 맨 아래 "미분류" 로 모은다.
+
+   세부(detail)는 사이트에서도 선택이라 없는 클립이 흔하다. 그런 클립은 역할
+   선반에 그대로 남는다 — 아무 세부 칸에나 끼워 넣으면 "돌진 시작" 선반에 시작이
+   아닌 클립이 섞여서 분류가 거짓말이 된다. */
 function shelveClips(shown) {
   const groups = [];
   const taken = new Set();
+  const push = (en, ko, items) => {
+    if (!items.length) return;
+    groups.push({ en, ko, items });
+    for (const c of items) taken.add(c.stem);
+  };
   for (const cat of state.categories) {
     for (const sub of cat.subs || []) {
-      const items = shown.filter((c) => c.category === cat.slug && c.sub === sub.slug);
-      if (!items.length) continue;
-      groups.push({ en: cat.slug + " / " + sub.slug, ko: cat.label + " · " + sub.label, items });
-      for (const c of items) taken.add(c.stem);
+      const inSub = shown.filter((c) => c.category === cat.slug && c.sub === sub.slug);
+      for (const det of sub.details || []) {
+        push(
+          cat.slug + " / " + sub.slug + " / " + det.slug,
+          cat.label + " · " + sub.label + " · " + det.label,
+          inSub.filter((c) => c.detail === det.slug)
+        );
+      }
+      push(
+        cat.slug + " / " + sub.slug,
+        cat.label + " · " + sub.label,
+        inSub.filter((c) => !taken.has(c.stem))
+      );
     }
-    const loose = shown.filter((c) => c.category === cat.slug && !taken.has(c.stem));
-    if (loose.length) {
-      groups.push({ en: cat.slug, ko: cat.label, items: loose });
-      for (const c of loose) taken.add(c.stem);
-    }
+    push(cat.slug, cat.label, shown.filter((c) => c.category === cat.slug && !taken.has(c.stem)));
   }
   const rest = shown.filter((c) => !taken.has(c.stem));
   if (rest.length) groups.push({ en: "unshelved", ko: "미분류 · 로컬 생성", items: rest });

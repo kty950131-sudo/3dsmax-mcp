@@ -720,6 +720,89 @@ def test_scan_without_sidecar_leaves_clips_unshelved(tmp_path) -> None:
 
     clips = scan(str(tmp_path))
     assert clips[0].category is None and clips[0].sub is None
+    assert clips[0].detail is None
+
+
+def _write_shelf(path, motions, categories=None) -> None:
+    path.write_text(
+        json.dumps({"categories": categories or [], "motions": motions}),
+        encoding="utf-8",
+    )
+
+
+def test_scan_reads_the_third_level(tmp_path) -> None:
+    # 사이트 분류가 카테고리→역할→세부 3단이 되었다. 세부까지 안 읽으면 돌진
+    # 시작/지속/종료가 전부 한 선반에 뭉쳐서 분류한 의미가 없어진다.
+    (tmp_path / "artoke_dash-start.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    _write_shelf(
+        tmp_path / "artoke-manifest.json",
+        [{"name": "dash-start.bvh", "category": "attack", "sub": "dash", "detail": "start"}],
+    )
+    from maxmcp.ui.studio.library import scan
+
+    clip = scan(str(tmp_path))[0]
+    assert (clip.category, clip.sub, clip.detail) == ("attack", "dash", "start")
+
+
+def test_local_shelf_shelves_clips_the_site_never_saw(tmp_path) -> None:
+    # 사이트에 올리지 않기로 한 클립을 스튜디오에서만 선반에 얹는 경로다.
+    # 이게 없으면 로컬 전용 클립은 영원히 "미분류" 한 칸에 쌓인다.
+    (tmp_path / "attack-branch-01.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    _write_shelf(
+        tmp_path / "local-shelf.json",
+        [{"name": "attack-branch-01.bvh", "category": "attack", "sub": "branch", "detail": "b1"}],
+        categories=[{"slug": "attack", "label": "공격", "subs": []}],
+    )
+    from maxmcp.ui.studio.library import load_shelf, scan
+
+    clip = scan(str(tmp_path))[0]
+    assert (clip.category, clip.sub, clip.detail) == ("attack", "branch", "b1")
+    # 사이트 매니페스트가 없는 폴더에서는 로컬이 분류표도 준다
+    assert load_shelf(str(tmp_path))["categories"][0]["slug"] == "attack"
+
+
+def test_site_categories_win_but_local_assignment_wins(tmp_path) -> None:
+    # 분류표는 사이트가 정본이라야 스튜디오와 사이트의 선반 이름이 갈리지 않는다.
+    # 반대로 클립 배정은 로컬을 고친 사람의 의도가 더 최근이라 로컬이 이긴다.
+    (tmp_path / "artoke_run-jump.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    _write_shelf(
+        tmp_path / "artoke-manifest.json",
+        [{"name": "run-jump.bvh", "category": "locomotion", "sub": "run"}],
+        categories=[{"slug": "locomotion", "label": "이동", "subs": []}],
+    )
+    _write_shelf(
+        tmp_path / "local-shelf.json",
+        [{"name": "run-jump.bvh", "category": "locomotion", "sub": "jump", "detail": "land"}],
+        categories=[{"slug": "bogus", "label": "로컬 분류표", "subs": []}],
+    )
+    from maxmcp.ui.studio.library import load_shelf, scan
+
+    clip = scan(str(tmp_path))[0]
+    assert (clip.sub, clip.detail) == ("jump", "land")
+    assert [c["slug"] for c in load_shelf(str(tmp_path))["categories"]] == ["locomotion"]
+
+
+def test_broken_local_shelf_does_not_lose_the_site_shelf(tmp_path) -> None:
+    # 로컬 파일은 손으로 고치는 물건이라 깨질 수 있다. 깨졌다고 사이트 분류까지
+    # 같이 날아가면 폴더 전체가 미분류로 보인다.
+    (tmp_path / "artoke_run-jump.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    _write_shelf(
+        tmp_path / "artoke-manifest.json",
+        [{"name": "run-jump.bvh", "category": "locomotion", "sub": "run"}],
+    )
+    (tmp_path / "local-shelf.json").write_text("{ not json", encoding="utf-8")
+    from maxmcp.ui.studio.library import scan
+
+    assert scan(str(tmp_path))[0].category == "locomotion"
+
+
+def test_studio_page_shelves_three_levels() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    # 세부 선반을 그리고, 세부가 없는 클립은 역할 선반에 남긴다
+    assert "sub.details" in html
+    assert "c.detail === det.slug" in html
+    # 낡은 분류(무기별)가 더미에 남아 있으면 없는 선반을 미리보게 된다
+    assert "unarmed" not in html
 
 
 def test_studio_page_groups_clips_by_category() -> None:

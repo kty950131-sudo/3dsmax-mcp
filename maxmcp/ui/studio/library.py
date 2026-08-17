@@ -12,9 +12,14 @@ from typing import NamedTuple, Optional
 from maxmcp.helpers.github_sync import DEFAULT_PREFIX
 
 # artoke_sync 가 동기화 때 남기는 매니페스트 사본. 사이트의 분류(categories)와
-# 모션별 category/sub 가 들어 있어, 라이브러리가 사이트와 같은 선반으로
+# 모션별 category/sub/detail 이 들어 있어, 라이브러리가 사이트와 같은 선반으로
 # 그룹핑할 수 있다. 없으면(동기화 전) 전부 미분류로 뜬다.
 MANIFEST_NAME = "artoke-manifest.json"
+
+# 사이트에 없는 로컬 클립의 분류. 같은 형태지만 손으로(또는 변환 스크립트로)
+# 만드는 파일이고, 동기화가 건드리지 않는다 — 사이트에 올리지 않기로 한 클립을
+# 스튜디오에서만 선반에 얹으려면 이게 필요하다. 사이트에는 아무것도 보내지 않는다.
+LOCAL_SHELF_NAME = "local-shelf.json"
 
 
 class Clip(NamedTuple):
@@ -23,6 +28,7 @@ class Clip(NamedTuple):
     tags: tuple[str, ...]
     category: Optional[str] = None
     sub: Optional[str] = None
+    detail: Optional[str] = None
 
 
 def extract_tags(stem: str) -> tuple[str, ...]:
@@ -31,18 +37,38 @@ def extract_tags(stem: str) -> tuple[str, ...]:
     return tuple(parts) if parts else (stem,)
 
 
-def load_shelf(folder: str) -> dict:
-    """사이드카 매니페스트의 분류. 없거나 깨졌으면 빈 구조 — 스캔은 계속된다."""
+def _read_manifest(path: str) -> dict:
+    """매니페스트 하나를 읽는다. 없거나 깨졌으면 빈 구조 — 스캔은 계속된다."""
     try:
-        with open(os.path.join(folder, MANIFEST_NAME), encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
     except (OSError, ValueError):
         return {"categories": [], "by_name": {}}
     by_name = {}
     for motion in data.get("motions", []):
         if isinstance(motion, dict) and motion.get("name") and motion.get("category"):
-            by_name[motion["name"]] = (motion["category"], motion.get("sub"))
+            by_name[motion["name"]] = (
+                motion["category"],
+                motion.get("sub"),
+                motion.get("detail"),
+            )
     return {"categories": data.get("categories", []), "by_name": by_name}
+
+
+def load_shelf(folder: str) -> dict:
+    """사이드카 매니페스트의 분류. 사이트 것과 로컬 것을 합친다.
+
+    분류표(categories)는 사이트 것이 정본이다 — 로컬 것은 사이트 동기화를 아직
+    안 한 폴더(예: 로컬 전용 클립만 있는 폴더)에서만 쓰인다. 클립별 배정은 로컬이
+    이긴다: 사이트에 있는 클립을 로컬에서 다른 선반에 두고 싶을 수 있고, 그건
+    로컬 파일을 고친 사람의 의도가 더 최근이다.
+    """
+    site = _read_manifest(os.path.join(folder, MANIFEST_NAME))
+    local = _read_manifest(os.path.join(folder, LOCAL_SHELF_NAME))
+    return {
+        "categories": site["categories"] or local["categories"],
+        "by_name": {**site["by_name"], **local["by_name"]},
+    }
 
 
 def scan(folder: str) -> list[Clip]:
@@ -57,9 +83,10 @@ def scan(folder: str) -> list[Clip]:
         stem = name[: -len(".bvh")]
         if stem.lower().endswith("_biped"):
             continue
-        # 동기화본은 <prefix><매니페스트 이름> 으로 저장된다 — 접두사를 벗겨 찾는다
+        # 동기화본은 <prefix><매니페스트 이름> 으로 저장된다 — 접두사를 벗겨 찾는다.
+        # 로컬 클립은 접두사가 없으므로 파일명 그대로가 키다.
         key = name[len(DEFAULT_PREFIX):] if name.startswith(DEFAULT_PREFIX) else name
-        category, sub = shelf["by_name"].get(key, (None, None))
+        category, sub, detail = shelf["by_name"].get(key, (None, None, None))
         clips.append(
             Clip(
                 stem=stem,
@@ -67,6 +94,7 @@ def scan(folder: str) -> list[Clip]:
                 tags=extract_tags(stem),
                 category=category,
                 sub=sub,
+                detail=detail,
             )
         )
     return clips

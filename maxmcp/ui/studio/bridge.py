@@ -45,7 +45,7 @@ class StudioBridge(QtCore.QObject):
 
     @QtCore.Slot(str, result=str)
     def list_clips(self, folder: str) -> str:
-        """클립 목록 + 사이트의 분류. 그리드가 대분류→소분류로 그룹핑한다."""
+        """클립 목록 + 사이트의 분류. 그리드가 카테고리→역할→세부로 그룹핑한다."""
         return reply(
             lambda: {
                 "clips": [
@@ -55,6 +55,7 @@ class StudioBridge(QtCore.QObject):
                         "tags": list(clip.tags),
                         "category": clip.category,
                         "sub": clip.sub,
+                        "detail": clip.detail,
                     }
                     for clip in scan(folder)
                 ],
