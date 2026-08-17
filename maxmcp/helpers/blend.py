@@ -146,6 +146,28 @@ def _channel_columns(bvh: BvhFile) -> list[tuple[BvhJoint, dict[str, int]]]:
     return columns
 
 
+def cycle_window(bvh: BvhFile, phase_entry: dict) -> BvhFile:
+    """소스에서 한 보행 사이클만 잘라낸다. 위상 정보가 없으면 그대로 돌려준다.
+
+    이걸 빠뜨리면 `blend_channels` 가 출력 프레임을 **6초 테이크 전체**에 걸쳐
+    매핑한다 — 다섯 걸음이 한 걸음 시간에 압축돼 들어가고, 프레임간 회전 변화량이
+    소스의 3도에서 18도로 뛴다(실측). 결과는 다리가 뭉개진 클립이다.
+
+    사이트 쪽은 `AnimationUtils.subclip` 으로 같은 일을 먼저 한다
+    (`blend-preview.tsx`) — 여기서도 같은 경계로 잘라야 두 출력이 같은 물건이 된다.
+
+    시작점은 첫 왼발 접지다: 모든 소스가 같은 위상에서 시작해야 섞을 때 발이 맞는다.
+    """
+    frames = phase_entry.get("cycleFrames", 0)
+    if frames <= 0:
+        return bvh
+    start = (phase_entry.get("leftContacts") or [0])[0]
+    end = min(len(bvh.frames), start + frames)
+    if end - start < 2:
+        return bvh
+    return BvhFile(root=bvh.root, frame_time=bvh.frame_time, frames=bvh.frames[start:end])
+
+
 def _sample(frames: list[list[float]], frame: int, total: int) -> list[float]:
     """소스를 ``total`` 프레임으로 늘이거나 줄여 ``frame`` 번째 행을 뽑는다.
 
@@ -336,7 +358,10 @@ def bake_blend_file(folder: str, angle_deg: float, speed_t: float) -> dict:
         if not os.path.exists(path):
             raise ValueError(f"{slug}.bvh 가 폴더에 없다 — 매니페스트와 파일이 어긋났다.")
         with open(path, encoding="utf-8") as handle:
-            pairs.append((parse_bvh(handle.read()), weight))
+            source = parse_bvh(handle.read())
+        # 섞기 전에 한 사이클로 자른다. 자르지 않으면 6초 테이크 전체가 사이클
+        # 길이로 압축된다 — 자세한 이유는 `cycle_window` 주석.
+        pairs.append((cycle_window(source, entry(slug)), weight))
 
     first = next(iter(active))
     fps = entry(first).get("fps", 30)

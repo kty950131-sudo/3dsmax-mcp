@@ -1,5 +1,6 @@
 import json
 import math
+import os
 
 import pytest
 
@@ -7,6 +8,7 @@ from maxmcp.helpers.blend import (
     bake_blend_file,
     blend_channels,
     blend_weights,
+    cycle_window,
     direction_weights,
     discover_tiers,
     synthesise_travel,
@@ -253,6 +255,84 @@ def test_synthesise_travel_returns_the_clip_when_the_joint_has_no_position():
 
 
 # ---- bake_blend_file 의 실패 경로 --------------------------------------------
+
+
+def test_cycle_window_cuts_one_cycle_from_the_first_left_contact():
+    rows = [[0.0, 0.0, 0.0, 0.0, float(i), 0.0, 0.0, 0.0, 0.0] for i in range(40)]
+    out = cycle_window(
+        parse_bvh(minimal_bvh(rows)),
+        {"cycleFrames": 12, "leftContacts": [5, 17, 29]},
+    )
+    assert len(out.frames) == 12
+    assert out.frames[0][4] == 5.0
+    assert out.frames[-1][4] == 16.0
+
+
+def test_cycle_window_passes_through_without_phase():
+    rows = [[0.0] * 9 for _ in range(8)]
+    bvh = parse_bvh(minimal_bvh(rows))
+    assert len(cycle_window(bvh, {}).frames) == 8
+    assert len(cycle_window(bvh, {"cycleFrames": 0}).frames) == 8
+
+
+def test_cycle_window_refuses_a_window_that_ran_off_the_end():
+    """접지가 테이크 끝에 있으면 두 프레임도 못 자른다 — 자르지 않는 쪽이 낫다."""
+    rows = [[0.0] * 9 for _ in range(10)]
+    bvh = parse_bvh(minimal_bvh(rows))
+    assert len(cycle_window(bvh, {"cycleFrames": 12, "leftContacts": [9]}).frames) == 10
+
+
+def test_bake_only_covers_one_cycle_not_the_whole_take(tmp_path):
+    """굳힌 클립은 한 보행 사이클이어야 한다.
+
+    이걸 놓치면 `_sample` 이 출력 프레임을 6초 테이크 전체에 매핑해서 다섯 걸음이
+    한 걸음 시간에 압축된다. 실측으로 프레임간 회전 변화량이 소스의 3도에서 18도로
+    뛰었고, 방위각·프레임 수·파싱은 전부 정상이라 그것만 보면 지나친다.
+
+    소스의 Yrotation 을 프레임 번호로 두면 굳힌 클립이 훑은 구간이 값으로 그대로
+    드러난다: 한 사이클(15프레임)만 봤으면 최대가 15 근처, 전체(60프레임)를 봤으면
+    60 근처다.
+    """
+    dirs = ["f", "fr", "r", "br", "b", "bl", "l", "fl"]
+    rows = [[0.0, 0.0, 0.0, 0.0, float(i), 0.0, 0.0, 0.0, 0.0] for i in range(60)]
+    for d in dirs:
+        (tmp_path / f"walk-{d}.bvh").write_text(minimal_bvh(rows), encoding="utf-8")
+    (tmp_path / "artoke-manifest.json").write_text(
+        json.dumps(
+            {"motions": [{"name": f"walk-{d}.bvh", "category": "locomotion"} for d in dirs]}
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "phase.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "clips": {
+                    f"walk-{d}.bvh": {
+                        "leftContacts": [0, 15, 30, 45],
+                        "rightContacts": [7],
+                        "cycleFrames": 15,
+                        "fps": 30,
+                        "metresPerSecond": 1.3,
+                        "rigHeight": 100.0,
+                    }
+                    for d in dirs
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = bake_blend_file(str(tmp_path), 0.0, 0.0)
+    written = parse_bvh(open(out["path"], encoding="utf-8").read())
+    os.unlink(out["path"])
+
+    yaws = [row[4] for row in written.frames]
+    assert out["frames"] == 15
+    assert max(yaws) < 15.5, f"한 사이클을 넘어 훑었다 — 최대 Yrotation {max(yaws)}"
+    # 프레임당 1도씩 오르는 소스이므로 굳힌 클립도 그래야 한다
+    steps = [b - a for a, b in zip(yaws, yaws[1:])]
+    assert max(steps) < 1.6, f"프레임이 건너뛰었다 — 최대 간격 {max(steps)}"
 
 
 def test_bake_blend_file_says_why_without_a_manifest(tmp_path):
