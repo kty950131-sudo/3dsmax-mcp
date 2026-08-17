@@ -6,11 +6,12 @@
 """
 
 import json
+import os
 import traceback
 from typing import Any, Callable, Optional
 
 from maxmcp.ui.studio.compat import QtCore, QtWidgets
-from maxmcp.ui.studio.library import scan
+from maxmcp.ui.studio.library import cache_path, delete_clip, load_shelf, scan
 from maxmcp.ui.studio.thumb import load_pose_data
 from maxmcp.ui.studio.video_jobs import VideoJobController
 
@@ -44,17 +45,43 @@ class StudioBridge(QtCore.QObject):
 
     @QtCore.Slot(str, result=str)
     def list_clips(self, folder: str) -> str:
+        """클립 목록 + 사이트의 분류. 그리드가 대분류→소분류로 그룹핑한다."""
         return reply(
-            lambda: [
-                {"stem": clip.stem, "path": clip.path, "tags": list(clip.tags)}
-                for clip in scan(folder)
-            ]
+            lambda: {
+                "clips": [
+                    {
+                        "stem": clip.stem,
+                        "path": clip.path,
+                        "tags": list(clip.tags),
+                        "category": clip.category,
+                        "sub": clip.sub,
+                    }
+                    for clip in scan(folder)
+                ],
+                "categories": load_shelf(folder)["categories"],
+            }
         )
 
     @QtCore.Slot(str, result=str)
     def pose_data(self, clip_path: str) -> str:
         """포즈 좌표와 뼈대. 첫 호출만 느리고 이후는 캐시다."""
         return reply(lambda: load_pose_data(clip_path, self._cache_dir))
+
+    @QtCore.Slot(str, result=str)
+    def delete_clip(self, payload_json: str) -> str:
+        """로컬 라이브러리에서 클립 삭제. 사이트에는 아무 요청도 보내지 않는다."""
+
+        def run() -> dict:
+            p = json.loads(payload_json)
+            out = delete_clip(p["folder"], p["path"])
+            # 포즈 캐시도 지운다 — 남겨두면 같은 경로의 새 클립이 옛 포즈를 쓴다
+            try:
+                os.remove(cache_path(p["path"], self._cache_dir))
+            except OSError:
+                pass
+            return out
+
+        return reply(run)
 
     @QtCore.Slot(result=str)
     def choose_video(self) -> str:
@@ -93,6 +120,29 @@ class StudioBridge(QtCore.QObject):
                 p.get("name", ""),
                 bool(p.get("convert", True)),
                 float(p.get("x_offset", 0.0)),
+                speed=float(p.get("speed", 1.0)),
+                trim=(float(p.get("trim_start", 0.0)), float(p.get("trim_end", 1.0))),
+                time_map=p.get("time_map"),
+                mirror=bool(p.get("mirror", False)),
+            )
+            if msg.startswith("ERROR"):
+                raise RuntimeError(msg)
+            return {"message": msg}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def retarget_clip(self, payload_json: str) -> str:
+        """기존 바이패드에 클립 로드 — 새 바이패드를 만들지 않는다."""
+
+        def run() -> dict:
+            from maxmcp.ui.studio.maxbridge import retarget_clip
+
+            p = json.loads(payload_json)
+            msg = retarget_clip(
+                p["path"],
+                p["biped"],
+                bool(p.get("convert", True)),
                 speed=float(p.get("speed", 1.0)),
                 trim=(float(p.get("trim_start", 0.0)), float(p.get("trim_end", 1.0))),
                 time_map=p.get("time_map"),

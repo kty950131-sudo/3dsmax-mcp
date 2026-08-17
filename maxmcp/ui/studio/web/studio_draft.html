@@ -77,17 +77,31 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 /* 본문 2단 */
 .body { display: grid; grid-template-columns: 1fr 420px; gap: var(--gap); min-height: 0; }
 
-/* 클립 그리드 */
+/* 클립 그리드 — 사이트(viewer)와 같은 대분류→소분류 선반으로 그룹핑한다.
+   분류는 Artoke 동기화가 남긴 artoke-manifest.json 에서 오고, 로컬 생성분은
+   맨 아래 "미분류" 로 모인다. */
 .clip-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
-  gap: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   overflow-y: auto;
-  align-content: start;
-  padding: 4px;
+  padding: 8px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 6px;
+}
+.clip-group-label {
+  margin: 0 0 6px;
+  font-size: 10px;
+  letter-spacing: .14em;
+  color: var(--pose);
+  text-transform: uppercase;
+}
+.clip-group-label .ko { color: var(--dim); letter-spacing: 0; text-transform: none; margin-left: 6px; }
+.clip-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 10px;
 }
 .clip-card {
   border: 1px solid transparent;
@@ -141,16 +155,48 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 .timeline .ticks { position: absolute; left: 0; right: 0; bottom: 1px; height: 10px; color: var(--dim); font-size: 10px; }
 .timeline .ticks span { position: absolute; transform: translateX(-50%); }
 
-/* 곡선 */
+/* 곡선 — 여기만 피그마 정본(BVH Studio / Tracking Editor) 디자인 언어를 따른다.
+   배경 #08090B · 정상 #48A9C5 · 선택 #F5B642 · Noto Sans KR · Ease Out 160–240ms.
+   나머지 화면은 아직 자리표시자다. */
 .curves { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
-.curve { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
-.curve h2 { margin: 0 0 6px; font-size: 12px; color: var(--dim); font-weight: 600; display: flex; justify-content: space-between; }
-.curve h2 .hint { font-weight: 400; }
+.curve {
+  background: #08090B;
+  border: 1px solid #1D232B;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: "Noto Sans KR", "Segoe UI", system-ui, sans-serif;
+  transition: border-color 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+.curve:hover { border-color: #2D3946; }
+.curve .ovl { color: #48A9C5; font-size: 10px; letter-spacing: .14em; margin-bottom: 3px; }
+.curve h2 {
+  margin: 0 0 6px; font-size: 12px; color: #E6EBF0; font-weight: 600;
+  letter-spacing: -0.01em; line-height: 1.4; display: flex; justify-content: space-between;
+}
+.curve h2 .hint { font-weight: 400; color: #5B6672; letter-spacing: 0; }
 .curve canvas { width: 100%; height: 118px; display: block; touch-action: none; cursor: crosshair; }
 
 .status { color: var(--dim); font-size: 12px; min-height: 18px; padding: 0 2px; }
 .status.is-error { color: #e2765e; }
 .status.is-ok { color: #7fc98a; }
+
+/* 삭제 확인 — 네이티브 confirm 대신 페이지 안 모달 (스타일 통제 + 채널 안 막음) */
+.confirm-overlay {
+  position: fixed; inset: 0; display: none;
+  align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .6); z-index: 30;
+}
+.confirm-overlay.is-open { display: flex; }
+.confirm-box {
+  width: min(420px, 90vw);
+  background: #08090B; border: 1px solid #1D232B; border-radius: 6px;
+  padding: 16px 18px;
+  font-family: "Noto Sans KR", "Segoe UI", system-ui, sans-serif;
+}
+.confirm-box .confirm-text { margin: 0 0 6px; color: #E6EBF0; font-weight: 600; letter-spacing: -0.01em; }
+.confirm-box .confirm-note { margin: 0 0 14px; color: var(--dim); font-size: 12px; line-height: 1.45; white-space: pre-line; }
+.confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.confirm-actions .danger { background: #F5B642; border-color: #F5B642; color: #1a1a1a; font-weight: 600; }
 
 .mock-note {
   position: fixed; right: 10px; bottom: 8px; font-size: 11px; color: var(--dim);
@@ -193,6 +239,7 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 
     <div class="card">
       <h2>임포트</h2>
+      <div class="row"><label>대상</label><select data-field="target"><option value="">새 바이패드 생성</option></select></div>
       <div class="row"><label>이름</label><input type="text" data-field="name" value=""></div>
       <div class="row"><label>배치 간격</label><input type="number" data-field="spacing" value="120" min="0" max="2000" step="10"></div>
       <div class="row">
@@ -221,12 +268,25 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 
 <div class="curves">
   <div class="curve" data-kind="speed">
+    <div class="ovl">01 · SPEED / TIME-MAP</div>
     <h2>속도 곡선 <span class="hint">클릭=추가 · 우클릭=삭제 · 드래그=이동</span></h2>
     <canvas></canvas>
   </div>
   <div class="curve" data-kind="armspace">
+    <div class="ovl">02 · ARM SPACE / LAYER</div>
     <h2>팔 간격 곡선 <span class="hint">0–45° · 클릭=추가 · 우클릭=삭제</span></h2>
     <canvas></canvas>
+  </div>
+</div>
+
+<div class="confirm-overlay">
+  <div class="confirm-box">
+    <p class="confirm-text"></p>
+    <p class="confirm-note"></p>
+    <div class="confirm-actions">
+      <button data-action="confirm-cancel">취소</button>
+      <button class="danger" data-action="confirm-delete">정말로 삭제하겠습니다</button>
+    </div>
   </div>
 </div>
 
@@ -272,20 +332,33 @@ function connectBridge() {
   return true;
 }
 
-/* ---------- 더미 클립 목록 ---------- */
+/* ---------- 더미 클립 목록 ----------
+   category/sub 는 실제 데이터에서 artoke-manifest.json 이 준다. 더미에도 채워
+   그룹핑 디자인을 브라우저에서 확인할 수 있게 한다. 일부는 일부러 미분류다. */
 const DUMMY_CLIPS = [
-  { stem: "artoke_walk-forward",   tags: ["artoke", "walk-forward"], kind: "walk",   rendered: true },
-  { stem: "artoke_run-fast",       tags: ["artoke", "run-fast"],     kind: "run",    rendered: true },
-  { stem: "artoke_idle-breath",    tags: ["artoke", "idle-breath"],  kind: "idle"  },
-  { stem: "attack-combo_00",       tags: ["attack-combo"],           kind: "kick"  },
-  { stem: "spin-kick",             tags: ["spin-kick"],              kind: "kick"  },
-  { stem: "jump-land",             tags: ["jump-land"],              kind: "jump"  },
-  { stem: "crouch-move",           tags: ["crouch-move"],            kind: "crouch"},
-  { stem: "wave-hello",            tags: ["wave-hello"],             kind: "wave"  },
+  { stem: "artoke_walk-forward",   tags: ["artoke", "walk-forward"], kind: "walk",   rendered: true, category: "locomotion", sub: "walk" },
+  { stem: "artoke_run-fast",       tags: ["artoke", "run-fast"],     kind: "run",    rendered: true, category: "locomotion", sub: "run" },
+  { stem: "artoke_idle-breath",    tags: ["artoke", "idle-breath"],  kind: "idle",   category: "idle", sub: "base" },
+  { stem: "attack-combo_00",       tags: ["attack-combo"],           kind: "kick",   category: "attack", sub: "unarmed" },
+  { stem: "spin-kick",             tags: ["spin-kick"],              kind: "kick",   category: "attack", sub: "unarmed" },
+  { stem: "jump-land",             tags: ["jump-land"],              kind: "jump",   category: "locomotion", sub: "jump" },
+  { stem: "crouch-move",           tags: ["crouch-move"],            kind: "crouch", category: "locomotion", sub: "traversal" },
+  { stem: "wave-hello",            tags: ["wave-hello"],             kind: "wave",   category: "emote", sub: "greet" },
   { stem: "broken-export_03",      tags: ["broken-export"],          kind: null    },
   { stem: "turn-left-90",          tags: ["turn-left-90"],           kind: "walk"  },
   { stem: "sit-down",              tags: ["sit-down"],               kind: "sit"   },
-  { stem: "artoke_sprint-stop",    tags: ["artoke", "sprint-stop"],  kind: "run"   },
+  { stem: "artoke_sprint-stop",    tags: ["artoke", "sprint-stop"],  kind: "run",    category: "locomotion", sub: "sprint" },
+];
+
+const DUMMY_CATEGORIES = [
+  { slug: "locomotion", label: "이동", subs: [
+    { slug: "walk", label: "걷기" }, { slug: "run", label: "달리기" },
+    { slug: "sprint", label: "질주" }, { slug: "jump", label: "점프" },
+    { slug: "traversal", label: "특수 이동" },
+  ]},
+  { slug: "attack", label: "공격", subs: [{ slug: "unarmed", label: "맨손" }] },
+  { slug: "idle", label: "대기", subs: [{ slug: "base", label: "기본 대기" }] },
+  { slug: "emote", label: "감정 표현", subs: [{ slug: "greet", label: "인사" }] },
 ];
 
 /* ---------- 더미 골격 ---------- */
@@ -450,6 +523,7 @@ function drawPose(canvas, data, index, azimuth) {
 /* ---------- 상태 ---------- */
 const state = {
   clips: [],
+  categories: [],         // 사이트의 선반 구조 (artoke-manifest.json 에서)
   poseCache: new Map(),
   pending: new Set(),      // 브리지에 포즈를 요청해 놓고 기다리는 클립
   importCount: 0,          // 배치 간격 = importCount x spacing (원본 .ms 와 같은 규칙)
@@ -501,16 +575,17 @@ function poseFor(stem) {
 function loadClipsFromBridge(selectPath) {
   const folder = document.querySelector('[data-field="folder"]').value;
   bcall("list_clips", folder, (res) => {
-    if (res.ok && res.data.length) {
-      state.clips = res.data;
+    if (res.ok && res.data.clips.length) {
+      state.clips = res.data.clips;
+      state.categories = res.data.categories || [];
       state.poseCache.clear();
       state.pending.clear();
       if (selectPath) {
-        const selected = res.data.find((clip) => clip.path === selectPath);
+        const selected = res.data.clips.find((clip) => clip.path === selectPath);
         if (selected) state.selected = selected.stem;
       }
       renderGrid();
-      setStatus("라이브러리 " + res.data.length + "개 클립 (실제 데이터)", "ok");
+      setStatus("라이브러리 " + res.data.clips.length + "개 클립 (실제 데이터)", "ok");
       refreshBipeds();
     } else {
       setStatus(res.ok ? "폴더에 .bvh 가 없습니다: " + folder : res.error, "error");
@@ -578,14 +653,35 @@ function refreshBipeds() {
   if (!BRIDGE.obj) return;
   bcall("scene_bipeds", null, (res) => {
     if (!res.ok) return;
-    const sel = document.querySelector('[data-field="biped"]');
-    sel.innerHTML = "";
-    for (const name of res.data) {
-      const opt = document.createElement("option");
-      opt.textContent = name;
-      sel.appendChild(opt);
+    /* "임포트 후" 의 biped 셀렉트와 "임포트" 의 대상 셀렉트를 같은 목록으로 채운다.
+       대상 셀렉트는 맨 앞에 "새 바이패드 생성"(빈 값) 을 유지하고 선택을 보존한다. */
+    for (const field of ["biped", "target"]) {
+      const sel = document.querySelector('[data-field="' + field + '"]');
+      const prev = sel.value;
+      sel.innerHTML = "";
+      if (field === "target") {
+        const none = document.createElement("option");
+        none.value = "";
+        none.textContent = "새 바이패드 생성";
+        sel.appendChild(none);
+      }
+      for (const name of res.data) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+      }
+      if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
     }
+    updateImportButton();
   });
+}
+
+/* 대상이 기존 바이패드면 버튼이 하는 일이 달라진다 — 라벨로 알려준다 */
+function updateImportButton() {
+  const target = document.querySelector('[data-field="target"]').value;
+  document.querySelector('[data-action="import"]').textContent =
+    target ? "선택한 바이패드에 적용" : "바이패드 생성 + 임포트";
 }
 
 /* 속도 곡선이 항등이 아니면 (출력비율, 원본비율) 제어점을 프레임 단위 time_map 으로
@@ -620,6 +716,54 @@ function posterOf(stem) {
 }
 
 /* ---------- 그리드 ---------- */
+function makeCard(clip) {
+  const card = document.createElement("div");
+  card.className = "clip-card";
+  card.dataset.stem = clip.stem;
+  /* 브리지 클립(path 있음)은 포즈 요청이 실패했을 때만 is-broken 이 붙는다
+     (poseFor 콜백). 더미 클립은 kind 가 없으면 파싱 실패 시나리오다. */
+  if (!clip.path && !clip.kind) {
+    card.classList.add("is-broken");
+    card.title = "BVH 파싱 실패 — 목록에서 빼지 않고 사유를 표시한다";
+  }
+  if (state.poseCache.get(clip.stem) === null && clip.path) {
+    card.classList.add("is-broken");
+  }
+  if (clip.stem === state.selected) card.classList.add("is-selected");
+  // Max 배치가 찍은 PNG 가 있으면 그걸 쓰고, 없으면 canvas 로 계산해 그린다.
+  // PNG 가 없다고 빈칸을 만들지 않는다 — 라이브러리는 Max 없이도 즉시 열려야 한다.
+  if (clip.rendered) card.classList.add("is-rendered");
+  card.innerHTML =
+    "<canvas></canvas><span class='thumb-badge'>MAX</span>" +
+    "<div class='name'></div><div class='tags'></div>";
+  card.querySelector(".name").textContent = clip.stem;
+  card.querySelector(".tags").textContent = clip.tags.join(" · ");
+  return card;
+}
+
+/* 사이트(viewer)와 같은 선반: 대분류→소분류 순서대로, 빈 그룹은 건너뛰고,
+   매니페스트에 없는 클립(로컬 생성분)은 맨 아래 "미분류" 로 모은다. */
+function shelveClips(shown) {
+  const groups = [];
+  const taken = new Set();
+  for (const cat of state.categories) {
+    for (const sub of cat.subs || []) {
+      const items = shown.filter((c) => c.category === cat.slug && c.sub === sub.slug);
+      if (!items.length) continue;
+      groups.push({ en: cat.slug + " / " + sub.slug, ko: cat.label + " · " + sub.label, items });
+      for (const c of items) taken.add(c.stem);
+    }
+    const loose = shown.filter((c) => c.category === cat.slug && !taken.has(c.stem));
+    if (loose.length) {
+      groups.push({ en: cat.slug, ko: cat.label, items: loose });
+      for (const c of loose) taken.add(c.stem);
+    }
+  }
+  const rest = shown.filter((c) => !taken.has(c.stem));
+  if (rest.length) groups.push({ en: "unshelved", ko: "미분류 · 로컬 생성", items: rest });
+  return groups;
+}
+
 function renderGrid() {
   const q = (document.querySelector('[data-field="search"]').value || "").trim().toLowerCase();
   grid.innerHTML = "";
@@ -630,30 +774,25 @@ function renderGrid() {
     grid.innerHTML = '<div style="color:var(--dim);padding:16px">일치하는 클립이 없습니다.</div>';
     return;
   }
-  for (const clip of shown) {
-    const card = document.createElement("div");
-    card.className = "clip-card";
-    card.dataset.stem = clip.stem;
-    /* 브리지 클립(path 있음)은 포즈 요청이 실패했을 때만 is-broken 이 붙는다
-       (poseFor 콜백). 더미 클립은 kind 가 없으면 파싱 실패 시나리오다. */
-    if (!clip.path && !clip.kind) {
-      card.classList.add("is-broken");
-      card.title = "BVH 파싱 실패 — 목록에서 빼지 않고 사유를 표시한다";
+  for (const group of shelveClips(shown)) {
+    const section = document.createElement("div");
+    section.className = "clip-group";
+    section.innerHTML = '<p class="clip-group-label"></p><div class="clip-cards"></div>';
+    const label = section.querySelector(".clip-group-label");
+    label.textContent = group.en;
+    const ko = document.createElement("span");
+    ko.className = "ko";
+    ko.textContent = group.ko;
+    label.appendChild(ko);
+    const cards = section.querySelector(".clip-cards");
+    for (const clip of group.items) cards.appendChild(makeCard(clip));
+    // 캔버스는 문서에 붙은 뒤에 그린다 — 떨어진 채 그리면 rect 가 0×0 이라
+    // 1픽셀을 카드 크기로 늘린 단색 사각형이 된다.
+    grid.appendChild(section);
+    for (const card of cards.children) {
+      const stem = card.dataset.stem;
+      drawPose(card.querySelector("canvas"), poseFor(stem), posterOf(stem), 0);
     }
-    if (state.poseCache.get(clip.stem) === null && clip.path) {
-      card.classList.add("is-broken");
-    }
-    if (clip.stem === state.selected) card.classList.add("is-selected");
-    // Max 배치가 찍은 PNG 가 있으면 그걸 쓰고, 없으면 canvas 로 계산해 그린다.
-    // PNG 가 없다고 빈칸을 만들지 않는다 — 라이브러리는 Max 없이도 즉시 열려야 한다.
-    if (clip.rendered) card.classList.add("is-rendered");
-    card.innerHTML =
-      "<canvas></canvas><span class='thumb-badge'>MAX</span>" +
-      "<div class='name'></div><div class='tags'></div>";
-    card.querySelector(".name").textContent = clip.stem;
-    card.querySelector(".tags").textContent = clip.tags.join(" · ");
-    grid.appendChild(card);
-    drawPose(card.querySelector("canvas"), poseFor(clip.stem), posterOf(clip.stem), 0);
   }
 }
 
@@ -701,6 +840,41 @@ grid.addEventListener("click", (e) => {
   const data = poseFor(state.selected);
   if (data) setStatus(state.selected + " — " + data.frames + "프레임 / " + (data.frames * data.frame_time).toFixed(1) + "초");
   else setStatus(state.selected + " — 포즈 로딩 중…");
+});
+
+/* ---------- 삭제 (우클릭 → 확인 모달) ----------
+   네이티브 confirm() 은 QWebEngine 채널을 막을 수 있어 페이지 안 모달로 받는다.
+   삭제는 로컬 라이브러리 폴더만 정리한다 — 사이트(홈페이지)에는 아무 요청도
+   보내지 않는다. */
+const confirmOverlay = document.querySelector(".confirm-overlay");
+
+function openDeleteConfirm(clip) {
+  state.pendingDelete = clip;
+  confirmOverlay.querySelector(".confirm-text").textContent =
+    "“" + clip.stem + "” 모션을 삭제할까요?";
+  let note = "라이브러리 폴더에서만 지워집니다 — 홈페이지에는 영향이 없습니다.";
+  if (clip.stem.startsWith("artoke_"))
+    note += "\nArtoke 동기화를 다시 하면 이 클립은 다시 받아집니다.";
+  confirmOverlay.querySelector(".confirm-note").textContent = note;
+  confirmOverlay.classList.add("is-open");
+}
+
+function closeDeleteConfirm() {
+  state.pendingDelete = null;
+  confirmOverlay.classList.remove("is-open");
+}
+
+grid.addEventListener("contextmenu", (e) => {
+  const card = e.target.closest(".clip-card");
+  if (!card) return;
+  e.preventDefault();
+  const clip = state.clips.find((c) => c.stem === card.dataset.stem);
+  if (clip) openDeleteConfirm(clip);
+});
+
+/* 상자 바깥 클릭 = 취소 */
+confirmOverlay.addEventListener("click", (e) => {
+  if (e.target === confirmOverlay) closeDeleteConfirm();
 });
 
 /* ---------- 타임라인 ---------- */
@@ -786,13 +960,14 @@ function sampleCurve(pts, x) {
 /* ---------- 곡선 ---------- */
 function curveSetup(el, points, opts) {
   const canvas = el.querySelector("canvas");
+  let active = -1;                             // 드래그 중인 제어점 (피그마: 앰버 링)
 
   function draw() {
     const { ctx, w, h } = fitCanvas(canvas);
     ctx.clearRect(0, 0, w, h);
     const P = (p) => [p[0] * w, h - p[1] / opts.max * h];
 
-    ctx.strokeStyle = "#33333a"; ctx.lineWidth = 1;
+    ctx.strokeStyle = "#141A21"; ctx.lineWidth = 1;
     ctx.beginPath();
     for (let i = 1; i < 4; i++) {
       ctx.moveTo(0, h * i / 4); ctx.lineTo(w, h * i / 4);
@@ -800,7 +975,10 @@ function curveSetup(el, points, opts) {
     }
     ctx.stroke();
 
-    ctx.strokeStyle = "#f08c3c"; ctx.lineWidth = 2;
+    /* 피그마 모션 언어의 궤적 표기 — 점선 시안 */
+    ctx.strokeStyle = "#48A9C5"; ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    ctx.setLineDash([1.5, 6]);
     ctx.beginPath();
     const x0 = points[0][0], x1 = points[points.length - 1][0];
     const STEPS = 72;                          // 스플라인을 촘촘히 샘플해 그린다
@@ -810,12 +988,18 @@ function curveSetup(el, points, opts) {
       i ? ctx.lineTo(s[0], s[1]) : ctx.moveTo(s[0], s[1]);
     }
     ctx.stroke();
+    ctx.setLineDash([]);
 
-    ctx.fillStyle = "#ffffff";
-    for (const p of points) {
+    points.forEach((p, i) => {
       const s = P(p);
+      const isActive = i === active;
+      ctx.fillStyle = isActive ? "#F5B642" : "#48A9C5";
       ctx.beginPath(); ctx.arc(s[0], s[1], 4, 0, Math.PI * 2); ctx.fill();
-    }
+      if (isActive) {                          // 선택 링 (피그마: 드래그 보정 상태)
+        ctx.strokeStyle = "#F5B642"; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(s[0], s[1], 9, 0, Math.PI * 2); ctx.stroke();
+      }
+    });
   }
 
   canvas.addEventListener("pointerdown", (e) => {
@@ -851,9 +1035,12 @@ function curveSetup(el, points, opts) {
     const onUp = () => {
       canvas.removeEventListener("pointermove", onMove);
       canvas.removeEventListener("pointerup", onUp);
+      active = -1;
+      draw();
     };
     canvas.addEventListener("pointermove", onMove);
     canvas.addEventListener("pointerup", onUp);
+    active = idx;
     draw();
   });
 
@@ -923,23 +1110,57 @@ document.addEventListener("click", (e) => {
       return;
     }
     const data = poseFor(state.selected);
+    const target = document.querySelector('[data-field="target"]').value;
     const payload = {
       path: clip.path,
-      name: document.querySelector('[data-field="name"]').value || ("Bip_" + clip.stem),
       convert: document.querySelector('[data-field="convert"]').checked,
       mirror: document.querySelector('[data-field="mirror"]').checked,
-      x_offset: state.importCount * Number(document.querySelector('[data-field="spacing"]').value || 0),
       trim_start: state.trim[0],
       trim_end: state.trim[1],
     };
     const timeMap = timeMapFromCurve(data);
     if (timeMap) payload.time_map = timeMap;
+    if (target) {
+      /* 기존 바이패드에 적용 — 이름/배치 간격은 새 바이패드 전용이라 안 보낸다 */
+      payload.biped = target;
+      setStatus("적용 중… (" + clip.stem + " → " + target + ")");
+      bcall("retarget_clip", JSON.stringify(payload), (res) => {
+        if (res.ok) {
+          setStatus(res.data.message, "ok");
+          refreshBipeds();
+        } else setStatus(res.error, "error");
+      });
+      return;
+    }
+    payload.name = document.querySelector('[data-field="name"]').value || ("Bip_" + clip.stem);
+    payload.x_offset = state.importCount * Number(document.querySelector('[data-field="spacing"]').value || 0);
     setStatus("임포트 중… (" + clip.stem + ")");
     bcall("import_clip", JSON.stringify(payload), (res) => {
       if (res.ok) {
         state.importCount++;
         setStatus(res.data.message, "ok");
         refreshBipeds();
+      } else setStatus(res.error, "error");
+    });
+  } else if (action === "confirm-cancel") {
+    closeDeleteConfirm();
+  } else if (action === "confirm-delete") {
+    const clip = state.pendingDelete;
+    closeDeleteConfirm();
+    if (!clip) return;
+    if (clip.stem === state.selected) state.selected = null;
+    if (!BRIDGE.obj || !clip.path) {
+      // 목업: 화면에서만 지워 그룹 재배치를 확인한다
+      state.clips = state.clips.filter((c) => c.stem !== clip.stem);
+      renderGrid();
+      setStatus("(목업) 삭제: " + clip.stem);
+      return;
+    }
+    const folder = document.querySelector('[data-field="folder"]').value;
+    bcall("delete_clip", JSON.stringify({ folder: folder, path: clip.path }), (res) => {
+      if (res.ok) {
+        setStatus("삭제: " + res.data.removed.join(", "), "ok");
+        loadClipsFromBridge();
       } else setStatus(res.error, "error");
     });
   } else if (action === "mixer") {
@@ -954,9 +1175,11 @@ document.addEventListener("click", (e) => {
 });
 
 document.querySelector('[data-field="search"]').addEventListener("input", renderGrid);
+document.querySelector('[data-field="target"]').addEventListener("change", updateImportButton);
 
 /* ---------- 시작 ---------- */
 state.clips = DUMMY_CLIPS;
+state.categories = DUMMY_CATEGORIES;
 renderGrid();
 renderTimeline();
 drawSpeed();

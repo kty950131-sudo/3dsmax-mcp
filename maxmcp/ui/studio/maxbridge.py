@@ -129,6 +129,74 @@ def import_clip(
     return msg
 
 
+def retarget_clip(
+    src_path: str,
+    bip_name: str,
+    convert: bool,
+    speed: float = 1.0,
+    trim: tuple[float, float] = (0.0, 1.0),
+    time_map: Optional[Sequence[float]] = None,
+    mirror: bool = False,
+) -> str:
+    """기존 바이패드에 클립을 올린다 — 새로 만들지 않는다.
+
+    convert 가 켜져 있으면 대상 바이패드의 현재 X 위치를 변환 오프셋으로 구워
+    애니메이션을 바꿔도 씬 배치가 유지된다 (BVH 루트 좌표로 순간이동하지 않게).
+    """
+    if not os.path.isfile(src_path):
+        return f"ERROR: file not found: {src_path}"
+
+    rt = _rt()
+    bip = rt.getNodeByName(bip_name)
+    if bip is None:
+        return f"ERROR: 바이패드를 찾을 수 없음: {bip_name}"
+    controller = _tm_controller(rt, bip)
+    if rt.classOf(controller) != rt.Vertical_Horizontal_Turn:
+        return f"ERROR: not a biped root: {bip_name}"
+    if controller.figureMode:
+        return f"ERROR: 피겨 모드를 먼저 해제하세요: {bip_name}"
+    if controller.mixerMode:
+        controller.mixerMode = False
+
+    load_path = src_path
+    upright = True
+    if convert:
+        try:
+            x_offset = float(bip.transform.position.x)
+            load_path, upright = convert_clip(src_path, x_offset, speed, trim, time_map)
+        except Exception as exc:
+            return f"ERROR: convert failed: {exc}"
+
+    # 스튜디오가 만든 ArmSpace 레이어는 새 클립 위에 겹쳐 팔을 또 벌린다 — 지우고 시작
+    for i in range(int(rt.biped.numLayers(controller)), 0, -1):
+        if rt.biped.getLayerName(controller, i) == "ArmSpace":
+            rt.biped.deleteLayer(controller, i)
+
+    old_quiet = rt.setQuietMode(True)
+    ok = False
+    try:
+        ok = rt.biped.loadMocapFile(controller, load_path)
+    except Exception:
+        ok = False
+    finally:
+        rt.setQuietMode(old_quiet)
+
+    if not ok:
+        # 기존 바이패드는 사용자 소유다 — 실패해도 지우지 않는다
+        return f"ERROR: loadMocapFile rejected {load_path}"
+
+    if mirror:
+        try:
+            rt.biped.mirror(controller)
+        except Exception:
+            pass
+
+    msg = f"OK: {bip.name} 애니메이션 교체"
+    if not upright:
+        msg += " | 경고: T포즈 골격이 아님(_tpose 파일 권장) — 자세가 틀어질 수 있음"
+    return msg
+
+
 class _animate:
     """``animate on`` 블록의 파이썬 대응."""
 

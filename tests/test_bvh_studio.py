@@ -581,3 +581,194 @@ def test_load_pose_data_recomputes_when_clip_mtime_changes(tmp_path) -> None:
     os.utime(str(clip), (future, future))
     data = load_pose_data(str(clip), str(cache_dir))
     assert data["frames"] == 2
+
+
+# ---- 기존 바이패드 리타깃 (retarget_clip) ----
+# maxbridge 는 pymxs 전용이지만 _rt() 를 통해서만 런타임을 만지므로
+# 가짜 런타임을 꽂아 Max 밖에서도 분기 로직을 검증할 수 있다.
+
+from unittest.mock import MagicMock
+
+from maxmcp.ui.studio import maxbridge
+
+
+def _fake_rt(load_ok: bool = True, figure_mode: bool = False) -> MagicMock:
+    rt = MagicMock()
+    rt.classOf.return_value = rt.Vertical_Horizontal_Turn
+    controller = rt.getTMController.return_value
+    controller.figureMode = figure_mode
+    controller.mixerMode = False
+    rt.biped.loadMocapFile.return_value = load_ok
+    rt.biped.numLayers.return_value = 0
+    rt.getNodeByName.return_value.name = "Bip_walk"
+    return rt
+
+
+def test_studio_page_exposes_retarget_controls() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-field="target"' in html
+    assert "retarget_clip" in html
+    assert "새 바이패드 생성" in html
+
+
+def test_retarget_clip_requires_existing_biped(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    rt.getNodeByName.return_value = None
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.retarget_clip(str(src), "Bip_none", convert=False)
+    assert msg.startswith("ERROR")
+    rt.biped.loadMocapFile.assert_not_called()
+
+
+def test_retarget_clip_loads_onto_existing_controller(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
+    assert msg.startswith("OK")
+    rt.biped.createNew.assert_not_called()
+    rt.biped.loadMocapFile.assert_called_once()
+    rt.delete.assert_not_called()
+
+
+def test_retarget_clip_rejects_figure_mode(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt(figure_mode=True)
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
+    assert msg.startswith("ERROR")
+    rt.biped.loadMocapFile.assert_not_called()
+
+
+def test_retarget_clip_keeps_biped_on_load_failure(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt(load_ok=False)
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
+    assert msg.startswith("ERROR")
+    # 기존 바이패드는 사용자 소유다 — 실패해도 지우지 않는다 (import_clip 과 다른 점)
+    rt.delete.assert_not_called()
+
+
+def test_retarget_clip_bakes_current_position_into_offset(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    rt.getNodeByName.return_value.transform.position.x = 42.0
+    seen: dict = {}
+
+    def fake_convert(path, x_offset=0.0, speed=1.0, trim=(0.0, 1.0), time_map=None):
+        seen["x_offset"] = x_offset
+        return path, True
+
+    monkeypatch.setattr(maxbridge, "convert_clip", fake_convert)
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=True)
+    assert msg.startswith("OK")
+    # 제자리 유지: 대상 바이패드의 현재 X 를 변환 오프셋으로 굽는다
+    assert seen["x_offset"] == 42.0
+
+
+def test_curve_panels_use_figma_design_tokens() -> None:
+    """커브 패널은 피그마 정본(BVH Studio / Tracking Editor) 디자인 언어를 따른다.
+
+    스펙: docs/superpowers/specs/2026-08-10-bvh-studio-2d-tracking-editor-design.md
+    — 배경 #08090B, 정상 #48A9C5, 선택 #F5B642, Noto Sans KR, Ease Out 160–240ms.
+    """
+    html = STUDIO_PAGE.read_text(encoding="utf-8").lower()
+    assert "#08090b" in html
+    assert "#f5b642" in html
+    assert "noto sans kr" in html
+
+
+# ---- 라이브러리 분류 (artoke-manifest.json 사이드카) ----
+
+def test_scan_attaches_category_from_sidecar(tmp_path) -> None:
+    (tmp_path / "artoke_run-jump.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    (tmp_path / "my-local-take.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    (tmp_path / "artoke-manifest.json").write_text(
+        json.dumps(
+            {
+                "categories": [
+                    {"slug": "locomotion", "label": "이동",
+                     "subs": [{"slug": "run", "label": "달리기"}]}
+                ],
+                "motions": [
+                    {"name": "run-jump.bvh", "category": "locomotion", "sub": "run"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    from maxmcp.ui.studio.library import scan
+
+    clips = {c.stem: c for c in scan(str(tmp_path))}
+    assert clips["artoke_run-jump"].category == "locomotion"
+    assert clips["artoke_run-jump"].sub == "run"
+    # 로컬에서 만든 클립은 매니페스트에 없다 — 미분류로 남는다
+    assert clips["my-local-take"].category is None
+
+
+def test_scan_without_sidecar_leaves_clips_unshelved(tmp_path) -> None:
+    (tmp_path / "solo.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    from maxmcp.ui.studio.library import scan
+
+    clips = scan(str(tmp_path))
+    assert clips[0].category is None and clips[0].sub is None
+
+
+def test_studio_page_groups_clips_by_category() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "미분류" in html
+    assert "clip-group" in html
+    # list_clips 가 {clips, categories} 를 돌려주는 새 형태를 쓴다
+    assert "data.clips" in html
+
+
+# ---- 클립 삭제 (로컬 전용 — 사이트에는 아무 요청도 보내지 않는다) ----
+
+def test_delete_clip_removes_bvh_and_biped_sibling(tmp_path) -> None:
+    clip = tmp_path / "old-take.bvh"
+    clip.write_text(TWO_JOINT, encoding="utf-8")
+    (tmp_path / "old-take_biped.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    from maxmcp.ui.studio.library import delete_clip
+
+    out = delete_clip(str(tmp_path), str(clip))
+    assert sorted(out["removed"]) == ["old-take.bvh", "old-take_biped.bvh"]
+    assert not clip.exists()
+    assert not (tmp_path / "old-take_biped.bvh").exists()
+
+
+def test_delete_clip_refuses_paths_outside_folder(tmp_path) -> None:
+    outside = tmp_path / "outside.bvh"
+    outside.write_text(TWO_JOINT, encoding="utf-8")
+    library_dir = tmp_path / "lib"
+    library_dir.mkdir()
+    from maxmcp.ui.studio.library import delete_clip
+
+    with pytest.raises(ValueError):
+        delete_clip(str(library_dir), str(outside))
+    assert outside.exists()
+
+
+def test_delete_clip_refuses_non_bvh(tmp_path) -> None:
+    target = tmp_path / "artoke-manifest.json"
+    target.write_text("{}", encoding="utf-8")
+    from maxmcp.ui.studio.library import delete_clip
+
+    with pytest.raises(ValueError):
+        delete_clip(str(tmp_path), str(target))
+    assert target.exists()
+
+
+def test_studio_page_exposes_delete_confirm() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "정말로 삭제하겠습니다" in html
+    assert "delete_clip" in html
+    assert "contextmenu" in html
+    assert "홈페이지에는 영향" in html
