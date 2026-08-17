@@ -870,3 +870,21 @@ def test_studio_page_shows_categories_as_chips() -> None:
     assert "renderCategoryBar" in html
     # 드롭다운은 걷어낸다 — 같은 필터가 두 곳에 있으면 상태가 갈린다
     assert "<select data-field=\"category\"" not in html
+
+
+def test_clip_card_shows_length_instead_of_repeating_the_name() -> None:
+    """카드 둘째 줄은 파일명을 다시 쓰지 않는다 — 길이를 보여준다.
+
+    태그는 stem 을 "_" 로 쪼갠 것이라(artoke_run-b -> artoke · run-b) 첫 줄과
+    같은 정보였다. 길이는 클립을 고를 때 실제로 필요한 정보다.
+    """
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "clipMeta" in html
+    assert 'clip.tags.join(" · ")' not in html
+
+
+def test_side_panel_scrolls_so_import_controls_are_reachable() -> None:
+    """오른쪽 열이 창보다 길면 스크롤한다 — 임포트 버튼이 잘리면 못 쓴다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    side = html.split(".side {", 1)[1].split("}", 1)[0]
+    assert "overflow-y" in side

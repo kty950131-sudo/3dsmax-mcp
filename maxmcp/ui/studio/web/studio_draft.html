@@ -150,7 +150,10 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 .clip-card.is-rendered .thumb-badge { display: block; }
 
 /* 우측 패널 */
-.side { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+/* 오른쪽 열은 창보다 길어질 수 있다 — 프리뷰·임포트·임포트 후가 세로로 쌓인다.
+   넘치는 걸 그냥 두면 맨 아래 "임포트 후" 가 창 밖으로 잘려서 바이패드를
+   고를 수가 없다. 스크롤을 주고 프리뷰는 최소 높이 밑으로 안 줄어들게 한다. */
+.side { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow-y: auto; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
 .card h2 { margin: 0 0 8px; font-size: 12px; color: var(--dim); font-weight: 600; letter-spacing: .04em; }
 .row { display: flex; gap: 6px; align-items: center; margin-bottom: 7px; }
@@ -589,6 +592,7 @@ function poseFor(stem) {
         if (card) {
           if (!res.ok) { card.classList.add("is-broken"); card.title = res.error; }
           drawPose(card.querySelector("canvas"), state.poseCache.get(stem), posterOf(stem), 0);
+          card.querySelector(".tags").textContent = clipMeta(stem);
         }
       });
     }
@@ -765,8 +769,19 @@ function makeCard(clip) {
     "<canvas></canvas><span class='thumb-badge'>MAX</span>" +
     "<div class='name'></div><div class='tags'></div>";
   card.querySelector(".name").textContent = clip.stem;
-  card.querySelector(".tags").textContent = clip.tags.join(" · ");
+  card.querySelector(".tags").textContent = clipMeta(clip.stem);
   return card;
+}
+
+/* 카드 둘째 줄. 태그(stem 을 "_" 로 쪼갠 것)는 첫 줄과 같은 말이라 자리만
+   먹었다 — artoke_run-b 아래에 "artoke · run-b". 대신 길이를 보여준다:
+   6초짜리와 2초짜리를 누르지 않고 구분할 수 있어야 고르는 값이 있다.
+   포즈는 비동기라 도착 전에는 점을 찍어 두고, 도착하면 그 카드만 고친다. */
+function clipMeta(stem) {
+  const data = state.poseCache.get(stem);
+  if (data === null) return "파싱 실패";
+  if (!data) return "…";
+  return data.frames + "프레임 · " + (data.frames * data.frame_time).toFixed(1) + "초";
 }
 
 /* 헤더 카테고리 필터의 "미분류" 값. 빈 문자열은 "전체"라 쓸 수 없다. */
@@ -867,6 +882,9 @@ function renderGrid() {
     for (const card of cards.children) {
       const stem = card.dataset.stem;
       drawPose(card.querySelector("canvas"), poseFor(stem), posterOf(stem), 0);
+      // poseFor 뒤에 다시 쓴다 — makeCard 시점에는 아직 포즈를 요청하기 전이라
+      // 캐시가 비어 있다. 브리지에서는 여기서도 아직 "…" 이고 콜백이 채운다.
+      card.querySelector(".tags").textContent = clipMeta(stem);
     }
   }
 }
