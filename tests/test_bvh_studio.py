@@ -847,6 +847,28 @@ def test_studio_search_is_not_trapped_inside_the_open_shelf() -> None:
     assert "function shelfLabels(clip)" in html
 
 
+def test_recent_folders_can_be_removed_from_the_list() -> None:
+    """클립 카드와 같은 몸짓 — 우클릭 후 확인 상자."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'querySelector(\'[data-field="folder-list"]\').addEventListener("contextmenu"' in html
+    assert "function forgetFolder(folder)" in html
+    # 폴더가 지워진다고 읽힐 수 있어 문구로 못을 박는다
+    assert "폴더와 그 안의 클립은 그대로입니다" in html
+    # 버튼 문구도 동작에 맞춰야 한다 — "정말로 삭제" 는 목록 정리에 과하다
+    assert '"목록에서 지우기"' in html
+
+
+def test_confirm_box_carries_one_pending_action() -> None:
+    """확인 상자가 두 가지를 받는다. 종류별 슬롯을 두면 둘 다 찬 상태가 생긴다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "function openConfirm(text, note, run, label)" in html
+    assert "state.pendingConfirm = { run: run };" in html
+    # 확인 버튼은 무엇을 할지 모른 채 대기 중인 동작만 실행한다
+    assert "if (pending) pending.run();" in html
+    # 모달 안의 클릭은 뒤의 목록을 접지 않는다 — 여러 개를 이어서 정리해야 한다
+    assert 'e.target.closest(".confirm-overlay")' in html
+
+
 def test_studio_page_remembers_folders() -> None:
     """폴더는 타이핑 말고 고를 수 있어야 한다."""
     html = STUDIO_PAGE.read_text(encoding="utf-8")

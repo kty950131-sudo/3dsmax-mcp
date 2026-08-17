@@ -840,12 +840,25 @@ function folderHistory() {
   }
 }
 
+function saveFolderHistory(list) {
+  try { localStorage.setItem(FOLDER_HISTORY_KEY, JSON.stringify(list)); } catch (e) {}
+  return list;
+}
+
 function rememberFolder(folder) {
   if (!folder) return;
   const key = folder.toLowerCase();
-  const next = [folder, ...folderHistory().filter((v) => v.toLowerCase() !== key)]
-    .slice(0, FOLDER_HISTORY_MAX);
-  try { localStorage.setItem(FOLDER_HISTORY_KEY, JSON.stringify(next)); } catch (e) {}
+  return saveFolderHistory(
+    [folder, ...folderHistory().filter((v) => v.toLowerCase() !== key)]
+      .slice(0, FOLDER_HISTORY_MAX)
+  );
+}
+
+/* 목록에서만 뺀다. 폴더도 그 안의 클립도 건드리지 않는다 — 이름이 "삭제" 라
+   폴더가 지워지는 것으로 읽힐 수 있어, 확인 문구에서 그 점을 분명히 한다. */
+function forgetFolder(folder) {
+  const key = folder.toLowerCase();
+  return saveFolderHistory(folderHistory().filter((v) => v.toLowerCase() !== key));
 }
 
 function renderFolderHistory() {
@@ -1432,20 +1445,60 @@ grid.addEventListener("click", (e) => {
    보내지 않는다. */
 const confirmOverlay = document.querySelector(".confirm-overlay");
 
-function openDeleteConfirm(clip) {
-  state.pendingDelete = clip;
-  confirmOverlay.querySelector(".confirm-text").textContent =
-    "“" + clip.stem + "” 모션을 삭제할까요?";
-  let note = "라이브러리 폴더에서만 지워집니다 — 홈페이지에는 영향이 없습니다.";
-  if (clip.stem.startsWith("artoke_"))
-    note += "\nArtoke 동기화를 다시 하면 이 클립은 다시 받아집니다.";
+/* 확인 상자는 이제 두 가지를 받는다 — 클립 삭제와 최근 폴더 목록 정리. 무엇을
+   할지는 부르는 쪽이 함수로 넘긴다. 종류별로 pending 슬롯을 따로 두면 둘 다
+   차 있는 상태가 생길 수 있어서, 대기 중인 동작은 언제나 하나다. */
+function openConfirm(text, note, run, label) {
+  state.pendingConfirm = { run: run };
+  confirmOverlay.querySelector(".confirm-text").textContent = text;
   confirmOverlay.querySelector(".confirm-note").textContent = note;
+  confirmOverlay.querySelector('[data-action="confirm-delete"]').textContent =
+    label || "정말로 삭제하겠습니다";
   confirmOverlay.classList.add("is-open");
 }
 
-function closeDeleteConfirm() {
-  state.pendingDelete = null;
+function closeConfirm() {
+  state.pendingConfirm = null;
   confirmOverlay.classList.remove("is-open");
+}
+
+function openDeleteConfirm(clip) {
+  let note = "라이브러리 폴더에서만 지워집니다 — 홈페이지에는 영향이 없습니다.";
+  if (clip.stem.startsWith("artoke_"))
+    note += "\nArtoke 동기화를 다시 하면 이 클립은 다시 받아집니다.";
+  openConfirm("“" + clip.stem + "” 모션을 삭제할까요?", note, () => deleteClip(clip));
+}
+
+function openForgetFolderConfirm(folder) {
+  openConfirm(
+    "“" + folder + "” 를 최근 목록에서 지울까요?",
+    "목록에서만 빠집니다 — 폴더와 그 안의 클립은 그대로입니다.\n" +
+      "그 폴더를 다시 열면 목록에 다시 들어옵니다.",
+    () => {
+      forgetFolder(folder);
+      setFolderListOpen(true);  // 여러 개를 이어서 정리할 수 있게 열어 둔다
+      setStatus("최근 목록에서 뺐습니다: " + folder);
+    },
+    "목록에서 지우기"
+  );
+}
+
+function deleteClip(clip) {
+  if (clip.stem === state.selected) state.selected = null;
+  if (!BRIDGE.obj || !clip.path) {
+    // 목업: 화면에서만 지워 그룹 재배치를 확인한다
+    state.clips = state.clips.filter((c) => c.stem !== clip.stem);
+    renderGrid();
+    setStatus("(목업) 삭제: " + clip.stem);
+    return;
+  }
+  const folder = document.querySelector('[data-field="folder"]').value;
+  bcall("delete_clip", JSON.stringify({ folder: folder, path: clip.path }), (res) => {
+    if (res.ok) {
+      setStatus("삭제: " + res.data.removed.join(", "), "ok");
+      loadClipsFromBridge();
+    } else setStatus(res.error, "error");
+  });
 }
 
 grid.addEventListener("contextmenu", (e) => {
@@ -1456,9 +1509,17 @@ grid.addEventListener("contextmenu", (e) => {
   if (clip) openDeleteConfirm(clip);
 });
 
+/* 최근 폴더도 카드와 같은 몸짓으로 지운다 — 우클릭 후 확인. */
+document.querySelector('[data-field="folder-list"]').addEventListener("contextmenu", (e) => {
+  const entry = e.target.closest("button[data-folder]");
+  if (!entry) return;
+  e.preventDefault();
+  openForgetFolderConfirm(entry.dataset.folder);
+});
+
 /* 상자 바깥 클릭 = 취소 */
 confirmOverlay.addEventListener("click", (e) => {
-  if (e.target === confirmOverlay) closeDeleteConfirm();
+  if (e.target === confirmOverlay) closeConfirm();
 });
 
 /* ---------- 타임라인 ---------- */
@@ -1782,26 +1843,11 @@ document.addEventListener("click", (e) => {
   } else if (action === "toggle-curves") {
     setCurvesOpen(!state.curvesOpen);
   } else if (action === "confirm-cancel") {
-    closeDeleteConfirm();
+    closeConfirm();
   } else if (action === "confirm-delete") {
-    const clip = state.pendingDelete;
-    closeDeleteConfirm();
-    if (!clip) return;
-    if (clip.stem === state.selected) state.selected = null;
-    if (!BRIDGE.obj || !clip.path) {
-      // 목업: 화면에서만 지워 그룹 재배치를 확인한다
-      state.clips = state.clips.filter((c) => c.stem !== clip.stem);
-      renderGrid();
-      setStatus("(목업) 삭제: " + clip.stem);
-      return;
-    }
-    const folder = document.querySelector('[data-field="folder"]').value;
-    bcall("delete_clip", JSON.stringify({ folder: folder, path: clip.path }), (res) => {
-      if (res.ok) {
-        setStatus("삭제: " + res.data.removed.join(", "), "ok");
-        loadClipsFromBridge();
-      } else setStatus(res.error, "error");
-    });
+    const pending = state.pendingConfirm;
+    closeConfirm();
+    if (pending) pending.run();
   } else if (action === "mixer") {
     if (!BRIDGE.obj) { setStatus("(목업) Motion Mixer 전송"); return; }
     const sel = document.querySelector('[data-field="biped"]');
@@ -1835,11 +1881,17 @@ document.querySelector('[data-field="folder-list"]').addEventListener("click", (
 });
 
 // 바깥을 누르거나 Esc 로 닫는다. 열어 두면 그리드를 가린다.
+// 확인 상자 안의 클릭은 바깥이 아니다 — 목록에서 항목을 지우는 중이라 뒤의
+// 목록이 접히면 여러 개를 이어서 정리할 수 없다.
 document.addEventListener("click", (e) => {
-  if (!e.target.closest(".folder-field")) setFolderListOpen(false);
+  if (e.target.closest(".folder-field") || e.target.closest(".confirm-overlay")) return;
+  setFolderListOpen(false);
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") setFolderListOpen(false);
+  if (e.key !== "Escape") return;
+  // 모달이 떠 있으면 그것만 닫는다. 뒤의 목록까지 같이 접으면 다시 열어야 한다.
+  if (state.pendingConfirm) { closeConfirm(); return; }
+  setFolderListOpen(false);
 });
 
 document.querySelector(".shelf-chips").addEventListener("click", (e) => {
