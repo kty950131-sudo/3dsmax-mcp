@@ -888,3 +888,29 @@ def test_side_panel_scrolls_so_import_controls_are_reachable() -> None:
     html = STUDIO_PAGE.read_text(encoding="utf-8")
     side = html.split(".side {", 1)[1].split("}", 1)[0]
     assert "overflow-y" in side
+
+
+def test_studio_page_can_collapse_the_curve_editors() -> None:
+    """곡선은 접힌다 — 창 높이의 20%를 상시 먹는데 클립을 고르는 동안은 할 일이 없다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-action="toggle-curves"' in html
+    assert "curve-panel" in html
+    # 접은 선택은 기억한다. 매번 다시 접어야 하면 접는 의미가 없다.
+    assert "localStorage" in html
+
+
+def test_collapsed_curves_advertise_a_speed_curve_that_is_not_identity() -> None:
+    """접어도 속도 곡선이 임포트에 걸려 있으면 보여야 한다.
+
+    speedPoints 는 time_map 으로 임포트에 실제로 전달된다. 접어서 안 보이면
+    "왜 이 클립만 느리게 들어오지"의 원인을 찾을 방법이 사라진다.
+    """
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "curve-summary" in html
+    assert "curveSummary" in html
+
+
+def test_timeline_is_not_collapsible() -> None:
+    """타임라인은 40px 뿐이고 트림 상태를 늘 보여준다 — 숨길 이유가 없다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-action="toggle-timeline"' not in html
