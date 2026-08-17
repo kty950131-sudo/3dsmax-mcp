@@ -796,6 +796,19 @@ def test_broken_local_shelf_does_not_lose_the_site_shelf(tmp_path) -> None:
     assert scan(str(tmp_path))[0].category == "locomotion"
 
 
+def test_studio_page_remembers_folders() -> None:
+    """폴더는 타이핑 말고 고를 수 있어야 한다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-action="folder-history"' in html
+    assert 'data-field="folder-list"' in html
+    # 클립이 실제로 있던 폴더만 기억한다 — 오타 경로가 쌓이면 목록이 쓸모없어진다
+    assert "rememberFolder(folder);" in html
+    # 창을 다시 열면 마지막 폴더에서 이어진다
+    assert "folderHistory()[0]" in html
+    # 입력칸은 남는다 — 목록에 없는 새 폴더도 열 수 있어야 한다
+    assert 'input type="text" data-field="folder"' in html
+
+
 def test_launch_forgets_stale_maxmcp_modules() -> None:
     """다시 실행할 때 이전 세션 모듈을 캐시에서 지운다.
 

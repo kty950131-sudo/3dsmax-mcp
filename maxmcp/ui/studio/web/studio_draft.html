@@ -81,7 +81,25 @@ input[type="text"], input[type="number"], select {
   border-radius: 4px;
   font: inherit;
 }
-input[data-field="folder"] { flex: 1 1 320px; min-width: 200px; }
+/* 폴더 칸 + 최근 목록. 목록은 입력칸 아래에 떠야 해서 감싸는 쪽이 기준이 된다. */
+.folder-field { position: relative; display: flex; flex: 1 1 320px; min-width: 200px; }
+.folder-field input[data-field="folder"] { flex: 1 1 auto; min-width: 0; border-radius: 4px 0 0 4px; }
+.folder-drop { border-radius: 0 4px 4px 0; padding: 0 9px; margin-left: -1px; }
+.folder-list {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20;
+  background: #2c2c31; border: 1px solid var(--line); border-radius: 5px;
+  padding: 4px; max-height: 240px; overflow-y: auto;
+  box-shadow: 0 8px 20px rgba(0,0,0,.45);
+}
+.folder-list[hidden] { display: none; }
+.folder-list button {
+  display: block; width: 100%; text-align: left; background: transparent;
+  border: 0; color: var(--text); padding: 5px 8px; border-radius: 3px;
+  font: inherit; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.folder-list button:hover { background: #37373d; }
+.folder-list .empty { color: var(--dim); padding: 5px 8px; }
 input[data-field="search"] { flex: 0 1 180px; }
 
 /* 8방향 블렌드. 위쪽 임포트 설정을 공유하므로 같은 카드 안에 두되, 선 하나로
@@ -288,7 +306,15 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 <body>
 
 <div class="topbar">
-  <input type="text" data-field="folder" value="C:\work\Ai\bvh-library" spellcheck="false">
+  <!-- 폴더는 타이핑 말고 고르게 한다. 로컬 클립 폴더와 동기화본 폴더를 오가며
+       견주는 일이 잦은데, 매번 경로를 치면 오타 하나로 "폴더에 .bvh 가 없습니다"
+       를 보게 된다. -->
+  <div class="folder-field">
+    <input type="text" data-field="folder" value="C:\work\Ai\bvh-library" spellcheck="false">
+    <button class="folder-drop" data-action="folder-history"
+            aria-label="최근 연 폴더" aria-expanded="false" title="최근 연 폴더">▾</button>
+    <div class="folder-list" data-field="folder-list" hidden></div>
+  </div>
   <button data-action="refresh">새로고침</button>
   <button data-action="sync">Artoke에서 가져오기</button>
   <button class="video-add" data-action="add-video">영상 추가</button>
@@ -799,12 +825,68 @@ function refreshBlendTiers() {
   });
 }
 
+const FOLDER_HISTORY_KEY = "bvhStudio.folders";
+const FOLDER_HISTORY_MAX = 8;
+
+/* 최근 연 폴더. 클립이 실제로 있던 폴더만 기억한다 — 오타로 아무것도 못 읽은
+   경로까지 남기면 목록이 금세 쓰레기가 되고, 그러면 고르는 값이 없어진다.
+   윈도 경로는 대소문자를 구분하지 않으므로 중복 판정도 그렇게 한다. */
+function folderHistory() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(FOLDER_HISTORY_KEY) || "[]");
+    return Array.isArray(saved) ? saved.filter((v) => typeof v === "string" && v) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function rememberFolder(folder) {
+  if (!folder) return;
+  const key = folder.toLowerCase();
+  const next = [folder, ...folderHistory().filter((v) => v.toLowerCase() !== key)]
+    .slice(0, FOLDER_HISTORY_MAX);
+  try { localStorage.setItem(FOLDER_HISTORY_KEY, JSON.stringify(next)); } catch (e) {}
+}
+
+function renderFolderHistory() {
+  const list = document.querySelector('[data-field="folder-list"]');
+  const current = (document.querySelector('[data-field="folder"]').value || "").toLowerCase();
+  // 지금 열려 있는 폴더는 뺀다 — 고르면 아무 일도 안 일어나는 항목이다.
+  const entries = folderHistory().filter((v) => v.toLowerCase() !== current);
+  list.innerHTML = "";
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "최근 연 폴더가 없습니다";
+    list.appendChild(empty);
+    return;
+  }
+  for (const folder of entries) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.folder = folder;
+    button.textContent = folder;
+    button.title = folder;
+    list.appendChild(button);
+  }
+}
+
+function setFolderListOpen(open) {
+  const list = document.querySelector('[data-field="folder-list"]');
+  if (open) renderFolderHistory();
+  list.hidden = !open;
+  document
+    .querySelector('[data-action="folder-history"]')
+    .setAttribute("aria-expanded", String(open));
+}
+
 function loadClipsFromBridge(selectPath) {
   const folder = document.querySelector('[data-field="folder"]').value;
   state.folder = folder;
   refreshBlendTiers();
   bcall("list_clips", folder, (res) => {
     if (res.ok && res.data.clips.length) {
+      rememberFolder(folder);
       state.clips = res.data.clips;
       state.categories = res.data.categories || [];
       state.poseCache.clear();
@@ -1545,6 +1627,8 @@ document.addEventListener("click", (e) => {
   if (action === "azimuth") {
     state.azimuth = Number(btn.dataset.deg);
     setStatus("방위각 " + state.azimuth + "°");
+  } else if (action === "folder-history") {
+    setFolderListOpen(document.querySelector('[data-field="folder-list"]').hidden);
   } else if (action === "refresh") {
     state.poseCache.clear();
     if (BRIDGE.obj) loadClipsFromBridge();
@@ -1657,6 +1741,25 @@ document.querySelector('[data-field="search"]').addEventListener("input", render
 /* 세 줄을 감싼 곳에서 한 번에 받는다. 위 단계를 바꾸면 아래 단계는 푼다 —
    "공격>돌진>시작" 을 보다가 "이동" 으로 옮겼는데 돌진/시작이 남아 있으면
    아무것도 안 나오고, 왜 비었는지는 화면에 안 적혀 있다. */
+document.querySelector('[data-field="folder-list"]').addEventListener("click", (e) => {
+  const picked = e.target.closest("button[data-folder]");
+  if (!picked) return;
+  document.querySelector('[data-field="folder"]').value = picked.dataset.folder;
+  setFolderListOpen(false);
+  // 고르는 것과 여는 것을 나누지 않는다 — 고르고 나서 새로고침을 또 눌러야 하면
+  // 목록에서 고른 의미가 없다.
+  if (BRIDGE.obj) loadClipsFromBridge();
+  else setStatus("Max 브리지가 없어 폴더만 바꿨습니다: " + picked.dataset.folder);
+});
+
+// 바깥을 누르거나 Esc 로 닫는다. 열어 두면 그리드를 가린다.
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".folder-field")) setFolderListOpen(false);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") setFolderListOpen(false);
+});
+
 document.querySelector(".shelf-chips").addEventListener("click", (e) => {
   const chip = e.target.closest(".cat-chip");
   if (!chip) return;
@@ -1696,6 +1799,13 @@ drawArm();
 renderCurvePanel();
 renderBlendControls();
 window.addEventListener("resize", () => { renderTimeline(); drawSpeed(); drawArm(); });
+
+/* 마지막으로 열었던 폴더로 시작한다. 매번 기본 폴더로 돌아가면 다른 폴더에서
+   일하던 사람은 창을 열 때마다 경로를 다시 쳐야 한다 — 브리지가 붙는 즉시 이
+   값으로 읽으므로, 하던 자리에서 이어진다. */
+const lastFolder = folderHistory()[0];
+if (lastFolder) document.querySelector('[data-field="folder"]').value = lastFolder;
+
 if (!connectBridge())
   setStatus("더미 데이터로 동작 중입니다 — Max 브리지 없음. 클립을 고르세요.");
 </script>
