@@ -19,6 +19,9 @@ from typing import Optional
 
 from maxmcp.helpers.github_sync import DEFAULT_PREFIX, plan_sync
 
+# 블렌드가 찾는 이름과 같아야 한다 — 여기서 받는 파일을 저쪽이 읽는다.
+from maxmcp.helpers.blend import PHASE_NAME
+
 DEFAULT_BASE = "https://artoke.com/motions"
 _TIMEOUT = 30
 
@@ -66,9 +69,26 @@ def sync_motions(
     """
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
+
+    # phase.json 은 모션이 아니라 매니페스트 항목에 없다. 그런데 블렌드가 발접지 위상
+    # 없이는 돌지 못하니 같은 base 에서 따로 받는다. ETag 304 로 조기 반환하는 경로에서도
+    # 빠지지 않도록 매니페스트보다 먼저 받는다 — 모션이 그대로여도 위상 파일이 로컬에
+    # 없을 수 있다. 실패는 치명적이지 않다: 블렌드만 못 쓰고 나머지 동기화는 성립한다.
+    phase_warning: Optional[str] = None
+    try:
+        download_motion(PHASE_NAME, dest / PHASE_NAME, base=base)
+    except Exception as error:  # noqa: BLE001 - 네트워크 실패로 동기화 전체를 깨지 않는다
+        phase_warning = f"{PHASE_NAME} 를 받지 못했습니다: {error}"
+
     manifest, new_etag = fetch_manifest(base, etag)
     if manifest is None:
-        return {"downloaded": [], "remote_total": -1, "etag": new_etag, "unchanged": True}
+        return {
+            "downloaded": [],
+            "remote_total": -1,
+            "etag": new_etag,
+            "unchanged": True,
+            "phase_warning": phase_warning,
+        }
     remote = manifest["motions"]
     local_sizes = {p.name: p.stat().st_size for p in dest.glob("*.bvh")}
     todo = plan_sync(remote, local_sizes, prefix)
@@ -83,4 +103,5 @@ def sync_motions(
         "remote_total": len(remote),
         "etag": new_etag,
         "unchanged": False,
+        "phase_warning": phase_warning,
     }

@@ -68,6 +68,50 @@ class StudioBridge(QtCore.QObject):
         return reply(lambda: load_pose_data(clip_path, self._cache_dir))
 
     @QtCore.Slot(str, result=str)
+    def blend_tiers(self, folder: str) -> str:
+        """이 폴더에서 블렌드에 쓸 수 있는 속도층 목록. 없으면 빈 목록.
+
+        위상 파일이 있는지도 같이 알려준다 — 없으면 발접지 정렬 없이 섞게 되고 발이
+        엇갈린 클립이 나오므로, UI 가 그 이유를 말하며 잠글 수 있어야 한다.
+        """
+
+        def run() -> dict:
+            from maxmcp.helpers.blend import MANIFEST_NAME, PHASE_NAME, discover_tiers
+
+            manifest_path = os.path.join(folder, MANIFEST_NAME)
+            if not os.path.exists(manifest_path):
+                return {"tiers": [], "hasPhase": False}
+            with open(manifest_path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            entries = manifest["motions"] if isinstance(manifest, dict) else manifest
+            return {
+                "tiers": discover_tiers(entries),
+                "hasPhase": os.path.exists(os.path.join(folder, PHASE_NAME)),
+            }
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def bake_blend(self, payload_json: str) -> str:
+        """8방향 세트를 임의 각도로 굳혀 임시 BVH 로 쓰고 경로를 돌려준다.
+
+        임포트는 하지 않는다. `import_clip` / `retarget_clip` 이 이미 파일 경로를
+        받으므로(`p["path"]`), 여기서 파일 하나만 만들어 주면 바이패드 생성·트림·
+        미러·팔 간격·배치 간격이 전부 그대로 따라온다. pymxs 를 쓰지 않으므로 Max
+        밖에서도 도는 슬롯 구역에 있다.
+        """
+
+        def run() -> dict:
+            from maxmcp.helpers.blend import bake_blend_file
+
+            p = json.loads(payload_json)
+            return bake_blend_file(
+                p["folder"], float(p["angle"]), float(p.get("speed_t", 0.0))
+            )
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
     def delete_clip(self, payload_json: str) -> str:
         """로컬 라이브러리에서 클립 삭제. 사이트에는 아무 요청도 보내지 않는다."""
 

@@ -981,3 +981,44 @@ def test_studio_page_links_blend_preview() -> None:
     assert 'data-action="blend-preview"' in html
     assert "viewer?blend=locomotion" in html
     assert "open_external" in html
+
+
+def test_studio_page_exposes_arbitrary_direction_import() -> None:
+    """45도 간격 여덟 개로는 30도를 줄 수 없다 — 굳혀서 넣는 컨트롤이 있어야 한다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-action="blend-import"' in html
+    assert 'data-field="blend-angle"' in html
+    assert 'data-field="blend-speed"' in html
+    assert "bake_blend" in html
+    assert "blend_tiers" in html
+
+
+def test_studio_blend_import_reuses_the_normal_import_path() -> None:
+    """굳힌 파일도 같은 importPath 를 타야 트림·미러·대상·배치 간격이 갈리지 않는다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert html.count("function importPath(") == 1
+    # 클립 임포트와 블렌드 임포트, 두 곳에서 부른다
+    assert html.count("importPath(") == 3
+    # 새 임포트 경로를 만들지 않았다는 증거: retarget/import 호출이 그 함수 안에만 있다
+    body = html.split("function importPath(")[1].split("\nfunction ")[0]
+    assert 'bcall("retarget_clip"' in body
+    assert 'bcall("import_clip"' in body
+    assert html.count('bcall("retarget_clip"') == 1
+    assert html.count('bcall("import_clip"') == 1
+
+
+def test_studio_blend_import_does_not_reuse_the_source_timeline_edits() -> None:
+    """트림·커브는 6초 소스에 대해 만든 값이라 한 사이클 결과에 걸면 대부분을 잘라낸다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    handler = html.split('action === "blend-import"')[1].split('action === "blend-preview"')[0]
+    assert "trim_start" not in handler
+    assert "time_map" not in handler
+    assert "arm_points" not in handler
+
+
+def test_studio_page_says_why_blending_is_unavailable() -> None:
+    """세트나 위상이 없으면 조용히 감추지 않고 이유를 적는다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    body = html.split("function renderBlendControls")[1].split("\nfunction ")[0]
+    assert "8방향 세트가 없어" in body
+    assert "phase.json" in body

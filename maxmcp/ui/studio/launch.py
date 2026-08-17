@@ -31,13 +31,17 @@ def _new_bridge() -> Any:
     # 함수를 임포트하는 순간 ImportError 로 죽는다 (maxbridge 에 이어 library 의
     # load_shelf 에서 실제로 두 번째로 터졌다). compat 과 _session 은 제외 —
     # Qt 바인딩과 살아 있는 창 핸들은 다시 읽으면 안 된다.
-    from maxmcp.helpers import artoke_sync, github_sync
+    from maxmcp.helpers import artoke_sync, blend, github_sync, quat
     from maxmcp.helpers import bvh as bvh_helpers
     from maxmcp.ui.studio import bridge as bridge_module
     from maxmcp.ui.studio import library, maxbridge, skeleton, thumb, timemap, video_jobs
 
     for module in (
         bvh_helpers,
+        # quat → blend → artoke_sync 순서를 지킨다: blend 가 quat 을 쓰고,
+        # artoke_sync 가 blend 의 PHASE_NAME 을 모듈 최상단에서 가져온다.
+        quat,
+        blend,
         github_sync,
         artoke_sync,
         skeleton,
