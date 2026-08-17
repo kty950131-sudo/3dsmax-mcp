@@ -23,6 +23,8 @@ the ``*_tpose`` export.
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
+from maxmcp.helpers.quat import euler_to_quat, quat_mul, quat_rotate, quat_to_euler
+
 _STATIC_EPS = 1e-4
 
 # Joints Character Studio has no slot for; SMPL-X style exports carry them.
@@ -257,6 +259,111 @@ def prune_joints(bvh: BvhFile, names: tuple[str, ...]) -> BvhFile:
         [v for i, v in enumerate(row) if i not in drop_cols] for row in bvh.frames
     ]
     return BvhFile(root=new_root, frame_time=bvh.frame_time, frames=new_frames)
+
+
+def _axis_values(joint: BvhJoint, row: Sequence[float], start: int, suffix: str):
+    """채널 이름으로 축별 값을 읽는다. 채널 순서를 위치로 가정하지 않는다 —
+    ``Zrotation Yrotation Xrotation`` 과 ``Xrotation Yrotation Zrotation`` 이
+    같은 열 순서를 뜻하지 않기 때문이다."""
+    axes = {"X": 0.0, "Y": 0.0, "Z": 0.0}
+    for index, channel in enumerate(joint.channels):
+        if channel.endswith(suffix):
+            axes[channel[0].upper()] = row[start + index]
+    return axes["X"], axes["Y"], axes["Z"]
+
+
+def _write_axis_values(joint: BvhJoint, row: list, start: int, suffix: str, values) -> None:
+    axes = dict(zip("XYZ", values))
+    for index, channel in enumerate(joint.channels):
+        if channel.endswith(suffix):
+            row[start + index] = axes[channel[0].upper()]
+
+
+def merge_into_parent(bvh: BvhFile, name: str) -> BvhFile:
+    """관절 하나를 부모에 합치고 그 자식들을 부모에 직접 붙인다.
+
+    Character Studio 가 모르는 이름이 필수 체인 중간에 끼어 있으면 파일 전체가
+    거부된다. Max Biped 에서 온 클립의 ``Bip001`` / ``Bip001 Pelvis`` 처럼 실제로는
+    한 관절인 쌍이 그렇다 — BVH 표준에서 그 둘은 ``Hips`` 하나다.
+
+    동작은 버리지 않는다. 합성은 정확하다::
+
+        R_parent' = R_parent · R_child
+        T_parent' = T_parent + R_parent · (O_child + T_child)
+
+    회전은 사원수로 합성한다(각도를 더하면 축이 달라 틀린다). 자식의 rest 오프셋이
+    부모 회전에 딸려 도는 몫은 프레임마다 부모의 위치 채널에 흡수시킨다 — 이 항을
+    빼먹으면 부모가 회전할 때만 어긋나서, 가만히 선 클립에서는 안 보이고 도는
+    클립에서만 틀린다.
+
+    합칠 관절의 자식들은 오프셋도 회전도 그대로 둔다. 위 식이 그 앞의 변환을
+    똑같이 재현하므로 손댈 이유가 없다.
+    """
+    parent = None
+    target = None
+
+    def find(joint: BvhJoint) -> None:
+        nonlocal parent, target
+        for child in joint.children:
+            if child.name == name:
+                parent, target = joint, child
+                return
+            find(child)
+
+    find(bvh.root)
+    if target is None:
+        if bvh.root.name == name:
+            raise ValueError(f"루트({name})는 부모가 없어 합칠 수 없습니다")
+        return bvh
+    if not any(c.endswith("position") for c in parent.channels):
+        raise ValueError(
+            f"{parent.name} 에 위치 채널이 없어 {name} 의 오프셋을 흡수할 수 없습니다"
+        )
+
+    columns = _column_map(bvh.root)
+    parent_start, _ = columns[id(parent)]
+    target_start, target_count = columns[id(target)]
+
+    new_frames: list[list[float]] = []
+    for row in bvh.frames:
+        merged = list(row)
+        px, py, pz = _axis_values(parent, row, parent_start, "rotation")
+        cx, cy, cz = _axis_values(target, row, target_start, "rotation")
+        parent_quat = euler_to_quat(px, py, pz)
+        combined = quat_mul(parent_quat, euler_to_quat(cx, cy, cz))
+        _write_axis_values(parent, merged, parent_start, "rotation", quat_to_euler(combined))
+
+        tx, ty, tz = _axis_values(target, row, target_start, "position")
+        carried = quat_rotate(
+            parent_quat,
+            (target.offset[0] + tx, target.offset[1] + ty, target.offset[2] + tz),
+        )
+        moved = _axis_values(parent, row, parent_start, "position")
+        _write_axis_values(
+            parent, merged, parent_start, "position",
+            (moved[0] + carried[0], moved[1] + carried[1], moved[2] + carried[2]),
+        )
+        new_frames.append([v for i, v in enumerate(merged)
+                           if not target_start <= i < target_start + target_count])
+
+    def copy_joint(joint: BvhJoint) -> BvhJoint:
+        children: list[BvhJoint] = []
+        for child in joint.children:
+            # 합칠 관절 자리에 그 자식들이 그대로 들어선다 — 순서를 지켜야 남은
+            # 관절들의 열 순서가 프레임 자르기와 어긋나지 않는다.
+            if child is target:
+                children.extend(copy_joint(grand) for grand in child.children)
+            else:
+                children.append(copy_joint(child))
+        return BvhJoint(
+            name=joint.name,
+            offset=joint.offset,
+            channels=list(joint.channels),
+            children=children,
+            end_site=joint.end_site,
+        )
+
+    return BvhFile(root=copy_joint(bvh.root), frame_time=bvh.frame_time, frames=new_frames)
 
 
 def _collect_columns(

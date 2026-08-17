@@ -89,6 +89,39 @@ def quat_to_euler(q: Quat, order: str = ORDER) -> tuple[float, float, float]:
     return (math.degrees(euler_x), math.degrees(euler_y), math.degrees(euler_z))
 
 
+def quat_mul(a: Quat, b: Quat) -> Quat:
+    """두 회전의 합성. ``a`` 를 적용한 뒤 ``b`` 를 적용한 것과 같다.
+
+    three 의 ``Quaternion.multiplyQuaternions`` 그대로다. 부모-자식 관절을 하나로
+    합칠 때 필요하다 — 각도를 더하면 축이 달라 틀린다.
+    """
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (
+        ax * bw + aw * bx + ay * bz - az * by,
+        ay * bw + aw * by + az * bx - ax * bz,
+        az * bw + aw * bz + ax * by - ay * bx,
+        aw * bw - ax * bx - ay * by - az * bz,
+    )
+
+
+def quat_rotate(q: Quat, v: Sequence[float]) -> tuple[float, float, float]:
+    """벡터를 사원수로 회전. three 의 ``Vector3.applyQuaternion`` 그대로다.
+
+    관절을 합칠 때 자식의 rest 오프셋이 부모 회전에 딸려 도는 몫을 계산한다.
+    """
+    qx, qy, qz, qw = q
+    vx, vy, vz = v[0], v[1], v[2]
+    tx = 2 * (qy * vz - qz * vy)
+    ty = 2 * (qz * vx - qx * vz)
+    tz = 2 * (qx * vy - qy * vx)
+    return (
+        vx + qw * tx + qy * tz - qz * ty,
+        vy + qw * ty + qz * tx - qx * tz,
+        vz + qw * tz + qx * ty - qy * tx,
+    )
+
+
 def quat_normalise(q: Quat) -> Quat:
     """단위 사원수로. 길이 0 은 회전이 아니므로 항등을 준다."""
     length = math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3])

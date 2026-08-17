@@ -18,6 +18,13 @@ FBX 그대로 내보내면 스튜디오에서 못 읽는다. 이유가 셋이라
    불린다. 기본값은 몸통 21 개만 남기고, ``--keep-fingers`` 로 손가락을 되살릴 수
    있다.
 
+4. **COM 과 골반이 따로 있다.** Biped 는 ``Bip001``(무게중심)과 ``Bip001 Pelvis``
+   를 나눠 두는데, BVH 표준에서 그 둘은 ``Hips`` 하나다. 나눠 둔 채로 넘기면
+   Character Studio 가 모르는 이름(``Pelvis``)이 필수 체인 중간에 남아
+   ``loadMocapFile`` 이 파일 전체를 거부한다 — 대화상자도 없이 false 만 돌아온다.
+   내보낸 뒤 ``merge_into_parent`` 로 합친다. 회전은 사원수로 합성하고 골반
+   오프셋이 도는 몫은 루트 위치에 흡수시키므로 동작은 그대로다.
+
 두 번째 아마추어(``Bip002``)가 들어 있는 파일이 있다 — 상대역이다. 활성 아마추어
 하나만 내보내므로 자동으로 빠진다.
 """
@@ -27,6 +34,11 @@ import os
 import sys
 
 import bpy
+
+# Blender 의 파이썬에는 이 저장소가 없다. maxmcp.helpers 는 표준 라이브러리만 쓰므로
+# 경로만 넣어 주면 그대로 import 된다.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from maxmcp.helpers.bvh import merge_into_parent, parse_bvh, serialize_bvh  # noqa: E402
 
 # Max Biped -> 공백 없는 표준 이름. 여기 없는 본은 내보내기 전에 지운다.
 RENAME = {
@@ -130,7 +142,20 @@ def convert(src: str, dst: str, keep: dict) -> dict:
         rotate_mode="ZYX",  # maxmcp/helpers/quat.py 가 ZYX 만 안다
         root_transform_only=False,
     )
-    return {"frames": end - start + 1, "bones": bones, "fps": bpy.context.scene.render.fps}
+
+    # Biped 의 COM(``Bip001``)과 골반(``Bip001 Pelvis``)은 BVH 표준에서 ``Hips``
+    # 하나다. 둘로 둔 채 넘기면 Character Studio 가 모르는 이름이 필수 체인 중간에
+    # 끼어 ``loadMocapFile`` 이 파일 전체를 조용히 거부한다. 합성은 무손실이다.
+    with open(dst, encoding="utf-8") as handle:
+        merged = merge_into_parent(parse_bvh(handle.read()), "Pelvis")
+    with open(dst, "w", encoding="utf-8") as handle:
+        handle.write(serialize_bvh(merged))
+
+    return {
+        "frames": end - start + 1,
+        "bones": bones - 1,  # Pelvis 를 Hips 에 합쳤다
+        "fps": bpy.context.scene.render.fps,
+    }
 
 
 def main() -> int:
