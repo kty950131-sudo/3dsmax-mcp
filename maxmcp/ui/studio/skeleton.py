@@ -1,7 +1,7 @@
 """BVH 채널값 → 조인트 월드 좌표 (순수 파이썬, numpy 미사용)."""
 
 import math
-from typing import Sequence
+from typing import Optional, Sequence
 
 from maxmcp.helpers.bvh import BvhFile, BvhJoint
 
@@ -66,6 +66,43 @@ def fk(bvh: BvhFile, frame: int) -> dict[str, Vec3]:
     # 컬럼 순서는 _column_map 과 같은 전위 순회이므로 col 을 따라가면 된다
     visit(bvh.root, (0.0, 0.0, 0.0), _IDENTITY)
     return out
+
+
+def travel_joint(bvh: BvhFile) -> Optional[str]:
+    """가로 이동을 실제로 들고 있는 조인트 이름. 없으면 None.
+
+    루트가 들고 있다고 가정하면 안 된다 — kimodo/SOMA 출력은 ``Root`` 를 전 프레임
+    0 으로 두고 자식 ``Hips`` 가 이동을 들고 있다.
+
+    그렇다고 월드 좌표의 이동폭이 가장 큰 조인트를 고르면 안 된다: 달리기에서는
+    손발이 몸통보다 더 크게 움직여서 팔다리 스윙을 이동으로 착각한다. 그래서
+    월드 좌표가 아니라 **위치 채널의 값**만 본다.
+    """
+    best_name: Optional[str] = None
+    best_span = 0.0
+    col = 0
+
+    def visit(joint: BvhJoint) -> None:
+        nonlocal col, best_name, best_span
+        columns = {
+            name[0].upper(): col + i
+            for i, name in enumerate(joint.channels)
+            if name.lower().endswith("position")
+        }
+        col += len(joint.channels)
+        for axis in ("X", "Z"):  # 가로 두 축만 — Y 는 도약이라 이동이 아니다
+            index = columns.get(axis)
+            if index is None:
+                continue
+            values = [row[index] for row in bvh.frames]
+            span = max(values) - min(values)
+            if span > best_span:
+                best_span, best_name = span, joint.name
+        for child in joint.children:
+            visit(child)
+
+    visit(bvh.root)
+    return best_name
 
 
 def bones(root: BvhJoint) -> list[tuple[str, str]]:

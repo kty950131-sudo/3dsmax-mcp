@@ -4,13 +4,13 @@ import json
 import os
 from typing import Any, Sequence
 
-from maxmcp.helpers.bvh import BvhFile, parse_bvh
+from maxmcp.helpers.bvh import BvhFile, parse_bvh, strip_static_root
 from maxmcp.ui.studio.library import cache_path
-from maxmcp.ui.studio.skeleton import bones, bounds, fk
+from maxmcp.ui.studio.skeleton import bones, bounds, fk, travel_joint
 
 # 호버할 때 카드가 재생하는 프레임 수. 균등 간격이어야 움직임이 부드럽다.
 PLAYBACK_FRAMES = 24
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4  # 4: 표시 좌표를 제자리로 고정
 
 Vec3 = tuple[float, float, float]
 
@@ -66,12 +66,38 @@ def poster_index(poses: Sequence[dict[str, Vec3]]) -> int:
     return max(range(len(vectors)), key=lambda i: pose_distance(vectors[i], mean))
 
 
+def lock_in_place(
+    poses: Sequence[dict[str, Vec3]], anchor: str | None
+) -> list[dict[str, Vec3]]:
+    """가로 이동을 걷어내 캐릭터를 제자리에 붙든다. **표시 좌표에만** 적용한다.
+
+    이동하는 클립을 그대로 그리면 바운즈가 이동 경로 전체를 덮어서, 8방향 달리기처럼
+    키의 대여섯 배를 가는 클립은 캐릭터가 점처럼 작아지고 카드 안을 미끄러져 간다.
+    앵커의 가로 좌표를 매 프레임 빼면 크기가 몸에 맞고 동작 자체가 보인다.
+
+    걷어내는 것은 **가로(X·Z)뿐**이다. Y 를 같이 빼면 도약과 웅크림이 사라져 점프
+    클립과 걷기 클립이 구분되지 않는다.
+
+    원본 BVH 는 건드리지 않는다 — Max 로 임포트할 때는 이동이 그대로 따라간다.
+    """
+    if not anchor or not poses or anchor not in poses[0]:
+        return list(poses)
+    locked: list[dict[str, Vec3]] = []
+    for pose in poses:
+        ax, _, az = pose[anchor]
+        locked.append({name: (p[0] - ax, p[1], p[2] - az) for name, p in pose.items()})
+    return locked
+
+
 def build_pose_data(clip_path: str) -> dict[str, Any]:
     """클립을 파싱해 샘플 프레임의 조인트 좌표를 뽑는다 (Qt 불필요)."""
     text = open(clip_path, encoding="utf-8", errors="replace").read()
-    bvh = parse_bvh(text)
+    # 정지한 래퍼 루트를 걷어낸다. kimodo/SOMA 출력의 `Root` 는 전 프레임 원점에
+    # 있고 이동은 자식 `Hips` 가 들고 있어서, 그대로 그리면 원점에 박힌 Root 와
+    # 멀어지는 몸 사이에 고무줄 같은 뼈가 하나 생긴다.
+    bvh = strip_static_root(parse_bvh(text))
     indices = _evenly(len(bvh.frames), PLAYBACK_FRAMES)
-    poses = [fk(bvh, i) for i in indices]
+    poses = lock_in_place([fk(bvh, i) for i in indices], travel_joint(bvh))
     every = [p for pose in poses for p in pose.values()]
     return {
         "version": _CACHE_VERSION,

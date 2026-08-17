@@ -772,3 +772,85 @@ def test_studio_page_exposes_delete_confirm() -> None:
     assert "delete_clip" in html
     assert "contextmenu" in html
     assert "홈페이지에는 영향" in html
+
+
+# ---- 제자리 표시 (가로 이동 고정) ----
+# kimodo/SOMA 배치: Root 는 180프레임 내내 0 이고 Hips 가 이동을 들고 있다.
+# 여기서는 X·Z 로 나아가면서 Y 로 한 번 튀어오른다 — 도약은 살아야 한다.
+TRAVELLING = """HIERARCHY
+ROOT Root
+{
+  OFFSET 0.0 0.0 0.0
+  CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+  JOINT Hips
+  {
+    OFFSET 0.0 100.0 0.0
+    CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+    JOINT Head
+    {
+      OFFSET 0.0 20.0 0.0
+      CHANNELS 3 Zrotation Yrotation Xrotation
+      End Site
+      {
+        OFFSET 0.0 10.0 0.0
+      }
+    }
+  }
+}
+MOTION
+Frames: 3
+Frame Time: 0.033333
+0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+0.0 0.0 0.0 0.0 0.0 0.0 250.0 30.0 500.0 0.0 0.0 0.0 0.0 0.0 0.0
+0.0 0.0 0.0 0.0 0.0 0.0 500.0 0.0 1000.0 0.0 0.0 0.0 0.0 0.0 0.0
+"""
+
+
+def _travel_clip(tmp_path):
+    clip = tmp_path / "travel.bvh"
+    clip.write_text(TRAVELLING, encoding="utf-8")
+    return str(clip)
+
+
+def test_travel_joint_finds_the_carrier_not_the_root(tmp_path) -> None:
+    """이동은 루트가 아니라 Hips 가 들고 있다 — 위치 채널을 보고 찾는다."""
+    from maxmcp.helpers.bvh import parse_bvh
+    from maxmcp.ui.studio.skeleton import travel_joint
+
+    bvh = parse_bvh(TRAVELLING)
+    assert travel_joint(bvh) == "Hips"
+
+
+def test_build_pose_data_locks_horizontal_travel(tmp_path) -> None:
+    data = build_pose_data(_travel_clip(tmp_path))
+    xs = [pose["Hips"][0] for pose in data["poses"]]
+    zs = [pose["Hips"][2] for pose in data["poses"]]
+    assert max(xs) - min(xs) < 1e-6
+    assert max(zs) - min(zs) < 1e-6
+
+
+def test_build_pose_data_keeps_vertical_motion(tmp_path) -> None:
+    """제자리로 붙들어도 도약은 남아야 한다 — 걷어내는 것은 가로 성분뿐이다."""
+    data = build_pose_data(_travel_clip(tmp_path))
+    ys = [pose["Hips"][1] for pose in data["poses"]]
+    assert round(max(ys) - min(ys)) == 30
+
+
+def test_build_pose_data_bounds_shrink_to_the_body(tmp_path) -> None:
+    """이동을 걷어내야 바운즈가 몸 크기가 된다 — 아니면 캐릭터가 점처럼 그려진다."""
+    data = build_pose_data(_travel_clip(tmp_path))
+    min_x, _, max_x, _ = data["bounds"]
+    assert max_x - min_x < 100
+
+
+def test_build_pose_data_leaves_a_still_clip_alone(tmp_path) -> None:
+    clip = tmp_path / "still.bvh"
+    clip.write_text(TWO_JOINT, encoding="utf-8")
+    data = build_pose_data(str(clip))
+    assert len(data["poses"]) == 2
+
+
+def test_studio_page_exposes_category_filter() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-field="category"' in html
+    assert "전체" in html

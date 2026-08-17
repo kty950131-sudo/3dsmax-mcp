@@ -211,6 +211,7 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
   <button data-action="refresh">새로고침</button>
   <button data-action="sync">Artoke에서 가져오기</button>
   <button class="video-add" data-action="add-video">영상 추가</button>
+  <select data-field="category" aria-label="카테고리"><option value="">전체</option></select>
   <input type="text" data-field="search" placeholder="검색 / 태그">
 </div>
 
@@ -584,6 +585,7 @@ function loadClipsFromBridge(selectPath) {
         const selected = res.data.clips.find((clip) => clip.path === selectPath);
         if (selected) state.selected = selected.stem;
       }
+      refreshCategoryFilter();
       renderGrid();
       setStatus("라이브러리 " + res.data.clips.length + "개 클립 (실제 데이터)", "ok");
       refreshBipeds();
@@ -741,6 +743,42 @@ function makeCard(clip) {
   return card;
 }
 
+/* 헤더 카테고리 필터의 "미분류" 값. 빈 문자열은 "전체"라 쓸 수 없다. */
+const UNSHELVED = "__unshelved";
+
+/* 헤더 셀렉트를 현재 클립이 실제로 쓰는 대분류로만 채운다. 사이트의 분류표는
+   비어 있는 선반까지 들고 있어서(공격>활 등), 그대로 옮기면 고를 게 없는 항목이
+   대부분인 목록이 된다. 선택은 보존한다 — 폴더를 새로고침할 때마다 전체로
+   돌아가면 필터를 걸어 둔 의미가 없다. */
+function refreshCategoryFilter() {
+  const select = document.querySelector('[data-field="category"]');
+  const previous = select.value;
+  const counts = new Map();
+  for (const clip of state.clips) {
+    const key = clip.category || UNSHELVED;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  select.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "전체 (" + state.clips.length + ")";
+  select.appendChild(all);
+  for (const cat of state.categories) {
+    if (!counts.has(cat.slug)) continue;
+    const option = document.createElement("option");
+    option.value = cat.slug;
+    option.textContent = cat.label + " (" + counts.get(cat.slug) + ")";
+    select.appendChild(option);
+  }
+  if (counts.has(UNSHELVED)) {
+    const option = document.createElement("option");
+    option.value = UNSHELVED;
+    option.textContent = "미분류 (" + counts.get(UNSHELVED) + ")";
+    select.appendChild(option);
+  }
+  if ([...select.options].some((o) => o.value === previous)) select.value = previous;
+}
+
 /* 사이트(viewer)와 같은 선반: 대분류→소분류 순서대로, 빈 그룹은 건너뛰고,
    매니페스트에 없는 클립(로컬 생성분)은 맨 아래 "미분류" 로 모은다. */
 function shelveClips(shown) {
@@ -767,8 +805,11 @@ function shelveClips(shown) {
 function renderGrid() {
   const q = (document.querySelector('[data-field="search"]').value || "").trim().toLowerCase();
   grid.innerHTML = "";
+  const cat = document.querySelector('[data-field="category"]').value;
   const shown = state.clips.filter(
-    (c) => !q || c.stem.toLowerCase().includes(q) || c.tags.some((t) => t.includes(q))
+    (c) =>
+      (!q || c.stem.toLowerCase().includes(q) || c.tags.some((t) => t.includes(q))) &&
+      (!cat || (cat === UNSHELVED ? !c.category : c.category === cat))
   );
   if (!shown.length) {
     grid.innerHTML = '<div style="color:var(--dim);padding:16px">일치하는 클립이 없습니다.</div>';
@@ -1175,11 +1216,13 @@ document.addEventListener("click", (e) => {
 });
 
 document.querySelector('[data-field="search"]').addEventListener("input", renderGrid);
+document.querySelector('[data-field="category"]').addEventListener("change", renderGrid);
 document.querySelector('[data-field="target"]').addEventListener("change", updateImportButton);
 
 /* ---------- 시작 ---------- */
 state.clips = DUMMY_CLIPS;
 state.categories = DUMMY_CATEGORIES;
+refreshCategoryFilter();
 renderGrid();
 renderTimeline();
 drawSpeed();
