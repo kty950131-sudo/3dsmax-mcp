@@ -124,3 +124,35 @@ def write(folder: str, categories: list, rules: Iterable[Rule] = COMBAT_PACKAGE_
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(shelf, handle, ensure_ascii=False, indent=2)
     return {"path": path, "shelved": len(shelf["motions"]), "unmatched": unmatched}
+
+
+def main(argv: Optional[list] = None) -> int:
+    """분류표를 사이트 매니페스트에서 베껴 와 로컬 선반을 다시 쓴다.
+
+        python -m maxmcp.ui.studio.local_shelf --folder <BVH폴더> \
+            --categories-from <artoke-manifest.json 또는 사이트 manifest.json>
+
+    사이트 분류가 바뀌면 다시 돌린다. 분류표를 손으로 옮겨 적지 않는 것이 요점이다.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--folder", required=True)
+    ap.add_argument("--categories-from", required=True)
+    args = ap.parse_args(argv)
+
+    with open(args.categories_from, encoding="utf-8") as handle:
+        categories = json.load(handle).get("categories", [])
+    if not categories:
+        print(f"분류표가 비어 있습니다: {args.categories_from}")
+        return 1
+
+    result = write(args.folder, categories)
+    print(f"{result['shelved']} 개 배정 -> {result['path']} (분류 {len(categories)} 종)")
+    for name in result["unmatched"]:
+        print(f"  미배정: {name}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
