@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional
 
 from maxmcp.ui.studio.compat import QtCore, QtWidgets
 from maxmcp.ui.studio.library import cache_path, delete_clip, load_shelf, scan
+from maxmcp.ui.studio import settings
 from maxmcp.ui.studio.thumb import load_pose_data
 from maxmcp.ui.studio.video_jobs import VideoJobController
 
@@ -42,6 +43,42 @@ class StudioBridge(QtCore.QObject):
     def ping(self, text: str) -> str:
         """왕복 확인용. 채널이 살아 있는지만 본다."""
         return reply(lambda: {"echo": text, "qt": QtCore.qVersion()})
+
+    @QtCore.Slot(result=str)
+    def read_settings(self) -> str:
+        """창을 닫아도 남아야 하는 UI 상태 전부. 부팅 때 한 번 읽는다."""
+        return reply(lambda: settings.load(self._cache_dir))
+
+    @QtCore.Slot(str, result=str)
+    def write_setting(self, payload_json: str) -> str:
+        """키 하나를 저장한다. ``{"key": ..., "value": ...}``."""
+
+        def run() -> dict:
+            payload = json.loads(payload_json)
+            key = payload.get("key")
+            if not isinstance(key, str) or not key:
+                raise ValueError("key 가 필요합니다")
+            return settings.save(self._cache_dir, key, payload.get("value"))
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def pick_folder(self, start: str) -> str:
+        """폴더 선택 창을 띄우고 고른 경로를 돌려준다. 취소하면 빈 문자열.
+
+        경로를 손으로 치게 두면 오타 하나에 "이 폴더에 클립이 없습니다" 만 뜨고,
+        무엇이 틀렸는지는 화면 어디에도 없다.
+        """
+
+        def run() -> dict:
+            from maxmcp.ui.studio.compat import QtWidgets
+
+            picked = QtWidgets.QFileDialog.getExistingDirectory(
+                None, "클립 폴더 고르기", start or ""
+            )
+            return {"folder": picked or ""}
+
+        return reply(run)
 
     @QtCore.Slot(str, result=str)
     def list_clips(self, folder: str) -> str:
@@ -231,6 +268,61 @@ class StudioBridge(QtCore.QObject):
             from maxmcp.ui.studio.maxbridge import scene_bipeds
 
             return scene_bipeds()
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def choose_bvh_path(self, suggested: str) -> str:
+        """내보낼 BVH 저장 위치를 묻는다. 취소하면 빈 문자열.
+
+        경로를 손으로 치게 두면 오타 하나에 조용히 엉뚱한 데 쓰이고, 덮어쓰기
+        확인도 사라진다. `pick_folder` 와 같은 이유로 대화상자를 쓴다.
+        """
+
+        def run() -> dict:
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                None, "BVH 로 내보내기", suggested or "", "BVH (*.bvh)"
+            )
+            return {"cancelled": not bool(path), "path": path}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def export_biped_bvh(self, payload_json: str) -> str:
+        def run() -> dict:
+            from maxmcp.ui.studio.biped_export import export_biped_bvh
+
+            p = json.loads(payload_json)
+            msg = export_biped_bvh(p["biped"], p["path"])
+            if msg.startswith("ERROR"):
+                raise RuntimeError(msg)
+            return {"message": msg}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def set_in_place(self, payload_json: str) -> str:
+        def run() -> dict:
+            from maxmcp.ui.studio.maxbridge import set_in_place
+
+            p = json.loads(payload_json)
+            msg = set_in_place(p["biped"], bool(p.get("on", True)))
+            if msg.startswith("ERROR"):
+                raise RuntimeError(msg)
+            return {"message": msg}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def set_arm_space_visible(self, payload_json: str) -> str:
+        def run() -> dict:
+            from maxmcp.ui.studio.maxbridge import set_arm_space_visible
+
+            p = json.loads(payload_json)
+            msg = set_arm_space_visible(p["biped"], bool(p.get("visible", False)))
+            if msg.startswith("ERROR"):
+                raise RuntimeError(msg)
+            return {"message": msg}
 
         return reply(run)
 

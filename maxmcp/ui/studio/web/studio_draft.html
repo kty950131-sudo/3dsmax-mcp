@@ -183,6 +183,26 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 /* 하이브리드 썸네일: Max 배치가 찍은 PNG 가 있는 카드와 계산 썸네일 카드가 섞인다.
    디자인할 때 두 상태가 다 존재한다는 걸 염두에 둘 것. */
 .clip-card { position: relative; }
+
+/* 카드 설명. 브라우저 기본 title 툴팁은 Max 의 웹뷰에서 카드 아래 고정된 자리에
+   뜨고 늦게 나타난다 — 커서를 옮겨 가며 여러 장을 훑을 때 어느 카드 설명인지
+   알기 어렵다. 커서를 따라오게 직접 그린다. */
+.clip-tip {
+  position: fixed;
+  z-index: 60;
+  max-width: 260px;
+  border: 1px solid #4a4a52;
+  border-radius: 4px;
+  background: #17171a;
+  padding: 6px 8px;
+  color: #d8d8dc;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-line;
+  pointer-events: none;  /* 툴팁이 커서를 가로채면 카드가 hover 를 잃는다 */
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
+}
+.clip-tip[hidden] { display: none; }
 .clip-card.is-rendered .thumb-badge {
   position: absolute; top: 10px; right: 10px;
   background: rgba(0,0,0,.6); color: var(--accent);
@@ -315,6 +335,9 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
             aria-label="최근 연 폴더" aria-expanded="false" title="최근 연 폴더">▾</button>
     <div class="folder-list" data-field="folder-list" hidden></div>
   </div>
+  <!-- 경로를 손으로 치면 오타 하나에 "이 폴더에 클립이 없습니다" 만 뜨고 무엇이
+       틀렸는지는 화면 어디에도 없다. 찾아보기가 그걸 없앤다. -->
+  <button data-action="browse" title="폴더 찾아보기">찾아보기</button>
   <button data-action="refresh">새로고침</button>
   <button data-action="sync">Artoke에서 가져오기</button>
   <button class="video-add" data-action="add-video">영상 추가</button>
@@ -361,7 +384,7 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
     <div class="card">
       <h2>임포트</h2>
       <div class="row"><label>대상</label><select data-field="target"><option value="">새 바이패드 생성</option></select></div>
-      <div class="row"><label>이름</label><input type="text" data-field="name" value=""></div>
+      <div class="row"><label>이름</label><input type="text" data-field="name" value="" placeholder="비우면 Bip001"></div>
       <div class="row"><label>배치 간격</label><input type="number" data-field="spacing" value="120" min="0" max="2000" step="10"></div>
       <div class="row">
         <label class="check"><input type="checkbox" data-field="convert" checked> kimodo 변환</label>
@@ -391,6 +414,22 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
     <div class="card">
       <h2>임포트 후</h2>
       <div class="row"><label>바이패드</label><select data-field="biped"></select></div>
+      <!-- In Place Mode 를 여기 둔 이유: 맥스 모션 패널의 그 버튼은 현재 레이어가
+           베이스가 아니면 조용히 죽는다(팔 간격을 걸면 그렇게 된다). 이 버튼은
+           레이어를 먼저 내리고 켜므로 항상 눌린다. -->
+      <div class="row">
+        <label>In Place</label>
+        <button data-action="in-place-on">제자리 재생 켜기</button>
+        <button data-action="in-place-off">끄기</button>
+      </div>
+      <div class="row">
+        <label>팔 간격</label>
+        <button data-action="arm-space-show">레이어 보기</button>
+        <button data-action="arm-space-hide">베이스로</button>
+      </div>
+      <!-- 맥스에는 BVH 익스포터가 없다(익스포터 목록에 Biovision 없음, CS 는
+           .bip/.fig 뿐). 폴리싱한 클립을 꺼내는 유일한 길이라 여기 둔다. -->
+      <button data-action="export-bvh" style="width:100%">BVH로 내보내기…</button>
       <button data-action="mixer" style="width:100%">Motion Mixer로 보내기</button>
     </div>
   </div>
@@ -472,12 +511,66 @@ function bcall(method, arg, cb) {
   else BRIDGE.obj[method](arg, done);
 }
 
+/* ---------- 창을 넘어 남는 설정 ----------
+   마지막으로 연 폴더 같은 값은 파이썬이 파일로 들고 있다. 웹뷰는 Qt 기본
+   프로필(off-the-record)로 도는 데다 페이지가 file:// 라 localStorage 가 창과
+   함께 사라진다 — 스크립트를 다시 불러올 때마다 경로가 기본값으로 돌아가던
+   원인이 이것이다. 브리지가 없을 때(브라우저에서 초안을 볼 때)만 localStorage 로
+   물러선다. */
+const SETTINGS = { data: {}, ready: false };
+
+function settingGet(key, fallback) {
+  if (SETTINGS.ready) {
+    const value = SETTINGS.data[key];
+    return value === undefined ? fallback : value;
+  }
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch (e) {
+    return fallback;
+  }
+}
+
+/* 화면은 기다리지 않는다 — 메모리에 먼저 반영하고 저장은 뒤따라간다. 저장이
+   실패해도 이번 세션은 정상으로 굴러가고, 다음 저장이 다시 시도한다. */
+function settingSet(key, value) {
+  SETTINGS.data[key] = value;
+  if (BRIDGE.obj) {
+    bcall("write_setting", JSON.stringify({ key: key, value: value }), () => {});
+    return value;
+  }
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+  return value;
+}
+
+function loadSettings(done) {
+  if (!BRIDGE.obj) { done(); return; }
+  bcall("read_settings", null, (res) => {
+    const data = res.ok ? res.data : null;
+    SETTINGS.data = data && typeof data === "object" ? data : {};
+    SETTINGS.ready = true;
+    done();
+  });
+}
+
+function restoreLastFolder() {
+  const last = folderHistory()[0];
+  if (last) document.querySelector('[data-field="folder"]').value = last;
+}
+
 function connectBridge() {
   if (typeof QWebChannel === "undefined" || !(window.qt && qt.webChannelTransport)) return false;
   new QWebChannel(qt.webChannelTransport, (channel) => {
     BRIDGE.obj = channel.objects.bridge;
     if (!BRIDGE.obj) { setStatus("bridge 객체가 등록되지 않았습니다", "error"); return; }
-    loadClipsFromBridge();
+    /* 설정을 먼저 읽는다. 마지막 폴더가 그 안에 있으므로, 넣기 전에 클립을 읽으면
+       기본 폴더를 한 번 읽고 나서 또 읽게 된다. */
+    loadSettings(() => {
+      restoreLastFolder();
+      setCurvesOpen(!!settingGet(CURVES_OPEN_KEY, true));
+      loadClipsFromBridge();
+    });
   });
   return true;
 }
@@ -707,10 +800,7 @@ const state = {
   trim: [0, 1],
   // 기본은 펼침. 처음부터 접혀 있으면 곡선이 있다는 걸 모르는 사람이 생기는데,
   // 임포트 결과를 바꾸는 기능이라 발견성을 깎을 만한 이득이 아니다.
-  curvesOpen: (() => {
-    try { return localStorage.getItem("bvhStudio.curvesOpen") !== "0"; }
-    catch (e) { return true; }
-  })(),
+  curvesOpen: true,  // 브리지가 붙은 뒤 저장된 값으로 덮어쓴다
   speedPoints:  [[0, 0], [1, 1]],
   // 0 에서 시작한다. 곡선을 임포트에 실제로 걸게 되었으므로, 기본값이 0 이
   // 아니면 아무도 요청하지 않은 팔 벌림이 모든 임포트에 붙는다.
@@ -752,6 +842,8 @@ function poseFor(stem) {
           if (!res.ok) { card.classList.add("is-broken"); card.title = res.error; }
           drawPose(card.querySelector("canvas"), state.poseCache.get(stem), posterOf(stem), 0);
           card.querySelector(".tags").textContent = clipMeta(stem);
+          // 프레임 수와 이동량은 지금 막 도착했다 — 설명도 같이 고친다.
+          if (res.ok) card.dataset.tip = clipTooltip(clipByStem(stem) || { stem: stem });
         }
       });
     }
@@ -832,16 +924,12 @@ const FOLDER_HISTORY_MAX = 8;
    경로까지 남기면 목록이 금세 쓰레기가 되고, 그러면 고르는 값이 없어진다.
    윈도 경로는 대소문자를 구분하지 않으므로 중복 판정도 그렇게 한다. */
 function folderHistory() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(FOLDER_HISTORY_KEY) || "[]");
-    return Array.isArray(saved) ? saved.filter((v) => typeof v === "string" && v) : [];
-  } catch (e) {
-    return [];
-  }
+  const saved = settingGet(FOLDER_HISTORY_KEY, []);
+  return Array.isArray(saved) ? saved.filter((v) => typeof v === "string" && v) : [];
 }
 
 function saveFolderHistory(list) {
-  try { localStorage.setItem(FOLDER_HISTORY_KEY, JSON.stringify(list)); } catch (e) {}
+  settingSet(FOLDER_HISTORY_KEY, list);
   return list;
 }
 
@@ -1015,7 +1103,10 @@ function importPath(path, stem, extras, label) {
     });
     return;
   }
-  payload.name = document.querySelector('[data-field="name"]').value || ("Bip_" + stem);
+  /* 비워 두면 Character Studio 가 스스로 이름을 붙인다 — 씬의 첫 바이패드가
+     Bip001, 다음이 Bip002 다. 클립 이름을 붙이면 바이패드 하위 본이 전부
+     "Bip_idle-airstate-back-loop Pelvis" 처럼 되어 Max 기본과 달라진다. */
+  payload.name = document.querySelector('[data-field="name"]').value.trim();
   payload.x_offset = state.importCount * Number(document.querySelector('[data-field="spacing"]').value || 0);
   setStatus("임포트 중… (" + shown + ")");
   bcall("import_clip", JSON.stringify(payload), (res) => {
@@ -1145,7 +1236,69 @@ function makeCard(clip) {
     "<div class='name'></div><div class='tags'></div>";
   card.querySelector(".name").textContent = clip.stem;
   card.querySelector(".tags").textContent = clipMeta(clip.stem);
+  card.dataset.tip = clipTooltip(clip);
   return card;
+}
+
+/* 카드에 마우스를 올렸을 때 나오는 설명.
+   둘째 줄은 좁아서 길이밖에 못 적는다. 고르는 데 실제로 필요한 것 — 어느 선반에
+   얹혔는지, 얼마나 가는지, 얼마나 빠른지 — 은 여기서 말한다.
+   이동 정보는 이동 클립에만 붙는다: 제자리 클립에 "0.0m" 을 적으면 대기·공격
+   카드마다 의미 없는 숫자가 붙는다. */
+/* 커서를 따라오는 카드 설명. 기본 title 툴팁은 Max 웹뷰에서 카드 아래 고정된
+   자리에 늦게 떠서, 여러 장을 훑을 때 어느 카드 것인지 알기 어려웠다. */
+const TIP = document.createElement("div");
+TIP.className = "clip-tip";
+TIP.hidden = true;
+document.body.appendChild(TIP);
+
+function moveTip(event) {
+  /* 커서 오른쪽 아래에 둔다. 화면 끝에서는 반대쪽으로 접어 잘리지 않게 한다. */
+  const pad = 14;
+  const box = TIP.getBoundingClientRect();
+  let x = event.clientX + pad;
+  let y = event.clientY + pad;
+  if (x + box.width > window.innerWidth) x = event.clientX - box.width - pad;
+  if (y + box.height > window.innerHeight) y = event.clientY - box.height - pad;
+  TIP.style.left = Math.max(0, x) + "px";
+  TIP.style.top = Math.max(0, y) + "px";
+}
+
+grid.addEventListener("mousemove", (event) => {
+  const card = event.target.closest(".clip-card");
+  const text = card && card.dataset.tip;
+  if (!text) { TIP.hidden = true; return; }
+  if (TIP.textContent !== text) TIP.textContent = text;
+  TIP.hidden = false;
+  moveTip(event);
+});
+grid.addEventListener("mouseleave", () => { TIP.hidden = true; });
+/* 스크롤하면 카드가 커서 밑에서 빠져나간다 — 남아 있으면 엉뚱한 카드 설명이 된다. */
+grid.addEventListener("scroll", () => { TIP.hidden = true; }, { passive: true });
+
+function clipByStem(stem) {
+  return state.clips.find((c) => c.stem === stem);
+}
+
+function clipTooltip(clip) {
+  const lines = [clip.stem];
+  const shelf = shelfLabels(clip);
+  if (shelf.length) lines.push(shelf.join(" · "));
+
+  const data = state.poseCache.get(clip.stem);
+  if (data === null) {
+    lines.push("파싱 실패");
+  } else if (data) {
+    lines.push(data.frames + "프레임 · " + (data.frames * data.frame_time).toFixed(1) + "초");
+    if (data.travel) {
+      lines.push(
+        "이동 " + data.travel.metres.toFixed(1) + "m · " +
+        data.travel.metres_per_second.toFixed(1) + "m/s"
+      );
+    }
+  }
+  if (clip.local) lines.push("이 PC 에만 있는 클립");
+  return lines.join("\n");
 }
 
 /* 카드 둘째 줄. 태그(stem 을 "_" 로 쪼갠 것)는 첫 줄과 같은 말이라 자리만
@@ -1389,6 +1542,7 @@ function renderGrid() {
       // poseFor 뒤에 다시 쓴다 — makeCard 시점에는 아직 포즈를 요청하기 전이라
       // 캐시가 비어 있다. 브리지에서는 여기서도 아직 "…" 이고 콜백이 채운다.
       card.querySelector(".tags").textContent = clipMeta(stem);
+      card.dataset.tip = clipTooltip(clipByStem(stem) || { stem: stem });
     }
   }
 }
@@ -1432,7 +1586,6 @@ grid.addEventListener("click", (e) => {
   if (!card) return;
   if (card.classList.contains("is-broken")) { setStatus("파싱에 실패한 클립입니다.", "error"); return; }
   state.selected = card.dataset.stem;
-  document.querySelector('[data-field="name"]').value = "Bip_" + state.selected;
   renderGrid();
   const data = poseFor(state.selected);
   if (data) setStatus(state.selected + " — " + data.frames + "프레임 / " + (data.frames * data.frame_time).toFixed(1) + "초");
@@ -1628,11 +1781,7 @@ function renderCurvePanel() {
 
 function setCurvesOpen(open) {
   state.curvesOpen = open;
-  try {
-    localStorage.setItem(CURVES_OPEN_KEY, open ? "1" : "0");
-  } catch (e) {
-    /* 저장이 막혀 있어도 이번 세션 동안은 접힌 채로 쓸 수 있어야 한다 */
-  }
+  settingSet(CURVES_OPEN_KEY, open);
   renderCurvePanel();
   // 펼치는 순간의 캔버스는 크기가 0 이었다 — 보이게 된 뒤에 다시 그린다.
   if (open) { drawSpeed(); drawArm(); }
@@ -1766,6 +1915,17 @@ document.addEventListener("click", (e) => {
     setStatus("방위각 " + state.azimuth + "°");
   } else if (action === "folder-history") {
     setFolderListOpen(document.querySelector('[data-field="folder-list"]').hidden);
+  } else if (action === "browse") {
+    if (!BRIDGE.obj) { setStatus("(목업) 폴더 찾아보기는 Max 안에서 동작합니다."); return; }
+    const field = document.querySelector('[data-field="folder"]');
+    bcall("pick_folder", field.value, (res) => {
+      if (!res.ok) { setStatus(res.error, "error"); return; }
+      // 취소하면 빈 문자열이 온다 — 그때 경로를 지우면 안 된다.
+      if (!res.data.folder) { setStatus("폴더 고르기를 취소했습니다."); return; }
+      field.value = res.data.folder;
+      state.poseCache.clear();
+      loadClipsFromBridge();
+    });
   } else if (action === "refresh") {
     state.poseCache.clear();
     if (BRIDGE.obj) loadClipsFromBridge();
@@ -1848,6 +2008,44 @@ document.addEventListener("click", (e) => {
     const pending = state.pendingConfirm;
     closeConfirm();
     if (pending) pending.run();
+  } else if (action === "in-place-on" || action === "in-place-off") {
+    /* 맥스는 거절해도 예외를 던지지 않는다 — 파이썬이 되읽어 확인한 뒤
+       ERROR 로 돌려주므로 여기서는 그대로 보여 주면 된다. */
+    const on = action === "in-place-on";
+    if (!BRIDGE.obj) { setStatus("(목업) In Place " + (on ? "켬" : "끔")); return; }
+    const sel = document.querySelector('[data-field="biped"]');
+    if (!sel.value) { setStatus("바이패드를 선택하세요", "error"); return; }
+    bcall("set_in_place", JSON.stringify({ biped: sel.value, on: on }), (res) => {
+      setStatus(res.ok ? res.data.message : res.error, res.ok ? "ok" : "error");
+    });
+  } else if (action === "arm-space-show" || action === "arm-space-hide") {
+    const visible = action === "arm-space-show";
+    if (!BRIDGE.obj) { setStatus("(목업) 팔 간격 " + (visible ? "보기" : "숨김")); return; }
+    const sel = document.querySelector('[data-field="biped"]');
+    if (!sel.value) { setStatus("바이패드를 선택하세요", "error"); return; }
+    bcall("set_arm_space_visible", JSON.stringify({ biped: sel.value, visible: visible }), (res) => {
+      setStatus(res.ok ? res.data.message : res.error, res.ok ? "ok" : "error");
+    });
+  } else if (action === "export-bvh") {
+    if (!BRIDGE.obj) { setStatus("(목업) BVH 내보내기"); return; }
+    const sel = document.querySelector('[data-field="biped"]');
+    if (!sel.value) { setStatus("바이패드를 선택하세요", "error"); return; }
+    /* 저장 위치를 먼저 묻는다 — 경로를 손으로 치게 하면 오타 하나에 조용히
+       엉뚱한 데 쓰이고 덮어쓰기 확인도 사라진다.
+
+       파일명은 **고른 카드 이름**으로 채운다. 바이패드 이름을 쓰면 `Bip001.bvh`
+       가 되어 어느 클립을 폴리싱한 것인지 파일에 안 남는다. 카드를 안 골랐을
+       때만 바이패드 이름으로 물러선다. */
+    const folder = document.querySelector('[data-field="folder"]').value || "";
+    const stem = state.selected || sel.value;
+    bcall("choose_bvh_path", folder ? folder + "\\" + stem + ".bvh" : stem + ".bvh", (res) => {
+      if (!res.ok) { setStatus(res.error, "error"); return; }
+      if (res.data.cancelled) { setStatus("내보내기 취소"); return; }
+      setStatus("내보내는 중…");
+      bcall("export_biped_bvh", JSON.stringify({ biped: sel.value, path: res.data.path }), (out) => {
+        setStatus(out.ok ? out.data.message : out.error, out.ok ? "ok" : "error");
+      });
+    });
   } else if (action === "mixer") {
     if (!BRIDGE.obj) { setStatus("(목업) Motion Mixer 전송"); return; }
     const sel = document.querySelector('[data-field="biped"]');
@@ -1937,8 +2135,7 @@ window.addEventListener("resize", () => { renderTimeline(); drawSpeed(); drawArm
 /* 마지막으로 열었던 폴더로 시작한다. 매번 기본 폴더로 돌아가면 다른 폴더에서
    일하던 사람은 창을 열 때마다 경로를 다시 쳐야 한다 — 브리지가 붙는 즉시 이
    값으로 읽으므로, 하던 자리에서 이어진다. */
-const lastFolder = folderHistory()[0];
-if (lastFolder) document.querySelector('[data-field="folder"]').value = lastFolder;
+restoreLastFolder();
 
 if (!connectBridge())
   setStatus("더미 데이터로 동작 중입니다 — Max 브리지 없음. 클립을 고르세요.");
