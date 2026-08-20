@@ -94,6 +94,7 @@ class StudioBridge(QtCore.QObject):
                         "sub": clip.sub,
                         "detail": clip.detail,
                         "local": clip.local,
+                        "polished": clip.polished,
                     }
                     for clip in scan(folder)
                 ],
