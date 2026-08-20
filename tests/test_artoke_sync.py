@@ -10,6 +10,21 @@ from maxmcp.helpers.artoke_sync import fetch_manifest, sync_motions
 
 BVH_BODY = b"HIERARCHY\nROOT Hips\n"
 ETAG = '"abc123"'
+PHASE_BODY = json.dumps(
+    {
+        "version": 1,
+        "clips": {
+            "walk.bvh": {
+                "leftContacts": [0, 30],
+                "rightContacts": [15],
+                "cycleFrames": 30,
+                "fps": 30,
+                "metresPerSecond": 1.3,
+                "rigHeight": 100.0,
+            }
+        },
+    }
+).encode()
 
 
 MANIFEST = {
@@ -30,6 +45,9 @@ MANIFEST = {
 
 class _Handler(BaseHTTPRequestHandler):
     manifest = MANIFEST
+    # phase.json 은 매니페스트 항목이 아니라 별도로 받는다. 404 로 두는 케이스가
+    # 있어야 "위상 없이도 동기화 자체는 성립한다"를 검증할 수 있다.
+    serve_phase = True
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler 관례
         if self.path == "/motions/manifest.json":
@@ -43,6 +61,15 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/motions/phase.json":
+            if self.serve_phase:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(PHASE_BODY)))
+                self.end_headers()
+                self.wfile.write(PHASE_BODY)
+            else:
+                self.send_response(404)
+                self.end_headers()
         elif self.path.endswith(".bvh"):
             self.send_response(200)
             self.send_header("Content-Length", str(len(BVH_BODY)))
@@ -108,6 +135,28 @@ def test_sync_writes_manifest_sidecar(tmp_path, server) -> None:
     assert sidecar["motions"][0]["category"] == "locomotion"
 
 
+def test_sync_leaves_local_only_clips_alone(tmp_path, server) -> None:
+    """가져오기가 이 PC 에만 있는 클립을 지우지 않는다.
+
+    사이트에 올리지 않기로 한 클립은 동기화가 다시 받아 주지 않으므로, 여기서
+    한 번 지워지면 되돌릴 곳이 없다. 지금 구현은 받기만 하고 지우지 않는데,
+    그건 코드를 읽어야만 알 수 있는 성질이라 못 박아 둔다.
+    """
+    local_clip = tmp_path / "attack-branch-01.bvh"
+    local_clip.write_bytes(b"HIERARCHY\nROOT Hips\n-- local only --\n")
+    shelf = tmp_path / "local-shelf.json"
+    shelf.write_text('{"categories": [], "motions": []}', encoding="utf-8")
+    before = local_clip.read_bytes()
+
+    result = sync_motions(str(tmp_path), base=server)
+
+    assert local_clip.exists(), "로컬 전용 클립이 동기화에 지워졌다"
+    assert local_clip.read_bytes() == before, "로컬 전용 클립이 덮어써졌다"
+    assert shelf.exists(), "로컬 분류 파일이 동기화에 지워졌다"
+    # 로컬 클립이 있다고 해서 받아야 할 것을 안 받으면 안 된다
+    assert sorted(result["downloaded"]) == ["artoke_run.bvh", "artoke_walk.bvh"]
+
+
 def test_fetch_manifest_bad_shape_raises(tmp_path, server) -> None:
     _Handler.manifest = {"nope": True}
     try:
@@ -115,3 +164,33 @@ def test_fetch_manifest_bad_shape_raises(tmp_path, server) -> None:
             fetch_manifest(base=server)
     finally:
         _Handler.manifest = MANIFEST
+
+
+def test_sync_downloads_phase_json(tmp_path, server) -> None:
+    """블렌드는 발접지 위상 없이 돌지 못하고, phase.json 은 매니페스트 항목이 아니다."""
+    out = sync_motions(str(tmp_path), base=server)
+    assert out["phase_warning"] is None
+    phase = json.loads((tmp_path / "phase.json").read_text(encoding="utf-8"))
+    assert phase["clips"]["walk.bvh"]["metresPerSecond"] == 1.3
+    assert phase["clips"]["walk.bvh"]["rigHeight"] == 100.0
+
+
+def test_sync_downloads_phase_json_even_when_motions_are_unchanged(tmp_path, server) -> None:
+    """모션이 그대로여도(ETag 304) 위상 파일은 로컬에 없을 수 있다."""
+    first = sync_motions(str(tmp_path), base=server)
+    (tmp_path / "phase.json").unlink()
+    again = sync_motions(str(tmp_path), base=server, etag=first["etag"])
+    assert again["unchanged"] is True
+    assert (tmp_path / "phase.json").exists()
+
+
+def test_sync_survives_a_missing_phase_json(tmp_path, server) -> None:
+    """위상 파일이 없어도 모션 동기화는 성립한다 — 경고만 달고 블렌드만 못 쓴다."""
+    _Handler.serve_phase = False
+    try:
+        out = sync_motions(str(tmp_path), base=server)
+    finally:
+        _Handler.serve_phase = True
+    assert sorted(out["downloaded"]) == ["artoke_run.bvh", "artoke_walk.bvh"]
+    assert "phase.json" in out["phase_warning"]
+    assert not (tmp_path / "phase.json").exists()

@@ -15,6 +15,7 @@ from maxmcp.ui.studio.thumb import (
     pose_vector,
     poster_index,
 )
+from maxmcp.ui.studio import thumb
 from maxmcp.ui.studio.timemap import build_time_map
 
 STUDIO_PAGE = Path(__file__).parents[1] / "maxmcp" / "ui" / "studio" / "web" / "studio_draft.html"
@@ -118,6 +119,56 @@ def test_fk_composes_rotation_channels_in_declaration_order() -> None:
     bvh = parse_bvh(ROTATION_ORDER)
     pos = fk(bvh, 0)
     assert pos["Child"] == pytest.approx((0.0, -10.0, 0.0))
+
+
+# Blender BVH 익스포터(fbx_to_bvh 가 쓴다)는 자식 관절에도 6채널을 쓰고, 위치
+# 채널에 부모 기준 **절대 로컬 좌표**를 넣는다 — 쉬는 자세에서는 OFFSET 과 거의
+# 같은 값이다. 여기에 OFFSET 을 또 더하면 뼈가 두 배가 되고, 값이 미묘하게
+# 다른 관절(엘렌 무릎: 오프셋 z 0.0039 vs 채널 z 0.0004)에서는 자세가 틀어져
+# 역관절로 보인다. 실측: fk 가 잰 허벅지 0.7515 = 오프셋 0.3757 의 정확히 2배,
+# 무릎각 27도 vs Blender 정답 36.12도.
+CHILD_TRANSLATION = """HIERARCHY
+ROOT Hips
+{
+  OFFSET 0.0 0.0 0.0
+  CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+  JOINT Knee
+  {
+    OFFSET 1.0 -4.0 0.5
+    CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+    End Site
+    {
+      OFFSET 0.0 -4.0 0.0
+    }
+  }
+}
+MOTION
+Frames: 1
+Frame Time: 0.033333
+0.0 10.0 0.0 0.0 0.0 0.0 1.0 -4.0 0.2 0.0 0.0 0.0
+"""
+
+
+def test_fk_child_position_channels_replace_the_offset() -> None:
+    bvh = parse_bvh(CHILD_TRANSLATION)
+    pos = fk(bvh, 0)
+    # 채널값 (1, -4, 0.2) 이 곧 로컬 위치다. OFFSET 을 더하면 (2, -8, 0.7) 로
+    # 뼈가 두 배가 된다.
+    assert pos["Knee"] == pytest.approx((1.0, 6.0, 0.2))
+
+
+def test_fk_offset_still_rules_without_position_channels() -> None:
+    # 위치 채널이 없는 관절(회전 3채널)은 지금처럼 OFFSET 이 자리다.
+    src = CHILD_TRANSLATION.replace(
+        "    CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation\n"
+        "    End Site",
+        "    CHANNELS 3 Zrotation Yrotation Xrotation\n    End Site",
+    ).replace(
+        "0.0 10.0 0.0 0.0 0.0 0.0 1.0 -4.0 0.2 0.0 0.0 0.0",
+        "0.0 10.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0",
+    )
+    pos = fk(parse_bvh(src), 0)
+    assert pos["Knee"] == pytest.approx((1.0, 6.0, 0.5))
 
 
 def test_bones_lists_parent_child_pairs() -> None:
@@ -593,15 +644,96 @@ from maxmcp.ui.studio import maxbridge
 
 
 def _fake_rt(load_ok: bool = True, figure_mode: bool = False) -> MagicMock:
+    """가짜 런타임.
+
+    ``getTMController`` 는 노드마다 **다른** 컨트롤러를 준다. 하나로 뭉뚱그리면
+    임시 바이패드와 대상 캐릭터가 같은 객체가 되어, "대상에는 BVH 를 넣지
+    않는다" 는 규칙을 검사할 수 없다.
+    """
     rt = MagicMock()
     rt.classOf.return_value = rt.Vertical_Horizontal_Turn
-    controller = rt.getTMController.return_value
-    controller.figureMode = figure_mode
-    controller.mixerMode = False
+
+    controllers: dict = {}
+
+    def tm(node):
+        ctrl = controllers.get(id(node))
+        if ctrl is None:
+            ctrl = MagicMock()
+            ctrl.figureMode = figure_mode
+            ctrl.mixerMode = False
+            controllers[id(node)] = ctrl
+        return ctrl
+
+    rt.getTMController.side_effect = tm
     rt.biped.loadMocapFile.return_value = load_ok
     rt.biped.numLayers.return_value = 0
-    rt.getNodeByName.return_value.name = "Bip_walk"
+
+    target = MagicMock()
+    target.name = "Bip_walk"
+    rt.getNodeByName.side_effect = lambda _name: target
+    rt.getNodeByName.return_value = target
+    rt.biped.saveFigFile.return_value = True
+    rt.biped.loadFigFile.return_value = True
     return rt
+
+
+# ---- In Place Mode ----
+# 맥스 모션 패널의 그 버튼은 현재 레이어가 베이스(0)가 아니면 죽는다. 실측:
+# 레이어 1 에서 `inPlaceMode = true` 는 에러 없이 무시되고 값이 false 로 남는다.
+# 스튜디오 버튼은 그 함정을 사용자 대신 처리한다 — 내리고, 켜고, 확인한다.
+
+
+def test_in_place_drops_to_the_base_layer_before_switching_on() -> None:
+    rt = _fake_rt()
+    ctrl = rt.getTMController(rt.getNodeByName("Bip_x"))
+    order: list[str] = []
+    rt.biped.setCurrentLayer.side_effect = lambda *a: order.append(f"layer{a[1]}")
+
+    class Probe:
+        """레이어를 내린 뒤에야 켜지는 실제 동작을 흉내낸다."""
+
+        def __init__(self) -> None:
+            self.value = False
+
+        def __bool__(self) -> bool:
+            return self.value
+
+    def set_in_place(value):
+        order.append("inPlace")
+
+    type(ctrl).inPlaceMode = property(
+        lambda self: "layer0" in order, lambda self, v: order.append("inPlace")
+    )
+    import maxmcp.ui.studio.maxbridge as mb
+
+    mb._rt = lambda: rt
+    msg = mb.set_in_place("Bip_x", True)
+    assert msg.startswith("OK"), msg
+    assert order.index("layer0") < order.index("inPlace"), order
+
+
+def test_in_place_reports_when_max_refused() -> None:
+    """켜라고 했는데 안 켜졌으면 그렇게 말한다 — 맥스는 조용히 무시한다."""
+    rt = _fake_rt()
+    ctrl = rt.getTMController(rt.getNodeByName("Bip_x"))
+    type(ctrl).inPlaceMode = property(lambda self: False, lambda self, v: None)
+    import maxmcp.ui.studio.maxbridge as mb
+
+    mb._rt = lambda: rt
+    msg = mb.set_in_place("Bip_x", True)
+    assert msg.startswith("ERROR"), msg
+
+
+def test_studio_page_has_its_own_in_place_button() -> None:
+    """맥스 모션 패널의 버튼은 레이어에 따라 조용히 죽는다 — 스튜디오가 자기 것을 갖는다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-action="in-place-on"' in html
+    assert 'data-action="in-place-off"' in html
+    assert "set_in_place" in html
+    # 팔 간격 레이어 토글이 같이 있어야 한다. In Place 를 살리려고 베이스로
+    # 내려 두므로, 팔 간격을 확인할 길이 없으면 그 기능이 안 보이게 된다.
+    assert 'data-action="arm-space-show"' in html
+    assert "set_arm_space_visible" in html
 
 
 def test_studio_page_exposes_retarget_controls() -> None:
@@ -615,7 +747,9 @@ def test_retarget_clip_requires_existing_biped(tmp_path, monkeypatch) -> None:
     src = tmp_path / "clip.bvh"
     src.write_text(TWO_JOINT, encoding="utf-8")
     rt = _fake_rt()
-    rt.getNodeByName.return_value = None
+    # side_effect 를 쓴다 — 하네스가 이미 side_effect 로 이름을 갈라 답하므로
+    # return_value 만 바꾸면 무시된다.
+    rt.getNodeByName.side_effect = lambda _name: None
     monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
     msg = maxbridge.retarget_clip(str(src), "Bip_none", convert=False)
     assert msg.startswith("ERROR")
@@ -629,9 +763,10 @@ def test_retarget_clip_loads_onto_existing_controller(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
     msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
     assert msg.startswith("OK")
-    rt.biped.createNew.assert_not_called()
-    rt.biped.loadMocapFile.assert_called_once()
-    rt.delete.assert_not_called()
+    # 임시 바이패드는 만들되 그 자리에서 지운다 — 사용자 것은 건드리지 않는다.
+    assert rt.biped.loadMocapFile.called
+    deleted = [c.args[0] for c in rt.delete.call_args_list]
+    assert rt.getNodeByName.return_value not in deleted
 
 
 def test_retarget_clip_rejects_figure_mode(tmp_path, monkeypatch) -> None:
@@ -651,8 +786,10 @@ def test_retarget_clip_keeps_biped_on_load_failure(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
     msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
     assert msg.startswith("ERROR")
-    # 기존 바이패드는 사용자 소유다 — 실패해도 지우지 않는다 (import_clip 과 다른 점)
-    rt.delete.assert_not_called()
+    # 기존 바이패드는 사용자 소유다 — 실패해도 지우지 않는다 (import_clip 과 다른 점).
+    # 임시 바이패드는 지워도 된다.
+    deleted = [c.args[0] for c in rt.delete.call_args_list]
+    assert rt.getNodeByName.return_value not in deleted
 
 
 def test_retarget_clip_bakes_current_position_into_offset(tmp_path, monkeypatch) -> None:
@@ -662,7 +799,8 @@ def test_retarget_clip_bakes_current_position_into_offset(tmp_path, monkeypatch)
     rt.getNodeByName.return_value.transform.position.x = 42.0
     seen: dict = {}
 
-    def fake_convert(path, x_offset=0.0, speed=1.0, trim=(0.0, 1.0), time_map=None):
+    def fake_convert(path, x_offset=0.0, speed=1.0, trim=(0.0, 1.0), time_map=None,
+                     target_height=None):
         seen["x_offset"] = x_offset
         return path, True
 
@@ -672,6 +810,225 @@ def test_retarget_clip_bakes_current_position_into_offset(tmp_path, monkeypatch)
     assert msg.startswith("OK")
     # 제자리 유지: 대상 바이패드의 현재 X 를 변환 오프셋으로 굽는다
     assert seen["x_offset"] == 42.0
+
+
+def _layered_rt(names: list[str]) -> MagicMock:
+    """레이어가 이미 걸린 기존 바이패드를 흉내낸다."""
+    rt = _fake_rt()
+    rt.biped.numLayers.return_value = len(names)
+    rt.biped.getLayerName.side_effect = lambda ctrl, i: names[i - 1]
+    return rt
+
+
+def test_retarget_clip_drops_to_base_layer_before_loading(tmp_path, monkeypatch) -> None:
+    """로드 전에 현재 레이어를 0 으로 내린다.
+
+    바이패드는 현재 레이어까지만 합성해 보여 준다. `_arm_space` 가 현재 레이어를
+    ArmSpace 에 남기고 끝나므로, 그 바이패드에 다시 로드하면 방금 실은 클립이
+    근거를 잃은 옛 오프셋에 덮여 어긋나 보인다 — 새 바이패드에서는 레이어가
+    없어 나타나지 않고 기존 바이패드에서만 나던 증상이 이것이다.
+    """
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _layered_rt(["ArmSpace"])
+    order: list[str] = []
+    rt.biped.setCurrentLayer.side_effect = lambda *a, **k: order.append(
+        f"setCurrentLayer{a[1:]}"
+    )
+    rt.biped.loadMocapFile.side_effect = lambda *a, **k: order.append("load") or True
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
+    assert msg.startswith("OK")
+    assert order == ["setCurrentLayer(0,)", "load"], order
+
+
+def test_retarget_clip_removes_only_the_studios_own_layer(tmp_path, monkeypatch) -> None:
+    """ArmSpace 는 우리가 만든 것이라 지우고, 사용자 레이어는 남긴다."""
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _layered_rt(["손수정", "ArmSpace"])
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
+    assert msg.startswith("OK")
+    # 인덱스 2 가 ArmSpace 다. 1 번(사용자 레이어)은 건드리지 않는다.
+    deleted = [call.args[1] for call in rt.biped.deleteLayer.call_args_list]
+    assert deleted == [2]
+
+
+def test_retarget_clip_reports_layers_it_left_alone(tmp_path, monkeypatch) -> None:
+    """남긴 레이어는 결과 메시지로 알린다 — 켜면 어긋나는 이유를 알 수 있게."""
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _layered_rt(["손수정", "표정"])
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
+    assert msg.startswith("OK")
+    assert "레이어 2개가 남아 있음" in msg
+    assert "손수정" in msg and "표정" in msg
+    rt.biped.deleteLayer.assert_not_called()
+
+
+def test_retarget_clip_says_nothing_when_there_are_no_layers(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _layered_rt([])
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=False)
+    assert msg.startswith("OK")
+    assert "남아 있음" not in msg
+
+
+def test_retarget_clip_fits_the_file_to_the_existing_biped(tmp_path, monkeypatch) -> None:
+    """규칙: 기존 캐릭터에 얹을 때 뼈대는 그 캐릭터 것을 쓴다.
+
+    loadMocapFile 은 모션만 얹지 않고 바이패드를 파일 치수로 다시 만든다. 파일을
+    그 바이패드의 키에 맞춰 두면 덮어써도 같은 값이라 골격이 그대로 남는다.
+    """
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    monkeypatch.setattr(maxbridge, "biped_height", lambda _rt, _ctrl: 183.0)
+    seen: dict = {}
+
+    def fake_convert(path, x_offset=0.0, speed=1.0, trim=(0.0, 1.0), time_map=None,
+                     target_height=None):
+        seen["target_height"] = target_height
+        return path, True
+
+    monkeypatch.setattr(maxbridge, "convert_clip", fake_convert)
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=True)
+    assert msg.startswith("OK")
+    assert seen["target_height"] == 183.0
+
+
+def test_retarget_clip_leaves_size_alone_when_it_cannot_measure(tmp_path, monkeypatch) -> None:
+    """키를 못 재면 크기를 건드리지 않는다 — 짐작한 값으로 캐릭터를 늘리지 않는다."""
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    monkeypatch.setattr(maxbridge, "biped_height", lambda _rt, _ctrl: None)
+    seen: dict = {}
+
+    def fake_convert(path, x_offset=0.0, speed=1.0, trim=(0.0, 1.0), time_map=None,
+                     target_height=None):
+        seen["target_height"] = target_height
+        return path, True
+
+    monkeypatch.setattr(maxbridge, "convert_clip", fake_convert)
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    msg = maxbridge.retarget_clip(str(src), "Bip_walk", convert=True)
+    assert msg.startswith("OK")
+    assert seen["target_height"] is None
+
+
+def test_import_clip_pins_the_new_biped_to_one_height(tmp_path, monkeypatch) -> None:
+    """새 바이패드는 파일 단위와 무관하게 늘 같은 키로 선다."""
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    seen: dict = {}
+
+    def fake_convert(path, x_offset=0.0, speed=1.0, trim=(0.0, 1.0), time_map=None,
+                     target_height=None):
+        seen["target_height"] = target_height
+        return path, True
+
+    monkeypatch.setattr(maxbridge, "convert_clip", fake_convert)
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    msg = maxbridge.import_clip(str(src), "Bip_new", convert=True, x_offset=0.0)
+    assert msg.startswith("OK")
+    assert seen["target_height"] == maxbridge.DEFAULT_BIPED_HEIGHT
+    # 만드는 키와 파일을 맞추는 키가 같아야 한다 — 어긋나면 만든 크기가 곧 덮인다
+    assert rt.biped.createNew.call_args.args[0] == maxbridge.DEFAULT_BIPED_HEIGHT
+
+
+# ---- 피겨(.fig) 보존 (retarget_clip) ----
+# loadMocapFile 은 바이패드 구조를 파일에 맞춰 다시 만들어 스킨·링크가 덮인다.
+# 임시 바이패드를 거쳐 .bip 만 옮기는 방식은 구조가 다른 바이패드 사이에서
+# 링크를 재배분하며 본을 비틀었다(실사용 보고). CS 의 정석대로 로드 전에 .fig 를
+# 저장했다가 로드 후 다시 입힌다.
+
+
+def test_retarget_saves_the_figure_before_loading_and_restores_after(
+    tmp_path, monkeypatch
+) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    order: list[str] = []
+    rt.biped.saveFigFile.side_effect = lambda *a: order.append("save") or True
+    rt.biped.loadMocapFile.side_effect = lambda *a: order.append("mocap") or True
+    rt.biped.loadFigFile.side_effect = lambda *a: order.append("fig") or True
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    msg = maxbridge.retarget_clip(str(src), "Bip_char", convert=False)
+    assert msg.startswith("OK")
+    assert order == ["save", "mocap", "fig"]
+    assert "경고" not in msg
+
+
+def test_fig_save_happens_in_figure_mode(tmp_path, monkeypatch) -> None:
+    """.fig 저장도 Figure Mode에서 실행하고 원래 모드로 돌아온다."""
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    ctrl = rt.getTMController(rt.getNodeByName("Bip_char"))
+    seen: list[bool] = []
+    rt.biped.saveFigFile.side_effect = lambda *a: seen.append(ctrl.figureMode) or True
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    maxbridge.retarget_clip(str(src), "Bip_char", convert=False)
+    assert seen == [True]
+    assert ctrl.figureMode is False
+
+
+def test_fig_restore_happens_in_figure_mode(tmp_path, monkeypatch) -> None:
+    """.fig 는 피겨 모드에서 입힌다 — 켜고, 입히고, 반드시 끈다."""
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    ctrl = rt.getTMController(rt.getNodeByName("Bip_char"))
+    seen: list[bool] = []
+    rt.biped.loadFigFile.side_effect = lambda *a: seen.append(ctrl.figureMode) or True
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    maxbridge.retarget_clip(str(src), "Bip_char", convert=False)
+    assert seen == [True]  # 입히는 순간에는 켜져 있고
+    assert ctrl.figureMode is False  # 끝나면 꺼져 있다
+
+
+def test_fig_save_failure_warns_but_still_loads(tmp_path, monkeypatch) -> None:
+    """피겨를 못 잡아도 모션 로드는 진행한다 — 조용히 넘어가지는 않는다."""
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    rt.biped.saveFigFile.return_value = False
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    msg = maxbridge.retarget_clip(str(src), "Bip_char", convert=False)
+    assert msg.startswith("OK")
+    assert "피겨(.fig) 저장이 실패" in msg
+    rt.biped.loadFigFile.assert_not_called()
+
+
+def test_fig_restore_failure_warns(tmp_path, monkeypatch) -> None:
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    rt.biped.loadFigFile.return_value = False
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+
+    msg = maxbridge.retarget_clip(str(src), "Bip_char", convert=False)
+    assert msg.startswith("OK")
+    assert "피겨(.fig) 복원이 실패" in msg
 
 
 def test_curve_panels_use_figma_design_tokens() -> None:
@@ -720,6 +1077,327 @@ def test_scan_without_sidecar_leaves_clips_unshelved(tmp_path) -> None:
 
     clips = scan(str(tmp_path))
     assert clips[0].category is None and clips[0].sub is None
+    assert clips[0].detail is None
+
+
+def _write_shelf(path, motions, categories=None) -> None:
+    path.write_text(
+        json.dumps({"categories": categories or [], "motions": motions}),
+        encoding="utf-8",
+    )
+
+
+def test_scan_reads_the_third_level(tmp_path) -> None:
+    # 사이트 분류가 카테고리→역할→세부 3단이 되었다. 세부까지 안 읽으면 돌진
+    # 시작/지속/종료가 전부 한 선반에 뭉쳐서 분류한 의미가 없어진다.
+    (tmp_path / "artoke_dash-start.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    _write_shelf(
+        tmp_path / "artoke-manifest.json",
+        [{"name": "dash-start.bvh", "category": "attack", "sub": "dash", "detail": "start"}],
+    )
+    from maxmcp.ui.studio.library import scan
+
+    clip = scan(str(tmp_path))[0]
+    assert (clip.category, clip.sub, clip.detail) == ("attack", "dash", "start")
+
+
+def test_local_shelf_shelves_clips_the_site_never_saw(tmp_path) -> None:
+    # 사이트에 올리지 않기로 한 클립을 스튜디오에서만 선반에 얹는 경로다.
+    # 이게 없으면 로컬 전용 클립은 영원히 "미분류" 한 칸에 쌓인다.
+    (tmp_path / "attack-branch-01.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    _write_shelf(
+        tmp_path / "local-shelf.json",
+        [{"name": "attack-branch-01.bvh", "category": "attack", "sub": "branch", "detail": "b1"}],
+        categories=[{"slug": "attack", "label": "공격", "subs": []}],
+    )
+    from maxmcp.ui.studio.library import load_shelf, scan
+
+    clip = scan(str(tmp_path))[0]
+    assert (clip.category, clip.sub, clip.detail) == ("attack", "branch", "b1")
+    # 사이트 매니페스트가 없는 폴더에서는 로컬이 분류표도 준다
+    assert load_shelf(str(tmp_path))["categories"][0]["slug"] == "attack"
+
+
+def test_site_categories_win_but_local_assignment_wins(tmp_path) -> None:
+    # 분류표는 사이트가 정본이라야 스튜디오와 사이트의 선반 이름이 갈리지 않는다.
+    # 반대로 클립 배정은 로컬을 고친 사람의 의도가 더 최근이라 로컬이 이긴다.
+    (tmp_path / "artoke_run-jump.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    _write_shelf(
+        tmp_path / "artoke-manifest.json",
+        [{"name": "run-jump.bvh", "category": "locomotion", "sub": "run"}],
+        categories=[{"slug": "locomotion", "label": "이동", "subs": []}],
+    )
+    _write_shelf(
+        tmp_path / "local-shelf.json",
+        [{"name": "run-jump.bvh", "category": "locomotion", "sub": "jump", "detail": "land"}],
+        categories=[{"slug": "bogus", "label": "로컬 분류표", "subs": []}],
+    )
+    from maxmcp.ui.studio.library import load_shelf, scan
+
+    clip = scan(str(tmp_path))[0]
+    assert (clip.sub, clip.detail) == ("jump", "land")
+    assert [c["slug"] for c in load_shelf(str(tmp_path))["categories"]] == ["locomotion"]
+
+
+def test_broken_local_shelf_does_not_lose_the_site_shelf(tmp_path) -> None:
+    # 로컬 파일은 손으로 고치는 물건이라 깨질 수 있다. 깨졌다고 사이트 분류까지
+    # 같이 날아가면 폴더 전체가 미분류로 보인다.
+    (tmp_path / "artoke_run-jump.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    _write_shelf(
+        tmp_path / "artoke-manifest.json",
+        [{"name": "run-jump.bvh", "category": "locomotion", "sub": "run"}],
+    )
+    (tmp_path / "local-shelf.json").write_text("{ not json", encoding="utf-8")
+    from maxmcp.ui.studio.library import scan
+
+    assert scan(str(tmp_path))[0].category == "locomotion"
+
+
+def test_studio_clears_the_grid_when_a_folder_yields_nothing() -> None:
+    """폴더를 바꿔 아무것도 못 읽으면 이전 폴더 클립을 지운다.
+
+    남겨 두면 경로를 바꾸고 새로고침해도 그리드가 그대로라 폴더가 안 바뀐 것처럼
+    보인다. 더 나쁜 것은 남은 카드의 path 가 옛 폴더를 가리켜서, 그 상태로
+    임포트하면 보고 있지도 않은 폴더의 파일이 들어간다는 점이다.
+    """
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    # 성공 여부와 무관하게 목록을 갈아끼운다
+    assert "const clips = res.ok ? res.data.clips : [];" in html
+    assert "state.clips = clips;" in html
+    # 경로가 틀린 것과 파일이 없는 것은 할 일이 다르다
+    assert "그런 폴더가 없습니다" in html
+    assert "폴더에 .bvh 가 없습니다" in html
+
+
+def test_list_clips_reports_whether_the_folder_exists() -> None:
+    # scan 은 없는 폴더와 빈 폴더를 똑같이 빈 목록으로 돌려준다. 화면이 둘을
+    # 갈라 안내하려면 브리지가 알려 줘야 한다.
+    source = (Path(__file__).resolve().parents[1] / "maxmcp/ui/studio/bridge.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"exists": os.path.isdir(folder),' in source
+
+
+def test_empty_grid_says_why_it_is_empty() -> None:
+    # 폴더가 비었는지, 검색어가 걸렀는지, 선반이 걸렀는지에 따라 할 일이 다르다.
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "이 폴더에 클립이 없습니다." in html
+    assert "고른 선반에 클립이 없습니다" in html
+    # 검색어는 사용자가 친 글자라 textContent 로 넣는다
+    assert "note.textContent =" in html
+
+
+def test_studio_search_is_not_trapped_inside_the_open_shelf() -> None:
+    """검색은 라이브러리를 찾는다. 고른 선반 안만 뒤지면 고장 난 것처럼 보인다.
+
+    3 단 칩이 생기면서 검색이 선반 세 개와 곱해졌다. 공격>돌진 을 보다가 walk 를
+    치면 걷기 클립이 있는데도 빈 화면이 나왔고, 칩은 그 옆에서 "공격 48" 이라고
+    적혀 있었다.
+    """
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "function widenIfShelfHasNoMatch()" in html
+    # 검색은 좁히기 전 집합에서 하고, 좁히기는 따로 건다
+    assert "queryMatches().filter(inShelf)" in html
+    # 칩 숫자도 검색 결과 기준이라야 그리드와 말이 맞는다
+    assert "count: queryMatches().length" in html
+    # 한국어 선반 이름으로도 찾힌다 — 클립 이름은 전부 영어다
+    assert "function shelfLabels(clip)" in html
+
+
+def test_recent_folders_can_be_removed_from_the_list() -> None:
+    """클립 카드와 같은 몸짓 — 우클릭 후 확인 상자."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'querySelector(\'[data-field="folder-list"]\').addEventListener("contextmenu"' in html
+    assert "function forgetFolder(folder)" in html
+    # 폴더가 지워진다고 읽힐 수 있어 문구로 못을 박는다
+    assert "폴더와 그 안의 클립은 그대로입니다" in html
+    # 버튼 문구도 동작에 맞춰야 한다 — "정말로 삭제" 는 목록 정리에 과하다
+    assert '"목록에서 지우기"' in html
+
+
+def test_confirm_box_carries_one_pending_action() -> None:
+    """확인 상자가 두 가지를 받는다. 종류별 슬롯을 두면 둘 다 찬 상태가 생긴다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "function openConfirm(text, note, run, label)" in html
+    assert "state.pendingConfirm = { run: run };" in html
+    # 확인 버튼은 무엇을 할지 모른 채 대기 중인 동작만 실행한다
+    assert "if (pending) pending.run();" in html
+    # 모달 안의 클릭은 뒤의 목록을 접지 않는다 — 여러 개를 이어서 정리해야 한다
+    assert 'e.target.closest(".confirm-overlay")' in html
+
+
+def test_studio_page_remembers_folders() -> None:
+    """폴더는 타이핑 말고 고를 수 있어야 한다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-action="folder-history"' in html
+    assert 'data-field="folder-list"' in html
+    # 클립이 실제로 있던 폴더만 기억한다 — 오타 경로가 쌓이면 목록이 쓸모없어진다
+    assert "rememberFolder(folder);" in html
+    # 창을 다시 열면 마지막 폴더에서 이어진다
+    assert "folderHistory()[0]" in html
+    # 입력칸은 남는다 — 목록에 없는 새 폴더도 열 수 있어야 한다
+    assert 'input type="text" data-field="folder"' in html
+
+
+def test_studio_page_keeps_settings_outside_the_webview() -> None:
+    """경로는 창을 닫아도 남아야 한다.
+
+    웹뷰는 Qt 기본 프로필(off-the-record)에 file:// 로 뜬다 — localStorage 가 창과
+    함께 사라져서, 스크립트를 다시 불러올 때마다 라이브러리 경로가 기본값으로
+    돌아갔다. 저장은 파이썬이 파일로 한다.
+    """
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    # 폴더 기록과 곡선 패널 상태는 브리지를 거친다
+    assert 'bcall("read_settings"' in html
+    assert 'bcall("write_setting"' in html
+    assert "settingSet(FOLDER_HISTORY_KEY, list);" in html
+    assert "settingSet(CURVES_OPEN_KEY, open);" in html
+    # 브리지가 붙기 전에 클립을 읽으면 기본 폴더를 읽고 나서 또 읽게 된다
+    assert "loadSettings(() => {" in html
+    assert "restoreLastFolder();" in html
+    # localStorage 는 브리지가 없는 브라우저 초안용 폴백으로만 남는다
+    body = html[html.index("function settingGet"):html.index("function loadSettings")]
+    assert html.count("localStorage.getItem") == 1
+    assert html.count("localStorage.setItem") == 1
+    assert "localStorage.getItem" in body
+
+
+def test_studio_bridge_persists_settings_to_the_cache_dir() -> None:
+    # 브리지는 PySide 없이 임포트할 수 없어 소스로 확인한다.
+    source = (Path(__file__).resolve().parents[1] / "maxmcp/ui/studio/bridge.py").read_text(
+        encoding="utf-8"
+    )
+    assert "def read_settings(self)" in source
+    assert "def write_setting(self, payload_json: str)" in source
+    assert "settings.load(self._cache_dir)" in source
+    assert "settings.save(self._cache_dir, key, payload.get(\"value\"))" in source
+
+
+def test_studio_page_leaves_the_biped_name_to_character_studio() -> None:
+    """이름을 비워 보내야 Max 기본 이름(Bip001, Bip002 …)이 붙는다.
+
+    클립 이름을 붙이면 바이패드 하위 본이 전부 "Bip_idle-airstate-back-loop Pelvis"
+    처럼 되어 Character Studio 기본과 달라진다.
+    """
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    # 카드를 골랐다고 이름칸을 채우지 않는다
+    assert 'value = "Bip_" + state.selected' not in html
+    # 폴백도 없다 — 비면 빈 문자열이 그대로 간다
+    assert '|| ("Bip_" + stem)' not in html
+    assert "payload.name = document.querySelector" in html
+    assert ".value.trim();" in html
+    # 무엇이 붙는지는 화면에서 읽혀야 한다
+    assert 'placeholder="비우면 Bip001"' in html
+
+
+def test_import_creates_a_static_root_point() -> None:
+    """루트는 Point 헬퍼이고 키를 찍지 않는다 — 원점 시작은 재중심이 보장한다."""
+    source = (
+        Path(__file__).resolve().parents[1] / "maxmcp/ui/studio/maxbridge.py"
+    ).read_text(encoding="utf-8")
+    assert "def ensure_root_point(" in source
+    # 본이 아니라 Point 헬퍼다 — 본은 스킨·익스포트 대상에 섞여 들어간다
+    assert "rt.Point()" in source
+    assert "BoneSys" not in source
+    # 키를 찍지 않는다
+    assert "pymxs.animate" not in source
+    # 이미 있으면 또 만들지 않는다
+    assert "existing = rt.getNodeByName(name)" in source
+    # 루트 생성이 실패해도 임포트 자체는 성공으로 남아야 한다
+    assert "ensure_root_point(rt)" in source
+    assert "    except Exception:" in source
+
+
+def test_launch_forgets_stale_maxmcp_modules() -> None:
+    """다시 실행할 때 이전 세션 모듈을 캐시에서 지운다.
+
+    손으로 적은 reload 순서는 세 번 깨졌다. 새 의존이 생기면(bvh 가 quat 의
+    새 함수를 쓰는 등) 낡은 모듈을 상대로 임포트하다 Max 안에서만 ImportError 로
+    죽는데, 그건 다음 실행 때까지 안 보인다.
+    """
+    from maxmcp.ui.studio.launch import _forget_maxmcp_modules
+
+    modules = {
+        "maxmcp": object(),
+        "maxmcp.helpers.quat": object(),
+        "maxmcp.helpers.bvh": object(),
+        "maxmcp.ui.studio.bridge": object(),
+        # Qt 바인딩과 살아 있는 창 핸들은 남긴다 — 다시 읽으면 이전 창을 잃는다
+        "maxmcp.ui.studio.compat": object(),
+        "maxmcp.ui.studio._session": object(),
+        # 남의 모듈은 건드리지 않는다
+        "json": object(),
+        "maxmcp_unrelated": object(),
+    }
+    dropped = _forget_maxmcp_modules(modules)
+
+    assert set(modules) == {
+        "maxmcp.ui.studio.compat",
+        "maxmcp.ui.studio._session",
+        "json",
+        "maxmcp_unrelated",
+    }
+    assert "maxmcp.helpers.quat" in dropped
+
+
+def test_launch_does_not_hand_order_reloads() -> None:
+    # 순서를 손으로 적어 두면 새 의존이 생길 때마다 같이 고쳐야 하고,
+    # 안 고치면 Max 안에서만 터진다. 목록이 돌아오면 이 테스트가 알려 준다.
+    # 주석에는 옛 방식이 왜 틀렸는지가 적혀 있으므로 문자열이 아니라 실제
+    # import 문을 본다.
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "maxmcp/ui/studio/launch.py").read_text(
+        encoding="utf-8"
+    )
+    imported = {
+        alias.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert "importlib" not in imported
+
+
+def test_scan_marks_clips_the_sync_did_not_bring(tmp_path) -> None:
+    # 동기화가 받아온 클립은 지워도 다시 받아지지만, 로컬 전용 클립은 되돌릴 곳이
+    # 없다. 카드에 다르게 표시하려면 스캔이 그 차이를 알려 줘야 한다.
+    (tmp_path / "artoke_run-jump.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    (tmp_path / "attack-branch-01.bvh").write_text(TWO_JOINT, encoding="utf-8")
+    from maxmcp.ui.studio.library import scan
+
+    clips = {c.stem: c for c in scan(str(tmp_path))}
+    assert clips["artoke_run-jump"].local is False
+    assert clips["attack-branch-01"].local is True
+
+
+def test_studio_page_marks_local_clips() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    # 파란 표시 — 색과 클래스와 배지가 다 있어야 실제로 보인다
+    assert "--local:" in html
+    assert ".clip-card.is-local" in html
+    assert "local-badge" in html
+    # 선택이 로컬 테두리를 이겨야 지금 고른 카드를 알 수 있다
+    assert ".clip-card.is-local.is-selected" in html
+
+
+def test_studio_page_has_three_chip_rows() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    for field in ("category", "sub", "detail"):
+        assert f'data-field="{field}"' in html
+    # 빈 선반을 점선으로 그린다 — 사이트와 같은 처리
+    assert "is-empty" in html
+    # 위 단계를 바꾸면 아래 단계를 푼다
+    assert "state.sub = \"\";" in html
+
+
+def test_studio_page_shelves_three_levels() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    # 세부 선반을 그리고, 세부가 없는 클립은 역할 선반에 남긴다
+    assert "sub.details" in html
+    assert "c.detail === det.slug" in html
+    # 낡은 분류(무기별)가 더미에 남아 있으면 없는 선반을 미리보게 된다
+    assert "unarmed" not in html
 
 
 def test_studio_page_groups_clips_by_category() -> None:
@@ -867,7 +1545,7 @@ def test_studio_page_shows_categories_as_chips() -> None:
     """카테고리는 드롭다운에 숨기지 않고 헤더에 펼쳐 둔다 (한 번 클릭)."""
     html = STUDIO_PAGE.read_text(encoding="utf-8")
     assert "cat-chip" in html
-    assert "renderCategoryBar" in html
+    assert "renderShelfChips" in html
     # 드롭다운은 걷어낸다 — 같은 필터가 두 곳에 있으면 상태가 갈린다
     assert "<select data-field=\"category\"" not in html
 
@@ -936,6 +1614,27 @@ def test_import_clip_applies_arm_space_to_the_biped_it_made(tmp_path, monkeypatc
     assert rt.biped.addNewKey.call_count == 4  # 좌우 팔 × 키 2개
 
 
+def test_arm_space_leaves_the_biped_on_the_base_layer(tmp_path, monkeypatch) -> None:
+    """팔 간격을 걸어도 **베이스 레이어(0)로 돌아와 끝난다.**
+
+    바이패드를 ArmSpace 레이어에 세워 둔 채 끝내면 In Place Mode 가 죽는다 —
+    실측으로, 레이어 1 에서 `inPlaceMode = true` 는 에러 없이 조용히 무시되고
+    레이어 0 에서만 켜진다. 맥스에는 레이어를 베이스로 접는 API 가 없어서
+    (`collapseAllLayers` 부재) 둘을 동시에 만족시킬 수 없고, 상시 쓰는 쪽인
+    In Place 를 살린다. 팔 간격은 `set_arm_space_visible` 로 잠깐 올려 본다.
+    """
+    src = tmp_path / "clip.bvh"
+    src.write_text(TWO_JOINT, encoding="utf-8")
+    rt = _fake_rt()
+    monkeypatch.setattr(maxbridge, "_rt", lambda: rt)
+    maxbridge.import_clip(
+        str(src), "Bip_x", convert=False, x_offset=0.0, arm_points=[(0, 12.0)]
+    )
+    rt.biped.createLayer.assert_called_once()
+    # 마지막으로 세운 레이어가 0 이어야 한다
+    assert rt.biped.setCurrentLayer.call_args[0][1] == 0
+
+
 def test_import_clip_without_arm_points_touches_no_layer(tmp_path, monkeypatch) -> None:
     src = tmp_path / "clip.bvh"
     src.write_text(TWO_JOINT, encoding="utf-8")
@@ -981,3 +1680,44 @@ def test_studio_page_links_blend_preview() -> None:
     assert 'data-action="blend-preview"' in html
     assert "viewer?blend=locomotion" in html
     assert "open_external" in html
+
+
+def test_studio_page_exposes_arbitrary_direction_import() -> None:
+    """45도 간격 여덟 개로는 30도를 줄 수 없다 — 굳혀서 넣는 컨트롤이 있어야 한다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'data-action="blend-import"' in html
+    assert 'data-field="blend-angle"' in html
+    assert 'data-field="blend-speed"' in html
+    assert "bake_blend" in html
+    assert "blend_tiers" in html
+
+
+def test_studio_blend_import_reuses_the_normal_import_path() -> None:
+    """굳힌 파일도 같은 importPath 를 타야 트림·미러·대상·배치 간격이 갈리지 않는다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert html.count("function importPath(") == 1
+    # 클립 임포트와 블렌드 임포트, 두 곳에서 부른다
+    assert html.count("importPath(") == 3
+    # 새 임포트 경로를 만들지 않았다는 증거: retarget/import 호출이 그 함수 안에만 있다
+    body = html.split("function importPath(")[1].split("\nfunction ")[0]
+    assert 'bcall("retarget_clip"' in body
+    assert 'bcall("import_clip"' in body
+    assert html.count('bcall("retarget_clip"') == 1
+    assert html.count('bcall("import_clip"') == 1
+
+
+def test_studio_blend_import_does_not_reuse_the_source_timeline_edits() -> None:
+    """트림·커브는 6초 소스에 대해 만든 값이라 한 사이클 결과에 걸면 대부분을 잘라낸다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    handler = html.split('action === "blend-import"')[1].split('action === "blend-preview"')[0]
+    assert "trim_start" not in handler
+    assert "time_map" not in handler
+    assert "arm_points" not in handler
+
+
+def test_studio_page_says_why_blending_is_unavailable() -> None:
+    """세트나 위상이 없으면 조용히 감추지 않고 이유를 적는다."""
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    body = html.split("function renderBlendControls")[1].split("\nfunction ")[0]
+    assert "8방향 세트가 없어" in body
+    assert "phase.json" in body

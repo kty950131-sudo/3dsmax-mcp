@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional
 
 from maxmcp.ui.studio.compat import QtCore, QtWidgets
 from maxmcp.ui.studio.library import cache_path, delete_clip, load_shelf, scan
+from maxmcp.ui.studio import settings
 from maxmcp.ui.studio.thumb import load_pose_data
 from maxmcp.ui.studio.video_jobs import VideoJobController
 
@@ -43,9 +44,45 @@ class StudioBridge(QtCore.QObject):
         """왕복 확인용. 채널이 살아 있는지만 본다."""
         return reply(lambda: {"echo": text, "qt": QtCore.qVersion()})
 
+    @QtCore.Slot(result=str)
+    def read_settings(self) -> str:
+        """창을 닫아도 남아야 하는 UI 상태 전부. 부팅 때 한 번 읽는다."""
+        return reply(lambda: settings.load(self._cache_dir))
+
+    @QtCore.Slot(str, result=str)
+    def write_setting(self, payload_json: str) -> str:
+        """키 하나를 저장한다. ``{"key": ..., "value": ...}``."""
+
+        def run() -> dict:
+            payload = json.loads(payload_json)
+            key = payload.get("key")
+            if not isinstance(key, str) or not key:
+                raise ValueError("key 가 필요합니다")
+            return settings.save(self._cache_dir, key, payload.get("value"))
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def pick_folder(self, start: str) -> str:
+        """폴더 선택 창을 띄우고 고른 경로를 돌려준다. 취소하면 빈 문자열.
+
+        경로를 손으로 치게 두면 오타 하나에 "이 폴더에 클립이 없습니다" 만 뜨고,
+        무엇이 틀렸는지는 화면 어디에도 없다.
+        """
+
+        def run() -> dict:
+            from maxmcp.ui.studio.compat import QtWidgets
+
+            picked = QtWidgets.QFileDialog.getExistingDirectory(
+                None, "클립 폴더 고르기", start or ""
+            )
+            return {"folder": picked or ""}
+
+        return reply(run)
+
     @QtCore.Slot(str, result=str)
     def list_clips(self, folder: str) -> str:
-        """클립 목록 + 사이트의 분류. 그리드가 대분류→소분류로 그룹핑한다."""
+        """클립 목록 + 사이트의 분류. 그리드가 카테고리→역할→세부로 그룹핑한다."""
         return reply(
             lambda: {
                 "clips": [
@@ -55,10 +92,16 @@ class StudioBridge(QtCore.QObject):
                         "tags": list(clip.tags),
                         "category": clip.category,
                         "sub": clip.sub,
+                        "detail": clip.detail,
+                        "local": clip.local,
                     }
                     for clip in scan(folder)
                 ],
                 "categories": load_shelf(folder)["categories"],
+                # 폴더가 없는 것과 폴더에 .bvh 가 없는 것은 사용자가 할 일이
+                # 다르다 — 앞은 경로를 고쳐야 하고 뒤는 파일을 넣어야 한다.
+                # scan 은 둘 다 빈 목록이라 여기서 갈라 준다.
+                "exists": os.path.isdir(folder),
             }
         )
 
@@ -66,6 +109,50 @@ class StudioBridge(QtCore.QObject):
     def pose_data(self, clip_path: str) -> str:
         """포즈 좌표와 뼈대. 첫 호출만 느리고 이후는 캐시다."""
         return reply(lambda: load_pose_data(clip_path, self._cache_dir))
+
+    @QtCore.Slot(str, result=str)
+    def blend_tiers(self, folder: str) -> str:
+        """이 폴더에서 블렌드에 쓸 수 있는 속도층 목록. 없으면 빈 목록.
+
+        위상 파일이 있는지도 같이 알려준다 — 없으면 발접지 정렬 없이 섞게 되고 발이
+        엇갈린 클립이 나오므로, UI 가 그 이유를 말하며 잠글 수 있어야 한다.
+        """
+
+        def run() -> dict:
+            from maxmcp.helpers.blend import MANIFEST_NAME, PHASE_NAME, discover_tiers
+
+            manifest_path = os.path.join(folder, MANIFEST_NAME)
+            if not os.path.exists(manifest_path):
+                return {"tiers": [], "hasPhase": False}
+            with open(manifest_path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            entries = manifest["motions"] if isinstance(manifest, dict) else manifest
+            return {
+                "tiers": discover_tiers(entries),
+                "hasPhase": os.path.exists(os.path.join(folder, PHASE_NAME)),
+            }
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def bake_blend(self, payload_json: str) -> str:
+        """8방향 세트를 임의 각도로 굳혀 임시 BVH 로 쓰고 경로를 돌려준다.
+
+        임포트는 하지 않는다. `import_clip` / `retarget_clip` 이 이미 파일 경로를
+        받으므로(`p["path"]`), 여기서 파일 하나만 만들어 주면 바이패드 생성·트림·
+        미러·팔 간격·배치 간격이 전부 그대로 따라온다. pymxs 를 쓰지 않으므로 Max
+        밖에서도 도는 슬롯 구역에 있다.
+        """
+
+        def run() -> dict:
+            from maxmcp.helpers.blend import bake_blend_file
+
+            p = json.loads(payload_json)
+            return bake_blend_file(
+                p["folder"], float(p["angle"]), float(p.get("speed_t", 0.0))
+            )
+
+        return reply(run)
 
     @QtCore.Slot(str, result=str)
     def delete_clip(self, payload_json: str) -> str:
@@ -181,6 +268,61 @@ class StudioBridge(QtCore.QObject):
             from maxmcp.ui.studio.maxbridge import scene_bipeds
 
             return scene_bipeds()
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def choose_bvh_path(self, suggested: str) -> str:
+        """내보낼 BVH 저장 위치를 묻는다. 취소하면 빈 문자열.
+
+        경로를 손으로 치게 두면 오타 하나에 조용히 엉뚱한 데 쓰이고, 덮어쓰기
+        확인도 사라진다. `pick_folder` 와 같은 이유로 대화상자를 쓴다.
+        """
+
+        def run() -> dict:
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                None, "BVH 로 내보내기", suggested or "", "BVH (*.bvh)"
+            )
+            return {"cancelled": not bool(path), "path": path}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def export_biped_bvh(self, payload_json: str) -> str:
+        def run() -> dict:
+            from maxmcp.ui.studio.biped_export import export_biped_bvh
+
+            p = json.loads(payload_json)
+            msg = export_biped_bvh(p["biped"], p["path"])
+            if msg.startswith("ERROR"):
+                raise RuntimeError(msg)
+            return {"message": msg}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def set_in_place(self, payload_json: str) -> str:
+        def run() -> dict:
+            from maxmcp.ui.studio.maxbridge import set_in_place
+
+            p = json.loads(payload_json)
+            msg = set_in_place(p["biped"], bool(p.get("on", True)))
+            if msg.startswith("ERROR"):
+                raise RuntimeError(msg)
+            return {"message": msg}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def set_arm_space_visible(self, payload_json: str) -> str:
+        def run() -> dict:
+            from maxmcp.ui.studio.maxbridge import set_arm_space_visible
+
+            p = json.loads(payload_json)
+            msg = set_arm_space_visible(p["biped"], bool(p.get("visible", False)))
+            if msg.startswith("ERROR"):
+                raise RuntimeError(msg)
+            return {"message": msg}
 
         return reply(run)
 

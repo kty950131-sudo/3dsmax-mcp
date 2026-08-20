@@ -2,15 +2,23 @@
 
 import json
 import os
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
-from maxmcp.helpers.bvh import BvhFile, parse_bvh, strip_static_root
+from maxmcp.helpers.bvh import (
+    BvhFile,
+    BvhJoint,
+    _column_map,
+    parse_bvh,
+    rig_height,
+    strip_static_root,
+)
 from maxmcp.ui.studio.library import cache_path
 from maxmcp.ui.studio.skeleton import bones, bounds, fk, travel_joint
 
 # 호버할 때 카드가 재생하는 프레임 수. 균등 간격이어야 움직임이 부드럽다.
 PLAYBACK_FRAMES = 24
-_CACHE_VERSION = 4  # 4: 표시 좌표를 제자리로 고정
+_CACHE_VERSION = 6  # 6: fk 위치 채널 이중 합산 수정 — 캐시된 포즈가 전부
+#    깨진 fk 로 계산된 것이라 버전을 올려 다시 굽게 한다(역관절 프리뷰의 원인)
 
 Vec3 = tuple[float, float, float]
 
@@ -89,6 +97,61 @@ def lock_in_place(
     return locked
 
 
+#: 사람 키. 뼈 단위가 파일마다 달라(엘렌 1.2, Kimodo 176.4) 이동량을 그대로는
+#: 비교할 수 없다. 신장으로 나눠 이 값을 곱하면 두 파일의 숫자를 나란히 볼 수 있다.
+HUMAN_METRES = 1.7
+
+
+def travel_readout(bvh: BvhFile) -> Optional[dict[str, float]]:
+    """가로 이동 거리와 속도. 키를 못 재는 파일은 None.
+
+    세로는 빼고 잰다 — 제자리 점프는 이동이 아니다.
+
+    미터를 지어내지 않고 None 을 주는 이유: 뼈 길이가 0 인 파일은 무엇으로도
+    환산할 근거가 없다. 화면은 그때 이동 정보를 아예 안 적는다.
+    """
+    height = rig_height(bvh)
+    if height <= 0 or len(bvh.frames) < 2:
+        return None
+    name = travel_joint(bvh)
+    if name is None:
+        return None
+
+    columns = _column_map(bvh.root)
+
+    def find(joint: BvhJoint) -> Optional[BvhJoint]:
+        if joint.name == name:
+            return joint
+        for child in joint.children:
+            hit = find(child)
+            if hit is not None:
+                return hit
+        return None
+
+    joint = find(bvh.root)
+    if joint is None:
+        return None
+    start, _ = columns[id(joint)]
+    axis = {}
+    for i, channel in enumerate(joint.channels):
+        low = channel.lower()
+        if low in ("xposition", "zposition"):
+            axis[low] = start + i
+    if len(axis) < 2:
+        return None
+
+    first, last = bvh.frames[0], bvh.frames[-1]
+    dx = last[axis["xposition"]] - first[axis["xposition"]]
+    dz = last[axis["zposition"]] - first[axis["zposition"]]
+    metres = ((dx * dx + dz * dz) ** 0.5 / height) * HUMAN_METRES
+    seconds = (len(bvh.frames) - 1) * bvh.frame_time
+    return {
+        "metres": metres,
+        "seconds": seconds,
+        "metres_per_second": metres / seconds if seconds > 0 else 0.0,
+    }
+
+
 def build_pose_data(clip_path: str) -> dict[str, Any]:
     """클립을 파싱해 샘플 프레임의 조인트 좌표를 뽑는다 (Qt 불필요)."""
     text = open(clip_path, encoding="utf-8", errors="replace").read()
@@ -108,6 +171,7 @@ def build_pose_data(clip_path: str) -> dict[str, Any]:
         "bounds": list(bounds(every, 0.0)),
         "frames": len(bvh.frames),
         "frame_time": bvh.frame_time,
+        "travel": travel_readout(bvh),
     }
 
 

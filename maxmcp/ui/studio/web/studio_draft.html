@@ -18,6 +18,8 @@
   --dim: #8e8e98;
   --accent: #f08c3c;
   --pose: #48a9c5;
+  /* 이 PC 에만 있는 클립. --pose 청록과 헷갈리지 않게 확실한 파랑으로 둔다. */
+  --local: #5b8dfa;
   --gap: 12px;
 }
 * { box-sizing: border-box; }
@@ -37,9 +39,18 @@ body {
 .topbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .topbar input[type="text"] { flex: 0 1 auto; }
 
-/* 필터 줄 — 카테고리 칩과 검색. 동작 버튼과 섞지 않는다. */
-.filterbar { display: flex; gap: 8px; align-items: center; }
+/* 필터 줄 — 선반 칩과 검색. 동작 버튼과 섞지 않는다.
+   칩이 세 줄로 늘어나므로 검색 칸은 가운데가 아니라 위에 맞춘다. */
+.filterbar { display: flex; gap: 8px; align-items: flex-start; }
+.shelf-chips { display: flex; flex-direction: column; gap: 5px; flex: 1 1 auto; min-width: 0; }
 .cat-bar { display: flex; gap: 6px; flex: 1 1 auto; flex-wrap: wrap; min-width: 0; }
+/* 아래 줄일수록 들여쓰고 작게. 세 줄이 같은 무게면 어느 것이 어느 것의 하위인지
+   읽을 때마다 다시 따져야 한다. */
+.cat-bar.is-sub { padding-left: 4px; }
+.cat-bar.is-detail { padding-left: 16px; }
+.cat-bar.is-sub .cat-chip,
+.cat-bar.is-detail .cat-chip { padding: 3px 9px; font-size: 12px; }
+.cat-bar[hidden] { display: none; }
 .cat-chip {
   background: transparent;
   border: 1px solid var(--line);
@@ -56,6 +67,11 @@ body {
 .cat-chip .n { color: var(--dim); margin-left: 5px; font-size: 11px; }
 .cat-chip.is-on { background: var(--pose); border-color: var(--pose); color: #0d1418; font-weight: 600; }
 .cat-chip.is-on .n { color: #0d1418; opacity: .72; }
+/* 클립이 아직 없는 선반. 지우지 않고 점선으로 둔다 — 사이트와 같은 이유로,
+   빈자리가 다음에 만들 클립을 가리킨다. 있는 것만 보이면 라이브러리가 다 찬
+   것처럼 보인다. */
+.cat-chip.is-empty { border-style: dashed; color: #5a5a63; }
+.cat-chip.is-empty:hover { color: var(--dim); border-color: var(--dim); }
 
 input[type="text"], input[type="number"], select {
   background: var(--panel);
@@ -65,8 +81,34 @@ input[type="text"], input[type="number"], select {
   border-radius: 4px;
   font: inherit;
 }
-input[data-field="folder"] { flex: 1 1 320px; min-width: 200px; }
+/* 폴더 칸 + 최근 목록. 목록은 입력칸 아래에 떠야 해서 감싸는 쪽이 기준이 된다. */
+.folder-field { position: relative; display: flex; flex: 1 1 320px; min-width: 200px; }
+.folder-field input[data-field="folder"] { flex: 1 1 auto; min-width: 0; border-radius: 4px 0 0 4px; }
+.folder-drop { border-radius: 0 4px 4px 0; padding: 0 9px; margin-left: -1px; }
+.folder-list {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20;
+  background: #2c2c31; border: 1px solid var(--line); border-radius: 5px;
+  padding: 4px; max-height: 240px; overflow-y: auto;
+  box-shadow: 0 8px 20px rgba(0,0,0,.45);
+}
+.folder-list[hidden] { display: none; }
+.folder-list button {
+  display: block; width: 100%; text-align: left; background: transparent;
+  border: 0; color: var(--text); padding: 5px 8px; border-radius: 3px;
+  font: inherit; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.folder-list button:hover { background: #37373d; }
+.folder-list .empty { color: var(--dim); padding: 5px 8px; }
 input[data-field="search"] { flex: 0 1 180px; }
+
+/* 8방향 블렌드. 위쪽 임포트 설정을 공유하므로 같은 카드 안에 두되, 선 하나로
+   "고른 클립을 넣는 것"과 "없는 방향을 만들어 넣는 것"을 구분한다. */
+.blend-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.blend-head { font-size: 11px; color: var(--dim); margin-bottom: 6px; }
+.blend-block output { flex: 0 0 84px; text-align: right; font-variant-numeric: tabular-nums; }
+.blend-block input[type="range"] { flex: 1 1 auto; }
+.blend-note { margin: 8px 0 0; font-size: 11px; color: var(--dim); }
 
 button {
   background: var(--panel);
@@ -141,6 +183,26 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 /* 하이브리드 썸네일: Max 배치가 찍은 PNG 가 있는 카드와 계산 썸네일 카드가 섞인다.
    디자인할 때 두 상태가 다 존재한다는 걸 염두에 둘 것. */
 .clip-card { position: relative; }
+
+/* 카드 설명. 브라우저 기본 title 툴팁은 Max 의 웹뷰에서 카드 아래 고정된 자리에
+   뜨고 늦게 나타난다 — 커서를 옮겨 가며 여러 장을 훑을 때 어느 카드 설명인지
+   알기 어렵다. 커서를 따라오게 직접 그린다. */
+.clip-tip {
+  position: fixed;
+  z-index: 60;
+  max-width: 260px;
+  border: 1px solid #4a4a52;
+  border-radius: 4px;
+  background: #17171a;
+  padding: 6px 8px;
+  color: #d8d8dc;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-line;
+  pointer-events: none;  /* 툴팁이 커서를 가로채면 카드가 hover 를 잃는다 */
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
+}
+.clip-tip[hidden] { display: none; }
 .clip-card.is-rendered .thumb-badge {
   position: absolute; top: 10px; right: 10px;
   background: rgba(0,0,0,.6); color: var(--accent);
@@ -148,6 +210,21 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 }
 .clip-card .thumb-badge { display: none; }
 .clip-card.is-rendered .thumb-badge { display: block; }
+
+/* 로컬 전용 클립 — 사이트에서 가져온 것이 아니라 이 PC 에만 있다. 지우면
+   되돌릴 곳이 없고 동기화가 다시 받아 주지도 않으므로 눈에 띄어야 한다.
+   MAX 배지는 오른쪽 위라 이쪽은 왼쪽 위에 둔다. */
+.clip-card.is-local { border-color: var(--local); }
+/* 선택이 로컬 테두리를 이긴다 — 지금 고른 것이 어느 카드인지가 먼저다.
+   배지는 그대로 남아서 로컬이라는 사실은 선택 중에도 사라지지 않는다. */
+.clip-card.is-local.is-selected { border-color: var(--accent); }
+.clip-card .local-badge {
+  display: none;
+  position: absolute; top: 10px; left: 10px;
+  background: rgba(0,0,0,.6); color: var(--local);
+  font-size: 10px; padding: 1px 5px; border-radius: 3px;
+}
+.clip-card.is-local .local-badge { display: block; }
 
 /* 우측 패널 */
 /* 오른쪽 열은 창보다 길어질 수 있다 — 프리뷰·임포트·임포트 후가 세로로 쌓인다.
@@ -249,7 +326,18 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 <body>
 
 <div class="topbar">
-  <input type="text" data-field="folder" value="C:\work\Ai\bvh-library" spellcheck="false">
+  <!-- 폴더는 타이핑 말고 고르게 한다. 로컬 클립 폴더와 동기화본 폴더를 오가며
+       견주는 일이 잦은데, 매번 경로를 치면 오타 하나로 "폴더에 .bvh 가 없습니다"
+       를 보게 된다. -->
+  <div class="folder-field">
+    <input type="text" data-field="folder" value="C:\work\Ai\bvh-library" spellcheck="false">
+    <button class="folder-drop" data-action="folder-history"
+            aria-label="최근 연 폴더" aria-expanded="false" title="최근 연 폴더">▾</button>
+    <div class="folder-list" data-field="folder-list" hidden></div>
+  </div>
+  <!-- 경로를 손으로 치면 오타 하나에 "이 폴더에 클립이 없습니다" 만 뜨고 무엇이
+       틀렸는지는 화면 어디에도 없다. 찾아보기가 그걸 없앤다. -->
+  <button data-action="browse" title="폴더 찾아보기">찾아보기</button>
   <button data-action="refresh">새로고침</button>
   <button data-action="sync">Artoke에서 가져오기</button>
   <button class="video-add" data-action="add-video">영상 추가</button>
@@ -259,7 +347,14 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 <!-- 필터는 동작 버튼과 줄을 나눈다. 한 줄에 섞여 있으면 "폴더를 바꾸는 것"과
      "보고 있는 범위를 좁히는 것"이 같은 무게로 보여서 매번 읽고 골라야 한다. -->
 <div class="filterbar">
-  <div class="cat-bar" data-field="category" role="group" aria-label="카테고리"></div>
+  <!-- 사이트(viewer)의 ShelfChips 와 같은 3 줄. 카테고리를 고르면 역할 줄이,
+       역할을 고르면 세부 줄이 열린다. 줄을 항상 세 개 그려 두지 않는 것은
+       고르지 않았을 때 보여 줄 내용이 없어서다. -->
+  <div class="shelf-chips">
+    <div class="cat-bar" data-field="category" role="group" aria-label="카테고리"></div>
+    <div class="cat-bar is-sub" data-field="sub" role="group" aria-label="역할" hidden></div>
+    <div class="cat-bar is-detail" data-field="detail" role="group" aria-label="세부" hidden></div>
+  </div>
   <input type="text" data-field="search" placeholder="검색 / 태그">
 </div>
 
@@ -289,18 +384,52 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
     <div class="card">
       <h2>임포트</h2>
       <div class="row"><label>대상</label><select data-field="target"><option value="">새 바이패드 생성</option></select></div>
-      <div class="row"><label>이름</label><input type="text" data-field="name" value=""></div>
+      <div class="row"><label>이름</label><input type="text" data-field="name" value="" placeholder="비우면 Bip001"></div>
       <div class="row"><label>배치 간격</label><input type="number" data-field="spacing" value="120" min="0" max="2000" step="10"></div>
       <div class="row">
         <label class="check"><input type="checkbox" data-field="convert" checked> kimodo 변환</label>
         <label class="check"><input type="checkbox" data-field="mirror"> 미러</label>
       </div>
       <button class="primary" data-action="import" style="width:100%">바이패드 생성 + 임포트</button>
+
+      <!-- 8방향 블렌드. 위 설정(대상·이름·배치 간격·convert·미러)을 그대로 쓰고
+           클립 대신 굳힌 결과를 넣으므로 임포트 카드 안에 둔다. -->
+      <div class="blend-block" data-blend hidden>
+        <div class="blend-head">임의 방향으로 불러오기</div>
+        <div class="row">
+          <label>방향</label>
+          <input type="range" data-field="blend-angle" min="0" max="359" step="1" value="0">
+          <output data-out="blend-angle">0°</output>
+        </div>
+        <div class="row">
+          <label>속도</label>
+          <input type="range" data-field="blend-speed" min="0" max="1" step="0.01" value="0">
+          <output data-out="blend-speed">—</output>
+        </div>
+        <button data-action="blend-import" style="width:100%">이 방향으로 불러오기</button>
+      </div>
+      <p class="blend-note" data-blend-note hidden></p>
     </div>
 
     <div class="card">
       <h2>임포트 후</h2>
       <div class="row"><label>바이패드</label><select data-field="biped"></select></div>
+      <!-- In Place Mode 를 여기 둔 이유: 맥스 모션 패널의 그 버튼은 현재 레이어가
+           베이스가 아니면 조용히 죽는다(팔 간격을 걸면 그렇게 된다). 이 버튼은
+           레이어를 먼저 내리고 켜므로 항상 눌린다. -->
+      <div class="row">
+        <label>In Place</label>
+        <button data-action="in-place-on">제자리 재생 켜기</button>
+        <button data-action="in-place-off">끄기</button>
+      </div>
+      <div class="row">
+        <label>팔 간격</label>
+        <button data-action="arm-space-show">레이어 보기</button>
+        <button data-action="arm-space-hide">베이스로</button>
+      </div>
+      <!-- 맥스에는 BVH 익스포터가 없다(익스포터 목록에 Biovision 없음, CS 는
+           .bip/.fig 뿐). 폴리싱한 클립을 꺼내는 유일한 길이라 여기 둔다. -->
+      <button data-action="export-bvh" style="width:100%">BVH로 내보내기…</button>
       <button data-action="mixer" style="width:100%">Motion Mixer로 보내기</button>
     </div>
   </div>
@@ -382,42 +511,116 @@ function bcall(method, arg, cb) {
   else BRIDGE.obj[method](arg, done);
 }
 
+/* ---------- 창을 넘어 남는 설정 ----------
+   마지막으로 연 폴더 같은 값은 파이썬이 파일로 들고 있다. 웹뷰는 Qt 기본
+   프로필(off-the-record)로 도는 데다 페이지가 file:// 라 localStorage 가 창과
+   함께 사라진다 — 스크립트를 다시 불러올 때마다 경로가 기본값으로 돌아가던
+   원인이 이것이다. 브리지가 없을 때(브라우저에서 초안을 볼 때)만 localStorage 로
+   물러선다. */
+const SETTINGS = { data: {}, ready: false };
+
+function settingGet(key, fallback) {
+  if (SETTINGS.ready) {
+    const value = SETTINGS.data[key];
+    return value === undefined ? fallback : value;
+  }
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch (e) {
+    return fallback;
+  }
+}
+
+/* 화면은 기다리지 않는다 — 메모리에 먼저 반영하고 저장은 뒤따라간다. 저장이
+   실패해도 이번 세션은 정상으로 굴러가고, 다음 저장이 다시 시도한다. */
+function settingSet(key, value) {
+  SETTINGS.data[key] = value;
+  if (BRIDGE.obj) {
+    bcall("write_setting", JSON.stringify({ key: key, value: value }), () => {});
+    return value;
+  }
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+  return value;
+}
+
+function loadSettings(done) {
+  if (!BRIDGE.obj) { done(); return; }
+  bcall("read_settings", null, (res) => {
+    const data = res.ok ? res.data : null;
+    SETTINGS.data = data && typeof data === "object" ? data : {};
+    SETTINGS.ready = true;
+    done();
+  });
+}
+
+function restoreLastFolder() {
+  const last = folderHistory()[0];
+  if (last) document.querySelector('[data-field="folder"]').value = last;
+}
+
 function connectBridge() {
   if (typeof QWebChannel === "undefined" || !(window.qt && qt.webChannelTransport)) return false;
   new QWebChannel(qt.webChannelTransport, (channel) => {
     BRIDGE.obj = channel.objects.bridge;
     if (!BRIDGE.obj) { setStatus("bridge 객체가 등록되지 않았습니다", "error"); return; }
-    loadClipsFromBridge();
+    /* 설정을 먼저 읽는다. 마지막 폴더가 그 안에 있으므로, 넣기 전에 클립을 읽으면
+       기본 폴더를 한 번 읽고 나서 또 읽게 된다. */
+    loadSettings(() => {
+      restoreLastFolder();
+      setCurvesOpen(!!settingGet(CURVES_OPEN_KEY, true));
+      loadClipsFromBridge();
+    });
   });
   return true;
 }
 
 /* ---------- 더미 클립 목록 ----------
-   category/sub 는 실제 데이터에서 artoke-manifest.json 이 준다. 더미에도 채워
-   그룹핑 디자인을 브라우저에서 확인할 수 있게 한다. 일부는 일부러 미분류다. */
+   category/sub/detail 은 실제 데이터에서 artoke-manifest.json (사이트) 과
+   local-shelf.json (로컬 전용) 이 준다. 더미에도 채워 그룹핑 디자인을 브라우저에서
+   확인할 수 있게 한다. 세부까지 간 것, 역할까지만 간 것, 미분류를 섞어 뒀다 —
+   셋 다 실제로 나오는 모양이라 하나라도 빠지면 그리드를 판단할 수 없다. */
 const DUMMY_CLIPS = [
   { stem: "artoke_walk-forward",   tags: ["artoke", "walk-forward"], kind: "walk",   rendered: true, category: "locomotion", sub: "walk" },
   { stem: "artoke_run-fast",       tags: ["artoke", "run-fast"],     kind: "run",    rendered: true, category: "locomotion", sub: "run" },
   { stem: "artoke_idle-breath",    tags: ["artoke", "idle-breath"],  kind: "idle",   category: "idle", sub: "base" },
-  { stem: "attack-combo_00",       tags: ["attack-combo"],           kind: "kick",   category: "attack", sub: "unarmed" },
-  { stem: "spin-kick",             tags: ["spin-kick"],              kind: "kick",   category: "attack", sub: "unarmed" },
-  { stem: "jump-land",             tags: ["jump-land"],              kind: "jump",   category: "locomotion", sub: "jump" },
-  { stem: "crouch-move",           tags: ["crouch-move"],            kind: "crouch", category: "locomotion", sub: "traversal" },
-  { stem: "wave-hello",            tags: ["wave-hello"],             kind: "wave",   category: "emote", sub: "greet" },
-  { stem: "broken-export_03",      tags: ["broken-export"],          kind: null    },
-  { stem: "turn-left-90",          tags: ["turn-left-90"],           kind: "walk"  },
-  { stem: "sit-down",              tags: ["sit-down"],               kind: "sit"   },
+  { stem: "attack-normal-01",      tags: ["attack-normal-01"],       kind: "kick",   local: true, category: "attack", sub: "combo", detail: "hit1" },
+  { stem: "attack-normal-02",      tags: ["attack-normal-02"],       kind: "kick",   local: true, category: "attack", sub: "combo", detail: "hit2" },
+  { stem: "spin-kick",             tags: ["spin-kick"],              kind: "kick",   local: true, category: "attack", sub: "combo" },
+  { stem: "attack-dash-start",     tags: ["attack-dash-start"],      kind: "run",    local: true, category: "attack", sub: "dash", detail: "start" },
+  { stem: "jump-land",             tags: ["jump-land"],              kind: "jump",   local: true, category: "locomotion", sub: "jump", detail: "land" },
+  { stem: "wave-hello",            tags: ["wave-hello"],             kind: "wave",   local: true, category: "emote", sub: "greet" },
+  { stem: "broken-export_03",      tags: ["broken-export"],          kind: null,     local: true },
+  { stem: "turn-left-90",          tags: ["turn-left-90"],           kind: "walk",   local: true },
+  { stem: "sit-down",              tags: ["sit-down"],               kind: "sit",    local: true },
   { stem: "artoke_sprint-stop",    tags: ["artoke", "sprint-stop"],  kind: "run",    category: "locomotion", sub: "sprint" },
 ];
 
+/* 사이트 분류표(viewer-models.ts)의 일부. 전부 옮기지 않는 것은 의도다 — 더미는
+   그룹핑을 눈으로 보려고 있는 것이고, 정본은 언제나 매니페스트다. */
 const DUMMY_CATEGORIES = [
-  { slug: "locomotion", label: "이동", subs: [
-    { slug: "walk", label: "걷기" }, { slug: "run", label: "달리기" },
-    { slug: "sprint", label: "질주" }, { slug: "jump", label: "점프" },
-    { slug: "traversal", label: "특수 이동" },
+  { slug: "idle", label: "대기", subs: [
+    { slug: "base", label: "기본 자세" }, { slug: "reaction", label: "반응" },
   ]},
-  { slug: "attack", label: "공격", subs: [{ slug: "unarmed", label: "맨손" }] },
-  { slug: "idle", label: "대기", subs: [{ slug: "base", label: "기본 대기" }] },
+  { slug: "locomotion", label: "이동", subs: [
+    { slug: "walk", label: "걷기" }, { slug: "jog", label: "조깅" },
+    { slug: "run", label: "달리기" }, { slug: "sprint", label: "전력질주" },
+    { slug: "turn", label: "방향 전환" },
+    { slug: "jump", label: "점프", details: [
+      { slug: "takeoff", label: "도약" }, { slug: "air", label: "공중" },
+      { slug: "land", label: "착지" },
+    ]},
+  ]},
+  { slug: "attack", label: "공격", subs: [
+    { slug: "combo", label: "기본 연계", details: [
+      { slug: "hit1", label: "1타" }, { slug: "hit2", label: "2타" },
+      { slug: "hit3", label: "3타" }, { slug: "finish", label: "마무리" },
+    ]},
+    { slug: "dash", label: "돌진", details: [
+      { slug: "start", label: "시작" }, { slug: "loop", label: "지속" },
+      { slug: "end", label: "종료" },
+    ]},
+  ]},
   { slug: "emote", label: "감정 표현", subs: [{ slug: "greet", label: "인사" }] },
 ];
 
@@ -584,7 +787,10 @@ function drawPose(canvas, data, index, azimuth) {
 const state = {
   clips: [],
   categories: [],         // 사이트의 선반 구조 (artoke-manifest.json 에서)
-  category: "",           // 고른 대분류 ("" = 전체). DOM 이 아니라 여기가 정본이다.
+  // 고른 선반 ("" = 그 단계는 안 좁힘). DOM 이 아니라 여기가 정본이다.
+  category: "",
+  sub: "",
+  detail: "",
   poseCache: new Map(),
   pending: new Set(),      // 브리지에 포즈를 요청해 놓고 기다리는 클립
   importCount: 0,          // 배치 간격 = importCount x spacing (원본 .ms 와 같은 규칙)
@@ -594,16 +800,20 @@ const state = {
   trim: [0, 1],
   // 기본은 펼침. 처음부터 접혀 있으면 곡선이 있다는 걸 모르는 사람이 생기는데,
   // 임포트 결과를 바꾸는 기능이라 발견성을 깎을 만한 이득이 아니다.
-  curvesOpen: (() => {
-    try { return localStorage.getItem("bvhStudio.curvesOpen") !== "0"; }
-    catch (e) { return true; }
-  })(),
+  curvesOpen: true,  // 브리지가 붙은 뒤 저장된 값으로 덮어쓴다
   speedPoints:  [[0, 0], [1, 1]],
   // 0 에서 시작한다. 곡선을 임포트에 실제로 걸게 되었으므로, 기본값이 0 이
   // 아니면 아무도 요청하지 않은 팔 벌림이 모든 임포트에 붙는다.
   armPoints:    [[0, 0], [1, 0]],
   videoJob: null,
   videoTimer: null,
+  // 8방향 블렌드. tiers 가 비어 있으면 컨트롤을 잠근다 — 세트가 없거나 위상 파일이
+  // 없는 상태에서 섞으면 발이 엇갈린 클립이 나오므로 이유를 말하고 막는다.
+  folder: "",
+  blendTiers: [],
+  blendHasPhase: false,
+  blendAngle: 0,
+  blendSpeed: 0,
 };
 
 const grid = document.querySelector(".clip-grid");
@@ -632,6 +842,8 @@ function poseFor(stem) {
           if (!res.ok) { card.classList.add("is-broken"); card.title = res.error; }
           drawPose(card.querySelector("canvas"), state.poseCache.get(stem), posterOf(stem), 0);
           card.querySelector(".tags").textContent = clipMeta(stem);
+          // 프레임 수와 이동량은 지금 막 도착했다 — 설명도 같이 고친다.
+          if (res.ok) card.dataset.tip = clipTooltip(clipByStem(stem) || { stem: stem });
         }
       });
     }
@@ -642,24 +854,168 @@ function poseFor(stem) {
   return state.poseCache.get(stem);
 }
 
+/* 블렌드 컨트롤은 세트가 갖춰졌을 때만 열린다. 조용히 감추지 않고 왜 못 쓰는지
+   적는다 — 감추면 "이 기능이 있는데 안 보인다"가 되고, 이유를 적으면 동기화하면
+   된다는 것이 바로 읽힌다. */
+function setBlendBusy(busy) {
+  const button = document.querySelector('[data-action="blend-import"]');
+  if (!button) return;
+  button.disabled = busy;
+  button.textContent = busy ? "굳히는 중…" : "이 방향으로 불러오기";
+}
+
+function renderBlendControls() {
+  const block = document.querySelector("[data-blend]");
+  const note = document.querySelector("[data-blend-note]");
+  if (!block || !note) return;
+  const usable = state.blendTiers.length > 0 && state.blendHasPhase;
+  block.hidden = !usable;
+
+  if (usable) {
+    /* 층이 하나뿐이면 섞을 속도가 없다 — 방향만 열어 둔다. */
+    const single = state.blendTiers.length < 2;
+    const speed = document.querySelector('[data-field="blend-speed"]');
+    speed.disabled = single;
+    document.querySelector('[data-out="blend-speed"]').textContent = single
+      ? state.blendTiers[0]
+      : blendSpeedLabel();
+    note.hidden = false;
+    note.textContent = "속도층: " + state.blendTiers.join(" → ");
+    return;
+  }
+
+  note.hidden = false;
+  if (state.blendTiers.length === 0) {
+    note.textContent =
+      "8방향 세트가 없어 임의 방향 불러오기를 쓸 수 없습니다 — Artoke에서 가져오면 열립니다.";
+  } else {
+    note.textContent =
+      "phase.json 이 없어 발접지를 맞출 수 없습니다 — 다시 동기화하세요. " +
+      "정렬 없이 섞으면 발이 엇갈린 클립이 나옵니다.";
+  }
+}
+
+function blendSpeedLabel() {
+  /* 슬라이더 위치가 어느 층 사이에 있는지 이름으로 보여준다. m/s 는 굳혀 봐야
+     알 수 있으므로(위상 가중 평균이 필요하다) 여기서는 층 이름만 쓴다. */
+  const tiers = state.blendTiers;
+  if (tiers.length < 2) return tiers[0] || "—";
+  const span = state.blendSpeed * (tiers.length - 1);
+  const low = Math.min(tiers.length - 2, Math.floor(span));
+  const t = span - low;
+  if (t < 0.02) return tiers[low];
+  if (t > 0.98) return tiers[low + 1];
+  return tiers[low] + " → " + tiers[low + 1];
+}
+
+function refreshBlendTiers() {
+  if (!BRIDGE.obj) { renderBlendControls(); return; }
+  bcall("blend_tiers", state.folder, (res) => {
+    state.blendTiers = res.ok ? res.data.tiers || [] : [];
+    state.blendHasPhase = res.ok ? !!res.data.hasPhase : false;
+    renderBlendControls();
+  });
+}
+
+const FOLDER_HISTORY_KEY = "bvhStudio.folders";
+const FOLDER_HISTORY_MAX = 8;
+
+/* 최근 연 폴더. 클립이 실제로 있던 폴더만 기억한다 — 오타로 아무것도 못 읽은
+   경로까지 남기면 목록이 금세 쓰레기가 되고, 그러면 고르는 값이 없어진다.
+   윈도 경로는 대소문자를 구분하지 않으므로 중복 판정도 그렇게 한다. */
+function folderHistory() {
+  const saved = settingGet(FOLDER_HISTORY_KEY, []);
+  return Array.isArray(saved) ? saved.filter((v) => typeof v === "string" && v) : [];
+}
+
+function saveFolderHistory(list) {
+  settingSet(FOLDER_HISTORY_KEY, list);
+  return list;
+}
+
+function rememberFolder(folder) {
+  if (!folder) return;
+  const key = folder.toLowerCase();
+  return saveFolderHistory(
+    [folder, ...folderHistory().filter((v) => v.toLowerCase() !== key)]
+      .slice(0, FOLDER_HISTORY_MAX)
+  );
+}
+
+/* 목록에서만 뺀다. 폴더도 그 안의 클립도 건드리지 않는다 — 이름이 "삭제" 라
+   폴더가 지워지는 것으로 읽힐 수 있어, 확인 문구에서 그 점을 분명히 한다. */
+function forgetFolder(folder) {
+  const key = folder.toLowerCase();
+  return saveFolderHistory(folderHistory().filter((v) => v.toLowerCase() !== key));
+}
+
+function renderFolderHistory() {
+  const list = document.querySelector('[data-field="folder-list"]');
+  const current = (document.querySelector('[data-field="folder"]').value || "").toLowerCase();
+  // 지금 열려 있는 폴더는 뺀다 — 고르면 아무 일도 안 일어나는 항목이다.
+  const entries = folderHistory().filter((v) => v.toLowerCase() !== current);
+  list.innerHTML = "";
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "최근 연 폴더가 없습니다";
+    list.appendChild(empty);
+    return;
+  }
+  for (const folder of entries) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.folder = folder;
+    button.textContent = folder;
+    button.title = folder;
+    list.appendChild(button);
+  }
+}
+
+function setFolderListOpen(open) {
+  const list = document.querySelector('[data-field="folder-list"]');
+  if (open) renderFolderHistory();
+  list.hidden = !open;
+  document
+    .querySelector('[data-action="folder-history"]')
+    .setAttribute("aria-expanded", String(open));
+}
+
 function loadClipsFromBridge(selectPath) {
   const folder = document.querySelector('[data-field="folder"]').value;
+  state.folder = folder;
+  refreshBlendTiers();
   bcall("list_clips", folder, (res) => {
-    if (res.ok && res.data.clips.length) {
-      state.clips = res.data.clips;
-      state.categories = res.data.categories || [];
-      state.poseCache.clear();
-      state.pending.clear();
-      if (selectPath) {
-        const selected = res.data.clips.find((clip) => clip.path === selectPath);
-        if (selected) state.selected = selected.stem;
-      }
-      renderCategoryBar();
-      renderGrid();
-      setStatus("라이브러리 " + res.data.clips.length + "개 클립 (실제 데이터)", "ok");
+    /* 실패해도 이전 폴더 클립을 화면에 남기지 않는다.
+
+       남겨 두면 경로를 바꾸고 새로고침해도 그리드가 그대로라, 폴더가 안 바뀐
+       것처럼 보인다 (오타 난 경로에서 실제로 그랬다). 더 나쁜 것은 남은 카드의
+       path 가 옛 폴더를 가리킨다는 점이다 — 그 상태로 임포트하면 지금 보고 있는
+       폴더가 아닌 파일이 들어간다. */
+    const clips = res.ok ? res.data.clips : [];
+    state.clips = clips;
+    state.categories = res.ok ? res.data.categories || [] : [];
+    state.poseCache.clear();
+    state.pending.clear();
+    if (!clips.length) state.selected = null;
+    if (selectPath) {
+      const selected = clips.find((clip) => clip.path === selectPath);
+      if (selected) state.selected = selected.stem;
+    }
+    renderShelfChips();
+    renderGrid();
+
+    if (clips.length) {
+      rememberFolder(folder);
+      setStatus("라이브러리 " + clips.length + "개 클립 (실제 데이터)", "ok");
       refreshBipeds();
+    } else if (!res.ok) {
+      setStatus(res.error, "error");
+    } else if (res.data.exists === false) {
+      // 경로를 고쳐야 하는 경우와 파일을 넣어야 하는 경우는 할 일이 다르다.
+      setStatus("그런 폴더가 없습니다: " + folder, "error");
     } else {
-      setStatus(res.ok ? "폴더에 .bvh 가 없습니다: " + folder : res.error, "error");
+      setStatus("폴더에 .bvh 가 없습니다: " + folder, "error");
     }
   });
 }
@@ -717,6 +1073,48 @@ function addVideo() {
       showVideoJob(started.data);
       pollVideoJob(started.data.id);
     });
+  });
+}
+
+/* 임포트 한 번. 클립 그리드에서 고른 파일과 굳힌 블렌드가 같은 경로를 쓴다 —
+   대상 셀렉트, 이름, 배치 간격, convert, 미러가 한 군데에만 있어야 둘이 갈리지 않는다.
+   extras 는 호출자가 넣는 페이로드 추가분(트림·타임맵·팔 키)이고, label 은 상태줄에
+   쓸 사람이 읽는 이름이다. */
+function importPath(path, stem, extras, label) {
+  const target = document.querySelector('[data-field="target"]').value;
+  const shown = label || stem;
+  const payload = Object.assign(
+    {
+      path: path,
+      convert: document.querySelector('[data-field="convert"]').checked,
+      mirror: document.querySelector('[data-field="mirror"]').checked,
+    },
+    extras || {},
+  );
+  if (target) {
+    /* 기존 바이패드에 적용 — 이름/배치 간격은 새 바이패드 전용이라 안 보낸다 */
+    payload.biped = target;
+    setStatus("적용 중… (" + shown + " → " + target + ")");
+    bcall("retarget_clip", JSON.stringify(payload), (res) => {
+      if (res.ok) {
+        setStatus(res.data.message, "ok");
+        refreshBipeds();
+      } else setStatus(res.error, "error");
+    });
+    return;
+  }
+  /* 비워 두면 Character Studio 가 스스로 이름을 붙인다 — 씬의 첫 바이패드가
+     Bip001, 다음이 Bip002 다. 클립 이름을 붙이면 바이패드 하위 본이 전부
+     "Bip_idle-airstate-back-loop Pelvis" 처럼 되어 Max 기본과 달라진다. */
+  payload.name = document.querySelector('[data-field="name"]').value.trim();
+  payload.x_offset = state.importCount * Number(document.querySelector('[data-field="spacing"]').value || 0);
+  setStatus("임포트 중… (" + shown + ")");
+  bcall("import_clip", JSON.stringify(payload), (res) => {
+    if (res.ok) {
+      state.importCount++;
+      setStatus(res.data.message, "ok");
+      refreshBipeds();
+    } else setStatus(res.error, "error");
   });
 }
 
@@ -829,12 +1227,78 @@ function makeCard(clip) {
   // Max 배치가 찍은 PNG 가 있으면 그걸 쓰고, 없으면 canvas 로 계산해 그린다.
   // PNG 가 없다고 빈칸을 만들지 않는다 — 라이브러리는 Max 없이도 즉시 열려야 한다.
   if (clip.rendered) card.classList.add("is-rendered");
+  // 사이트에서 내려온 클립은 접두사가 붙어 저장된다. 접두사가 없으면 이 PC 에만
+  // 있는 것이고, 동기화가 다시 받아 주지 않으므로 파랗게 표시한다.
+  if (clip.local) card.classList.add("is-local");
   card.innerHTML =
     "<canvas></canvas><span class='thumb-badge'>MAX</span>" +
+    "<span class='local-badge' title='이 PC 에만 있는 클립 — 동기화로 복구되지 않습니다'>LOCAL</span>" +
     "<div class='name'></div><div class='tags'></div>";
   card.querySelector(".name").textContent = clip.stem;
   card.querySelector(".tags").textContent = clipMeta(clip.stem);
+  card.dataset.tip = clipTooltip(clip);
   return card;
+}
+
+/* 카드에 마우스를 올렸을 때 나오는 설명.
+   둘째 줄은 좁아서 길이밖에 못 적는다. 고르는 데 실제로 필요한 것 — 어느 선반에
+   얹혔는지, 얼마나 가는지, 얼마나 빠른지 — 은 여기서 말한다.
+   이동 정보는 이동 클립에만 붙는다: 제자리 클립에 "0.0m" 을 적으면 대기·공격
+   카드마다 의미 없는 숫자가 붙는다. */
+/* 커서를 따라오는 카드 설명. 기본 title 툴팁은 Max 웹뷰에서 카드 아래 고정된
+   자리에 늦게 떠서, 여러 장을 훑을 때 어느 카드 것인지 알기 어려웠다. */
+const TIP = document.createElement("div");
+TIP.className = "clip-tip";
+TIP.hidden = true;
+document.body.appendChild(TIP);
+
+function moveTip(event) {
+  /* 커서 오른쪽 아래에 둔다. 화면 끝에서는 반대쪽으로 접어 잘리지 않게 한다. */
+  const pad = 14;
+  const box = TIP.getBoundingClientRect();
+  let x = event.clientX + pad;
+  let y = event.clientY + pad;
+  if (x + box.width > window.innerWidth) x = event.clientX - box.width - pad;
+  if (y + box.height > window.innerHeight) y = event.clientY - box.height - pad;
+  TIP.style.left = Math.max(0, x) + "px";
+  TIP.style.top = Math.max(0, y) + "px";
+}
+
+grid.addEventListener("mousemove", (event) => {
+  const card = event.target.closest(".clip-card");
+  const text = card && card.dataset.tip;
+  if (!text) { TIP.hidden = true; return; }
+  if (TIP.textContent !== text) TIP.textContent = text;
+  TIP.hidden = false;
+  moveTip(event);
+});
+grid.addEventListener("mouseleave", () => { TIP.hidden = true; });
+/* 스크롤하면 카드가 커서 밑에서 빠져나간다 — 남아 있으면 엉뚱한 카드 설명이 된다. */
+grid.addEventListener("scroll", () => { TIP.hidden = true; }, { passive: true });
+
+function clipByStem(stem) {
+  return state.clips.find((c) => c.stem === stem);
+}
+
+function clipTooltip(clip) {
+  const lines = [clip.stem];
+  const shelf = shelfLabels(clip);
+  if (shelf.length) lines.push(shelf.join(" · "));
+
+  const data = state.poseCache.get(clip.stem);
+  if (data === null) {
+    lines.push("파싱 실패");
+  } else if (data) {
+    lines.push(data.frames + "프레임 · " + (data.frames * data.frame_time).toFixed(1) + "초");
+    if (data.travel) {
+      lines.push(
+        "이동 " + data.travel.metres.toFixed(1) + "m · " +
+        data.travel.metres_per_second.toFixed(1) + "m/s"
+      );
+    }
+  }
+  if (clip.local) lines.push("이 PC 에만 있는 클립");
+  return lines.join("\n");
 }
 
 /* 카드 둘째 줄. 태그(stem 을 "_" 로 쪼갠 것)는 첫 줄과 같은 말이라 자리만
@@ -851,64 +1315,184 @@ function clipMeta(stem) {
 /* 헤더 카테고리 필터의 "미분류" 값. 빈 문자열은 "전체"라 쓸 수 없다. */
 const UNSHELVED = "__unshelved";
 
-/* 헤더 셀렉트를 현재 클립이 실제로 쓰는 대분류로만 채운다. 사이트의 분류표는
-   비어 있는 선반까지 들고 있어서(공격>활 등), 그대로 옮기면 고를 게 없는 항목이
-   대부분인 목록이 된다. 선택은 보존한다 — 폴더를 새로고침할 때마다 전체로
-   돌아가면 필터를 걸어 둔 의미가 없다. */
-function renderCategoryBar() {
-  const bar = document.querySelector('[data-field="category"]');
-  const counts = new Map();
-  for (const clip of state.clips) {
-    const key = clip.category || UNSHELVED;
-    counts.set(key, (counts.get(key) || 0) + 1);
+function currentQuery() {
+  return (document.querySelector('[data-field="search"]').value || "").trim().toLowerCase();
+}
+
+/* 클립이 얹힌 선반의 한국어 이름들. 클립 이름은 전부 영어라 이게 없으면
+   "돌진" 으로는 아무것도 못 찾는다 — 화면에는 온통 한국어 선반 이름인데. */
+function shelfLabels(clip) {
+  const category = state.categories.find((c) => c.slug === clip.category);
+  if (!category) return [];
+  const sub = (category.subs || []).find((s) => s.slug === clip.sub);
+  const detail = sub && (sub.details || []).find((d) => d.slug === clip.detail);
+  return [category.label, sub && sub.label, detail && detail.label].filter(Boolean);
+}
+
+/* 검색어에 맞는 클립. 선반 좁히기는 여기서 하지 않는다 — 칩이 "검색 결과가
+   어느 선반에 있는지" 를 세려면 좁히기 전 집합이 필요하다. */
+function queryMatches() {
+  const q = currentQuery();
+  if (!q) return state.clips;
+  return state.clips.filter(
+    (clip) =>
+      clip.stem.toLowerCase().includes(q) ||
+      clip.tags.some((tag) => String(tag).toLowerCase().includes(q)) ||
+      shelfLabels(clip).some((label) => label.toLowerCase().includes(q))
+  );
+}
+
+/* 칩이 고른 범위 안인가. */
+function inShelf(clip) {
+  return (
+    (!state.category ||
+      (state.category === UNSHELVED ? !clip.category : clip.category === state.category)) &&
+    (!state.sub || clip.sub === state.sub) &&
+    (!state.detail || clip.detail === state.detail)
+  );
+}
+
+/* 검색어를 넣었는데 고른 선반에 결과가 하나도 없으면 선반 선택을 푼다.
+
+   3 단 칩이 생기면서 검색이 "지금 서 있는 선반 안" 으로 좁혀졌다. 공격>돌진 을
+   보다가 walk 를 치면 라이브러리에 걷기 클립이 있는데도 빈 화면만 나오고,
+   무엇이 왜 걸러졌는지는 어디에도 안 적혀 있다. 칩이 눈에 띄게 풀리므로 무슨
+   일이 일어났는지는 화면이 말해 준다. 결과가 있는 선반은 그대로 둔다 — 선반
+   안에서 좁혀 찾는 것도 여전히 되어야 한다. */
+function widenIfShelfHasNoMatch() {
+  if (!currentQuery()) return;
+  if (queryMatches().some(inShelf)) return;
+  state.category = "";
+  state.sub = "";
+  state.detail = "";
+}
+
+function countClips(predicate) {
+  return queryMatches().filter(predicate).length;
+}
+
+function addChip(bar, { value, label, count, on, empty }) {
+  const button = document.createElement("button");
+  button.className = "cat-chip" + (on ? " is-on" : "") + (empty ? " is-empty" : "");
+  button.dataset.value = value;
+  button.setAttribute("aria-pressed", String(on));
+  button.textContent = label;
+  if (count !== null) {
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = count;
+    button.appendChild(n);
+  }
+  bar.appendChild(button);
+}
+
+/* 사이트(viewer)의 ShelfChips 와 같은 세 줄: 카테고리 -> 역할 -> 세부.
+   위 단계를 고르기 전까지 아래 줄은 열리지 않는다.
+
+   빈 선반도 점선으로 그린다. 예전에는 클립이 실제로 있는 선반만 그렸는데,
+   사이트와 다르게 보이는 데다 "이 라이브러리에 뭐가 비어 있는가" 를 볼 수 없었다.
+   비어 있는 칸이 다음에 만들 클립을 가리킨다는 것이 사이트 쪽 판단이고, 같은
+   분류표를 쓰는 이상 여기서 다르게 굴 이유가 없다.
+
+   선택은 보존한다 — 폴더를 새로고침할 때마다 전체로 돌아가면 좁혀 둔 의미가 없다. */
+function renderShelfChips() {
+  // 고르고 있던 칸이 분류표에서 사라졌으면(폴더를 바꿨거나 분류가 갱신됐거나)
+  // 그 단계부터 풀어 준다. 안 그러면 존재하지 않는 칸을 고른 채 빈 화면만 본다.
+  let picked = state.category === UNSHELVED ? null : findCategory(state.category);
+  if (state.category && state.category !== UNSHELVED && !picked) state.category = "";
+  let pickedSub = picked && (picked.subs || []).find((s) => s.slug === state.sub);
+  if (state.sub && !pickedSub) { state.sub = ""; pickedSub = null; }
+  const details = (pickedSub && pickedSub.details) || null;
+  if (state.detail && !(details || []).some((d) => d.slug === state.detail)) state.detail = "";
+
+  const catBar = document.querySelector('[data-field="category"]');
+  catBar.innerHTML = "";
+  // 숫자는 검색 결과 기준이다. 라이브러리 전체를 세면 "공격 48" 옆에서 그리드가
+  // "일치하는 클립이 없습니다" 라고 말하는 모순이 생긴다 — 그 모순이 검색이
+  // 고장 난 것처럼 보이게 만들었다.
+  addChip(catBar, { value: "", label: "전체", count: queryMatches().length, on: !state.category });
+  for (const cat of state.categories) {
+    const n = countClips((c) => c.category === cat.slug);
+    addChip(catBar, {
+      value: cat.slug, label: cat.label, count: n,
+      on: state.category === cat.slug, empty: n === 0,
+    });
+  }
+  // 미분류는 분류표에 없는 칸이라 클립이 있을 때만 그린다 — 빈 "미분류" 는
+  // 채울 대상이 아니라서 점선으로 남겨 둘 이유가 없다.
+  const loose = countClips((c) => !c.category);
+  if (loose) {
+    addChip(catBar, {
+      value: UNSHELVED, label: "미분류", count: loose, on: state.category === UNSHELVED,
+    });
   }
 
-  const chips = [{ value: "", label: "전체", count: state.clips.length }];
-  for (const cat of state.categories) {
-    if (counts.has(cat.slug)) {
-      chips.push({ value: cat.slug, label: cat.label, count: counts.get(cat.slug) });
+  const subBar = document.querySelector('[data-field="sub"]');
+  subBar.innerHTML = "";
+  subBar.hidden = !picked;
+  if (picked) {
+    addChip(subBar, { value: "", label: "전체", count: null, on: !state.sub });
+    for (const sub of picked.subs || []) {
+      const n = countClips((c) => c.category === picked.slug && c.sub === sub.slug);
+      addChip(subBar, {
+        value: sub.slug, label: sub.label, count: n,
+        on: state.sub === sub.slug, empty: n === 0,
+      });
     }
   }
-  if (counts.has(UNSHELVED)) {
-    chips.push({ value: UNSHELVED, label: "미분류", count: counts.get(UNSHELVED) });
-  }
 
-  // 고르고 있던 칸이 사라졌으면(폴더를 바꿨거나 마지막 클립을 지웠거나) 전체로
-  // 돌아간다. 안 그러면 아무것도 없는 칸을 고른 채 빈 화면만 보게 된다.
-  if (!chips.some((chip) => chip.value === state.category)) state.category = "";
-
-  bar.innerHTML = "";
-  for (const chip of chips) {
-    const button = document.createElement("button");
-    button.className = "cat-chip" + (chip.value === state.category ? " is-on" : "");
-    button.dataset.cat = chip.value;
-    button.setAttribute("aria-pressed", String(chip.value === state.category));
-    button.textContent = chip.label;
-    const count = document.createElement("span");
-    count.className = "n";
-    count.textContent = chip.count;
-    button.appendChild(count);
-    bar.appendChild(button);
+  const detailBar = document.querySelector('[data-field="detail"]');
+  detailBar.innerHTML = "";
+  detailBar.hidden = !details;
+  if (details) {
+    addChip(detailBar, { value: "", label: "전체", count: null, on: !state.detail });
+    for (const det of details) {
+      const n = countClips(
+        (c) => c.category === picked.slug && c.sub === pickedSub.slug && c.detail === det.slug
+      );
+      addChip(detailBar, {
+        value: det.slug, label: det.label, count: n,
+        on: state.detail === det.slug, empty: n === 0,
+      });
+    }
   }
 }
 
-/* 사이트(viewer)와 같은 선반: 대분류→소분류 순서대로, 빈 그룹은 건너뛰고,
-   매니페스트에 없는 클립(로컬 생성분)은 맨 아래 "미분류" 로 모은다. */
+function findCategory(slug) {
+  return slug ? state.categories.find((c) => c.slug === slug) : null;
+}
+
+/* 사이트(viewer)와 같은 선반: 카테고리→역할→세부 순서대로, 빈 그룹은 건너뛰고,
+   매니페스트에 없는 클립(로컬 생성분)은 맨 아래 "미분류" 로 모은다.
+
+   세부(detail)는 사이트에서도 선택이라 없는 클립이 흔하다. 그런 클립은 역할
+   선반에 그대로 남는다 — 아무 세부 칸에나 끼워 넣으면 "돌진 시작" 선반에 시작이
+   아닌 클립이 섞여서 분류가 거짓말이 된다. */
 function shelveClips(shown) {
   const groups = [];
   const taken = new Set();
+  const push = (en, ko, items) => {
+    if (!items.length) return;
+    groups.push({ en, ko, items });
+    for (const c of items) taken.add(c.stem);
+  };
   for (const cat of state.categories) {
     for (const sub of cat.subs || []) {
-      const items = shown.filter((c) => c.category === cat.slug && c.sub === sub.slug);
-      if (!items.length) continue;
-      groups.push({ en: cat.slug + " / " + sub.slug, ko: cat.label + " · " + sub.label, items });
-      for (const c of items) taken.add(c.stem);
+      const inSub = shown.filter((c) => c.category === cat.slug && c.sub === sub.slug);
+      for (const det of sub.details || []) {
+        push(
+          cat.slug + " / " + sub.slug + " / " + det.slug,
+          cat.label + " · " + sub.label + " · " + det.label,
+          inSub.filter((c) => c.detail === det.slug)
+        );
+      }
+      push(
+        cat.slug + " / " + sub.slug,
+        cat.label + " · " + sub.label,
+        inSub.filter((c) => !taken.has(c.stem))
+      );
     }
-    const loose = shown.filter((c) => c.category === cat.slug && !taken.has(c.stem));
-    if (loose.length) {
-      groups.push({ en: cat.slug, ko: cat.label, items: loose });
-      for (const c of loose) taken.add(c.stem);
-    }
+    push(cat.slug, cat.label, shown.filter((c) => c.category === cat.slug && !taken.has(c.stem)));
   }
   const rest = shown.filter((c) => !taken.has(c.stem));
   if (rest.length) groups.push({ en: "unshelved", ko: "미분류 · 로컬 생성", items: rest });
@@ -916,16 +1500,25 @@ function shelveClips(shown) {
 }
 
 function renderGrid() {
-  const q = (document.querySelector('[data-field="search"]').value || "").trim().toLowerCase();
   grid.innerHTML = "";
-  const cat = state.category;
-  const shown = state.clips.filter(
-    (c) =>
-      (!q || c.stem.toLowerCase().includes(q) || c.tags.some((t) => t.includes(q))) &&
-      (!cat || (cat === UNSHELVED ? !c.category : c.category === cat))
-  );
+  const shown = queryMatches().filter(inShelf);
   if (!shown.length) {
-    grid.innerHTML = '<div style="color:var(--dim);padding:16px">일치하는 클립이 없습니다.</div>';
+    /* 빈 화면은 왜 비었는지 말해야 한다. 폴더에 클립이 없는 것, 검색어가 걸러낸
+       것, 선반이 걸러낸 것은 할 일이 서로 다른데 예전에는 셋 다 같은 한 줄이었다.
+       검색어는 사용자가 친 글자라 textContent 로 넣는다. */
+    const note = document.createElement("div");
+    note.style.cssText = "color:var(--dim);padding:16px";
+    if (!state.clips.length) {
+      note.textContent = "이 폴더에 클립이 없습니다.";
+    } else if (currentQuery()) {
+      note.textContent =
+        '"' + currentQuery() + '" 와 맞는 클립이 없습니다 — 라이브러리에는 ' +
+        state.clips.length + "개 있습니다.";
+    } else {
+      note.textContent =
+        "고른 선반에 클립이 없습니다 — 라이브러리에는 " + state.clips.length + "개 있습니다.";
+    }
+    grid.appendChild(note);
     return;
   }
   for (const group of shelveClips(shown)) {
@@ -949,6 +1542,7 @@ function renderGrid() {
       // poseFor 뒤에 다시 쓴다 — makeCard 시점에는 아직 포즈를 요청하기 전이라
       // 캐시가 비어 있다. 브리지에서는 여기서도 아직 "…" 이고 콜백이 채운다.
       card.querySelector(".tags").textContent = clipMeta(stem);
+      card.dataset.tip = clipTooltip(clipByStem(stem) || { stem: stem });
     }
   }
 }
@@ -992,7 +1586,6 @@ grid.addEventListener("click", (e) => {
   if (!card) return;
   if (card.classList.contains("is-broken")) { setStatus("파싱에 실패한 클립입니다.", "error"); return; }
   state.selected = card.dataset.stem;
-  document.querySelector('[data-field="name"]').value = "Bip_" + state.selected;
   renderGrid();
   const data = poseFor(state.selected);
   if (data) setStatus(state.selected + " — " + data.frames + "프레임 / " + (data.frames * data.frame_time).toFixed(1) + "초");
@@ -1005,20 +1598,60 @@ grid.addEventListener("click", (e) => {
    보내지 않는다. */
 const confirmOverlay = document.querySelector(".confirm-overlay");
 
-function openDeleteConfirm(clip) {
-  state.pendingDelete = clip;
-  confirmOverlay.querySelector(".confirm-text").textContent =
-    "“" + clip.stem + "” 모션을 삭제할까요?";
-  let note = "라이브러리 폴더에서만 지워집니다 — 홈페이지에는 영향이 없습니다.";
-  if (clip.stem.startsWith("artoke_"))
-    note += "\nArtoke 동기화를 다시 하면 이 클립은 다시 받아집니다.";
+/* 확인 상자는 이제 두 가지를 받는다 — 클립 삭제와 최근 폴더 목록 정리. 무엇을
+   할지는 부르는 쪽이 함수로 넘긴다. 종류별로 pending 슬롯을 따로 두면 둘 다
+   차 있는 상태가 생길 수 있어서, 대기 중인 동작은 언제나 하나다. */
+function openConfirm(text, note, run, label) {
+  state.pendingConfirm = { run: run };
+  confirmOverlay.querySelector(".confirm-text").textContent = text;
   confirmOverlay.querySelector(".confirm-note").textContent = note;
+  confirmOverlay.querySelector('[data-action="confirm-delete"]').textContent =
+    label || "정말로 삭제하겠습니다";
   confirmOverlay.classList.add("is-open");
 }
 
-function closeDeleteConfirm() {
-  state.pendingDelete = null;
+function closeConfirm() {
+  state.pendingConfirm = null;
   confirmOverlay.classList.remove("is-open");
+}
+
+function openDeleteConfirm(clip) {
+  let note = "라이브러리 폴더에서만 지워집니다 — 홈페이지에는 영향이 없습니다.";
+  if (clip.stem.startsWith("artoke_"))
+    note += "\nArtoke 동기화를 다시 하면 이 클립은 다시 받아집니다.";
+  openConfirm("“" + clip.stem + "” 모션을 삭제할까요?", note, () => deleteClip(clip));
+}
+
+function openForgetFolderConfirm(folder) {
+  openConfirm(
+    "“" + folder + "” 를 최근 목록에서 지울까요?",
+    "목록에서만 빠집니다 — 폴더와 그 안의 클립은 그대로입니다.\n" +
+      "그 폴더를 다시 열면 목록에 다시 들어옵니다.",
+    () => {
+      forgetFolder(folder);
+      setFolderListOpen(true);  // 여러 개를 이어서 정리할 수 있게 열어 둔다
+      setStatus("최근 목록에서 뺐습니다: " + folder);
+    },
+    "목록에서 지우기"
+  );
+}
+
+function deleteClip(clip) {
+  if (clip.stem === state.selected) state.selected = null;
+  if (!BRIDGE.obj || !clip.path) {
+    // 목업: 화면에서만 지워 그룹 재배치를 확인한다
+    state.clips = state.clips.filter((c) => c.stem !== clip.stem);
+    renderGrid();
+    setStatus("(목업) 삭제: " + clip.stem);
+    return;
+  }
+  const folder = document.querySelector('[data-field="folder"]').value;
+  bcall("delete_clip", JSON.stringify({ folder: folder, path: clip.path }), (res) => {
+    if (res.ok) {
+      setStatus("삭제: " + res.data.removed.join(", "), "ok");
+      loadClipsFromBridge();
+    } else setStatus(res.error, "error");
+  });
 }
 
 grid.addEventListener("contextmenu", (e) => {
@@ -1029,9 +1662,17 @@ grid.addEventListener("contextmenu", (e) => {
   if (clip) openDeleteConfirm(clip);
 });
 
+/* 최근 폴더도 카드와 같은 몸짓으로 지운다 — 우클릭 후 확인. */
+document.querySelector('[data-field="folder-list"]').addEventListener("contextmenu", (e) => {
+  const entry = e.target.closest("button[data-folder]");
+  if (!entry) return;
+  e.preventDefault();
+  openForgetFolderConfirm(entry.dataset.folder);
+});
+
 /* 상자 바깥 클릭 = 취소 */
 confirmOverlay.addEventListener("click", (e) => {
-  if (e.target === confirmOverlay) closeDeleteConfirm();
+  if (e.target === confirmOverlay) closeConfirm();
 });
 
 /* ---------- 타임라인 ---------- */
@@ -1140,11 +1781,7 @@ function renderCurvePanel() {
 
 function setCurvesOpen(open) {
   state.curvesOpen = open;
-  try {
-    localStorage.setItem(CURVES_OPEN_KEY, open ? "1" : "0");
-  } catch (e) {
-    /* 저장이 막혀 있어도 이번 세션 동안은 접힌 채로 쓸 수 있어야 한다 */
-  }
+  settingSet(CURVES_OPEN_KEY, open);
   renderCurvePanel();
   // 펼치는 순간의 캔버스는 크기가 0 이었다 — 보이게 된 뒤에 다시 그린다.
   if (open) { drawSpeed(); drawArm(); }
@@ -1276,6 +1913,19 @@ document.addEventListener("click", (e) => {
   if (action === "azimuth") {
     state.azimuth = Number(btn.dataset.deg);
     setStatus("방위각 " + state.azimuth + "°");
+  } else if (action === "folder-history") {
+    setFolderListOpen(document.querySelector('[data-field="folder-list"]').hidden);
+  } else if (action === "browse") {
+    if (!BRIDGE.obj) { setStatus("(목업) 폴더 찾아보기는 Max 안에서 동작합니다."); return; }
+    const field = document.querySelector('[data-field="folder"]');
+    bcall("pick_folder", field.value, (res) => {
+      if (!res.ok) { setStatus(res.error, "error"); return; }
+      // 취소하면 빈 문자열이 온다 — 그때 경로를 지우면 안 된다.
+      if (!res.data.folder) { setStatus("폴더 고르기를 취소했습니다."); return; }
+      field.value = res.data.folder;
+      state.poseCache.clear();
+      loadClipsFromBridge();
+    });
   } else if (action === "refresh") {
     state.poseCache.clear();
     if (BRIDGE.obj) loadClipsFromBridge();
@@ -1286,8 +1936,17 @@ document.addEventListener("click", (e) => {
     bcall("sync_from_artoke", document.querySelector('[data-field="folder"]').value, (res) => {
       if (!res.ok) { setStatus(res.error, "error"); return; }
       const got = res.data.downloaded;
-      setStatus(got.length ? "Artoke 다운로드: " + got.join(", ") : "최신 상태 — 새 모션 없음", "ok");
+      const warning = res.data.phase_warning;
+      setStatus(
+        (got.length ? "Artoke 다운로드: " + got.join(", ") : "최신 상태 — 새 모션 없음") +
+          (warning ? " / " + warning : ""),
+        warning ? "error" : "ok",
+      );
       if (got.length) loadClipsFromBridge();
+      /* 모션이 그대로여도 phase.json 은 방금 받았을 수 있다 — 블렌드가 열리는
+         조건이 바뀌므로 다운로드 여부와 무관하게 다시 확인한다. */
+      state.folder = document.querySelector('[data-field="folder"]').value;
+      refreshBlendTiers();
     });
   } else if (action === "add-video") {
     addVideo();
@@ -1305,40 +1964,37 @@ document.addEventListener("click", (e) => {
       return;
     }
     const data = poseFor(state.selected);
-    const target = document.querySelector('[data-field="target"]').value;
-    const payload = {
-      path: clip.path,
-      convert: document.querySelector('[data-field="convert"]').checked,
-      mirror: document.querySelector('[data-field="mirror"]').checked,
-      trim_start: state.trim[0],
-      trim_end: state.trim[1],
-    };
+    const extras = { trim_start: state.trim[0], trim_end: state.trim[1] };
     const timeMap = timeMapFromCurve(data);
-    if (timeMap) payload.time_map = timeMap;
+    if (timeMap) extras.time_map = timeMap;
     const armKeys = armKeysFromCurve(data, timeMap);
-    if (armKeys) payload.arm_points = armKeys;
-    if (target) {
-      /* 기존 바이패드에 적용 — 이름/배치 간격은 새 바이패드 전용이라 안 보낸다 */
-      payload.biped = target;
-      setStatus("적용 중… (" + clip.stem + " → " + target + ")");
-      bcall("retarget_clip", JSON.stringify(payload), (res) => {
-        if (res.ok) {
-          setStatus(res.data.message, "ok");
-          refreshBipeds();
-        } else setStatus(res.error, "error");
-      });
-      return;
-    }
-    payload.name = document.querySelector('[data-field="name"]').value || ("Bip_" + clip.stem);
-    payload.x_offset = state.importCount * Number(document.querySelector('[data-field="spacing"]').value || 0);
-    setStatus("임포트 중… (" + clip.stem + ")");
-    bcall("import_clip", JSON.stringify(payload), (res) => {
-      if (res.ok) {
-        state.importCount++;
-        setStatus(res.data.message, "ok");
-        refreshBipeds();
-      } else setStatus(res.error, "error");
-    });
+    if (armKeys) extras.arm_points = armKeys;
+    importPath(clip.path, clip.stem, extras);
+  } else if (action === "blend-import") {
+    if (!BRIDGE.obj) { setStatus("(목업) 블렌드 임포트는 Max 안에서 동작합니다.", "error"); return; }
+    if (!state.blendTiers.length) { setStatus("8방향 세트가 없습니다 — 먼저 동기화하세요.", "error"); return; }
+    const deg = state.blendAngle;
+    setStatus("굳히는 중… (" + deg + "°)");
+    setBlendBusy(true);
+    bcall(
+      "bake_blend",
+      JSON.stringify({ folder: state.folder, angle: deg, speed_t: state.blendSpeed }),
+      (res) => {
+        setBlendBusy(false);
+        if (!res.ok) { setStatus(res.error, "error"); return; }
+        /* 트림과 커브는 넘기지 않는다: 6초 소스 타임라인에 대해 만든 값이라 한
+           보행 사이클(0.5~1.3초)짜리 결과에 걸면 대부분을 잘라낸다. convert·미러·
+           대상·이름·배치 간격은 그대로 따라간다. */
+        const speed = res.data.metresPerSecond;
+        importPath(
+          res.data.path,
+          "blend_" + String(deg).padStart(3, "0") + "deg",
+          {},
+          "블렌드 " + deg + "° · " + (speed == null ? "?" : speed.toFixed(1)) + " m/s · " +
+            res.data.frames + "프레임",
+        );
+      },
+    );
   } else if (action === "blend-preview") {
     if (!BRIDGE.obj) { setStatus("(목업) 블렌드 검수는 Max 안에서 브라우저를 엽니다."); return; }
     bcall("open_external", "https://artoke.com/viewer?blend=locomotion", (res) => {
@@ -1347,25 +2003,48 @@ document.addEventListener("click", (e) => {
   } else if (action === "toggle-curves") {
     setCurvesOpen(!state.curvesOpen);
   } else if (action === "confirm-cancel") {
-    closeDeleteConfirm();
+    closeConfirm();
   } else if (action === "confirm-delete") {
-    const clip = state.pendingDelete;
-    closeDeleteConfirm();
-    if (!clip) return;
-    if (clip.stem === state.selected) state.selected = null;
-    if (!BRIDGE.obj || !clip.path) {
-      // 목업: 화면에서만 지워 그룹 재배치를 확인한다
-      state.clips = state.clips.filter((c) => c.stem !== clip.stem);
-      renderGrid();
-      setStatus("(목업) 삭제: " + clip.stem);
-      return;
-    }
-    const folder = document.querySelector('[data-field="folder"]').value;
-    bcall("delete_clip", JSON.stringify({ folder: folder, path: clip.path }), (res) => {
-      if (res.ok) {
-        setStatus("삭제: " + res.data.removed.join(", "), "ok");
-        loadClipsFromBridge();
-      } else setStatus(res.error, "error");
+    const pending = state.pendingConfirm;
+    closeConfirm();
+    if (pending) pending.run();
+  } else if (action === "in-place-on" || action === "in-place-off") {
+    /* 맥스는 거절해도 예외를 던지지 않는다 — 파이썬이 되읽어 확인한 뒤
+       ERROR 로 돌려주므로 여기서는 그대로 보여 주면 된다. */
+    const on = action === "in-place-on";
+    if (!BRIDGE.obj) { setStatus("(목업) In Place " + (on ? "켬" : "끔")); return; }
+    const sel = document.querySelector('[data-field="biped"]');
+    if (!sel.value) { setStatus("바이패드를 선택하세요", "error"); return; }
+    bcall("set_in_place", JSON.stringify({ biped: sel.value, on: on }), (res) => {
+      setStatus(res.ok ? res.data.message : res.error, res.ok ? "ok" : "error");
+    });
+  } else if (action === "arm-space-show" || action === "arm-space-hide") {
+    const visible = action === "arm-space-show";
+    if (!BRIDGE.obj) { setStatus("(목업) 팔 간격 " + (visible ? "보기" : "숨김")); return; }
+    const sel = document.querySelector('[data-field="biped"]');
+    if (!sel.value) { setStatus("바이패드를 선택하세요", "error"); return; }
+    bcall("set_arm_space_visible", JSON.stringify({ biped: sel.value, visible: visible }), (res) => {
+      setStatus(res.ok ? res.data.message : res.error, res.ok ? "ok" : "error");
+    });
+  } else if (action === "export-bvh") {
+    if (!BRIDGE.obj) { setStatus("(목업) BVH 내보내기"); return; }
+    const sel = document.querySelector('[data-field="biped"]');
+    if (!sel.value) { setStatus("바이패드를 선택하세요", "error"); return; }
+    /* 저장 위치를 먼저 묻는다 — 경로를 손으로 치게 하면 오타 하나에 조용히
+       엉뚱한 데 쓰이고 덮어쓰기 확인도 사라진다.
+
+       파일명은 **고른 카드 이름**으로 채운다. 바이패드 이름을 쓰면 `Bip001.bvh`
+       가 되어 어느 클립을 폴리싱한 것인지 파일에 안 남는다. 카드를 안 골랐을
+       때만 바이패드 이름으로 물러선다. */
+    const folder = document.querySelector('[data-field="folder"]').value || "";
+    const stem = state.selected || sel.value;
+    bcall("choose_bvh_path", folder ? folder + "\\" + stem + ".bvh" : stem + ".bvh", (res) => {
+      if (!res.ok) { setStatus(res.error, "error"); return; }
+      if (res.data.cancelled) { setStatus("내보내기 취소"); return; }
+      setStatus("내보내는 중…");
+      bcall("export_biped_bvh", JSON.stringify({ biped: sel.value, path: res.data.path }), (out) => {
+        setStatus(out.ok ? out.data.message : out.error, out.ok ? "ok" : "error");
+      });
     });
   } else if (action === "mixer") {
     if (!BRIDGE.obj) { setStatus("(목업) Motion Mixer 전송"); return; }
@@ -1378,26 +2057,86 @@ document.addEventListener("click", (e) => {
   }
 });
 
-document.querySelector('[data-field="search"]').addEventListener("input", renderGrid);
-document.querySelector('[data-field="category"]').addEventListener("click", (e) => {
+document.querySelector('[data-field="search"]').addEventListener("input", () => {
+  // 칩도 같이 다시 그린다 — 숫자가 검색 결과를 따라가야 하고, 선반이 풀렸다면
+  // 그 사실이 보여야 한다.
+  widenIfShelfHasNoMatch();
+  renderShelfChips();
+  renderGrid();
+});
+/* 세 줄을 감싼 곳에서 한 번에 받는다. 위 단계를 바꾸면 아래 단계는 푼다 —
+   "공격>돌진>시작" 을 보다가 "이동" 으로 옮겼는데 돌진/시작이 남아 있으면
+   아무것도 안 나오고, 왜 비었는지는 화면에 안 적혀 있다. */
+document.querySelector('[data-field="folder-list"]').addEventListener("click", (e) => {
+  const picked = e.target.closest("button[data-folder]");
+  if (!picked) return;
+  document.querySelector('[data-field="folder"]').value = picked.dataset.folder;
+  setFolderListOpen(false);
+  // 고르는 것과 여는 것을 나누지 않는다 — 고르고 나서 새로고침을 또 눌러야 하면
+  // 목록에서 고른 의미가 없다.
+  if (BRIDGE.obj) loadClipsFromBridge();
+  else setStatus("Max 브리지가 없어 폴더만 바꿨습니다: " + picked.dataset.folder);
+});
+
+// 바깥을 누르거나 Esc 로 닫는다. 열어 두면 그리드를 가린다.
+// 확인 상자 안의 클릭은 바깥이 아니다 — 목록에서 항목을 지우는 중이라 뒤의
+// 목록이 접히면 여러 개를 이어서 정리할 수 없다.
+document.addEventListener("click", (e) => {
+  if (e.target.closest(".folder-field") || e.target.closest(".confirm-overlay")) return;
+  setFolderListOpen(false);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  // 모달이 떠 있으면 그것만 닫는다. 뒤의 목록까지 같이 접으면 다시 열어야 한다.
+  if (state.pendingConfirm) { closeConfirm(); return; }
+  setFolderListOpen(false);
+});
+
+document.querySelector(".shelf-chips").addEventListener("click", (e) => {
   const chip = e.target.closest(".cat-chip");
   if (!chip) return;
-  state.category = chip.dataset.cat;
-  renderCategoryBar();
+  const field = chip.closest("[data-field]").dataset.field;
+  if (field === "category") {
+    state.category = chip.dataset.value;
+    state.sub = "";
+    state.detail = "";
+  } else if (field === "sub") {
+    state.sub = chip.dataset.value;
+    state.detail = "";
+  } else {
+    state.detail = chip.dataset.value;
+  }
+  renderShelfChips();
   renderGrid();
 });
 document.querySelector('[data-field="target"]').addEventListener("change", updateImportButton);
 
+document.querySelector('[data-field="blend-angle"]').addEventListener("input", (e) => {
+  state.blendAngle = Number(e.target.value);
+  document.querySelector('[data-out="blend-angle"]').textContent = state.blendAngle + "°";
+});
+document.querySelector('[data-field="blend-speed"]').addEventListener("input", (e) => {
+  state.blendSpeed = Number(e.target.value);
+  document.querySelector('[data-out="blend-speed"]').textContent = blendSpeedLabel();
+});
+
 /* ---------- 시작 ---------- */
 state.clips = DUMMY_CLIPS;
 state.categories = DUMMY_CATEGORIES;
-renderCategoryBar();
+renderShelfChips();
 renderGrid();
 renderTimeline();
 drawSpeed();
 drawArm();
 renderCurvePanel();
+renderBlendControls();
 window.addEventListener("resize", () => { renderTimeline(); drawSpeed(); drawArm(); });
+
+/* 마지막으로 열었던 폴더로 시작한다. 매번 기본 폴더로 돌아가면 다른 폴더에서
+   일하던 사람은 창을 열 때마다 경로를 다시 쳐야 한다 — 브리지가 붙는 즉시 이
+   값으로 읽으므로, 하던 자리에서 이어진다. */
+restoreLastFolder();
+
 if (!connectBridge())
   setStatus("더미 데이터로 동작 중입니다 — Max 브리지 없음. 클립을 고르세요.");
 </script>

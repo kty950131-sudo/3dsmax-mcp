@@ -23,6 +23,8 @@ the ``*_tpose`` export.
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
+from maxmcp.helpers.quat import euler_to_quat, quat_mul, quat_rotate, quat_to_euler
+
 _STATIC_EPS = 1e-4
 
 # Joints Character Studio has no slot for; SMPL-X style exports carry them.
@@ -190,6 +192,76 @@ def _column_map(root: BvhJoint) -> dict[int, tuple[int, int]]:
     return mapping
 
 
+def fold_constant_positions(bvh: BvhFile, eps: float = _STATIC_EPS) -> BvhFile:
+    """비루트 조인트의 고정된 위치 채널을 OFFSET 에 접어 넣고 그 채널을 지운다.
+
+    게임에서 뽑은 FBX 는 조인트마다 위치 채널을 함께 내보내는데 그 값이 전 프레임
+    상수다(실측: 엘렌 run 은 22개 중 루트만 빼고 21개가 변화량 1e-6 이하). 문제는
+    **그 상수가 HIERARCHY 의 OFFSET 과 다르다**는 것이다 — 손·발에서 최대 0.42,
+    뼈 길이의 절반만큼 어긋난다. 둘 중 진짜 바인드는 상수 쪽이다.
+
+    Character Studio 는 위치 채널을 **무시하고** OFFSET 으로 피겨를 세운다(실측:
+    채널만 지운 파일과 그대로 둔 파일의 로드 결과가 한 치도 다르지 않았다). 그래서
+    어긋난 OFFSET 이 그대로 뼈대가 되는데 회전은 진짜 바인드 기준으로 만들어진
+    값이라, 손발만 돌아간 자세가 된다. 원본 FBX 를 맥스에 직접 임포트한 것과
+    프레임 6 에서 비교하면 손 45.2°/36.5°, 발 35.3°/93.8° 벌어졌고, 상수를 OFFSET
+    으로 접으면 0.0°/0.0°/0.1°/1.7° 로 내려간다. 팔·척추처럼 원래 맞던 본은 그대로다.
+
+    상수가 아닌 위치 채널은 건드리지 않는다 — 루트 이동처럼 진짜 애니메이션이다.
+    한 조인트의 위치 채널은 전부 상수일 때만 접는다: BVH 의 위치 채널은 OFFSET 을
+    더하는 게 아니라 **대신하므로**, 축 일부만 접으면 남은 축과 뜻이 어긋난다.
+    """
+    if not bvh.frames:
+        return bvh
+
+    columns = _column_map(bvh.root)
+    keep: list[int] = []
+    rebuilt: dict[int, tuple[tuple[float, float, float], list[str]]] = {}
+
+    def visit(joint: BvhJoint, is_root: bool) -> None:
+        start, count = columns[id(joint)]
+        offset = list(joint.offset)
+        drop: set[int] = set()
+        if not is_root:
+            pos_index = [
+                i for i, ch in enumerate(joint.channels)
+                if ch.lower().endswith("position")
+            ]
+            tracks = [[row[start + i] for row in bvh.frames] for i in pos_index]
+            if pos_index and all(max(t) - min(t) <= eps for t in tracks):
+                for i in pos_index:
+                    axis = "xyz".index(joint.channels[i][0].lower())
+                    offset[axis] = bvh.frames[0][start + i]
+                drop = set(pos_index)
+        keep.extend(start + i for i in range(count) if i not in drop)
+        rebuilt[id(joint)] = (
+            (offset[0], offset[1], offset[2]),
+            [ch for i, ch in enumerate(joint.channels) if i not in drop],
+        )
+        for child in joint.children:
+            visit(child, False)
+
+    visit(bvh.root, True)
+    if len(keep) == len(bvh.frames[0]):
+        return bvh
+
+    def rebuild(joint: BvhJoint) -> BvhJoint:
+        offset, channels = rebuilt[id(joint)]
+        return BvhJoint(
+            name=joint.name,
+            offset=offset,
+            channels=channels,
+            children=[rebuild(c) for c in joint.children],
+            end_site=joint.end_site,
+        )
+
+    return BvhFile(
+        root=rebuild(bvh.root),
+        frame_time=bvh.frame_time,
+        frames=[[row[i] for i in keep] for row in bvh.frames],
+    )
+
+
 def strip_static_root(bvh: BvhFile) -> BvhFile:
     """Drop a static wrapper root (all channels ~0 every frame) above the real root.
 
@@ -257,6 +329,131 @@ def prune_joints(bvh: BvhFile, names: tuple[str, ...]) -> BvhFile:
         [v for i, v in enumerate(row) if i not in drop_cols] for row in bvh.frames
     ]
     return BvhFile(root=new_root, frame_time=bvh.frame_time, frames=new_frames)
+
+
+def _axis_values(joint: BvhJoint, row: Sequence[float], start: int, suffix: str):
+    """채널 이름으로 축별 값을 읽는다. 채널 순서를 위치로 가정하지 않는다 —
+    ``Zrotation Yrotation Xrotation`` 과 ``Xrotation Yrotation Zrotation`` 이
+    같은 열 순서를 뜻하지 않기 때문이다."""
+    axes = {"X": 0.0, "Y": 0.0, "Z": 0.0}
+    for index, channel in enumerate(joint.channels):
+        if channel.endswith(suffix):
+            axes[channel[0].upper()] = row[start + index]
+    return axes["X"], axes["Y"], axes["Z"]
+
+
+def _write_axis_values(joint: BvhJoint, row: list, start: int, suffix: str, values) -> None:
+    axes = dict(zip("XYZ", values))
+    for index, channel in enumerate(joint.channels):
+        if channel.endswith(suffix):
+            row[start + index] = axes[channel[0].upper()]
+
+
+def wrap_static_root(bvh: BvhFile, name: str = "Root") -> BvhFile:
+    """원점에 고정 루트를 하나 씌운다. 이미 있으면 그대로 둔다.
+
+    월드 원점이 어디인지 눈으로 볼 수 있어야 캐릭터가 제자리에 있는지, 흘러가는지
+    판단할 수 있다. artoke 자체 클립이 쓰는 모양과 같다(``ROOT Root`` → ``JOINT Hips``).
+
+    임포트에는 영향이 없다 — 채널이 전 프레임 0 이므로 ``prepare_for_biped`` 의
+    ``strip_static_root`` 가 다시 벗겨내고, 그때 오프셋은 자식에 더해진다. 움직이는
+    래퍼였다면 벗겨지지 않고 Character Studio 가 모르는 이름이 루트에 남는다 —
+    그래서 이 함수는 **고정** 루트만 씌운다.
+    """
+    if bvh.root.name == name:
+        return bvh
+    channels = ["Xposition", "Yposition", "Zposition", "Zrotation", "Yrotation", "Xrotation"]
+    root = BvhJoint(name=name, offset=(0.0, 0.0, 0.0), channels=channels, children=[bvh.root])
+    pad = [0.0] * len(channels)
+    frames = [pad + row for row in bvh.frames]
+    return BvhFile(root=root, frame_time=bvh.frame_time, frames=frames)
+
+
+def merge_into_parent(bvh: BvhFile, name: str) -> BvhFile:
+    """관절 하나를 부모에 합치고 그 자식들을 부모에 직접 붙인다.
+
+    Character Studio 가 모르는 이름이 필수 체인 중간에 끼어 있으면 파일 전체가
+    거부된다. Max Biped 에서 온 클립의 ``Bip001`` / ``Bip001 Pelvis`` 처럼 실제로는
+    한 관절인 쌍이 그렇다 — BVH 표준에서 그 둘은 ``Hips`` 하나다.
+
+    동작은 버리지 않는다. 합성은 정확하다::
+
+        R_parent' = R_parent · R_child
+        T_parent' = T_parent + R_parent · (O_child + T_child)
+
+    회전은 사원수로 합성한다(각도를 더하면 축이 달라 틀린다). 자식의 rest 오프셋이
+    부모 회전에 딸려 도는 몫은 프레임마다 부모의 위치 채널에 흡수시킨다 — 이 항을
+    빼먹으면 부모가 회전할 때만 어긋나서, 가만히 선 클립에서는 안 보이고 도는
+    클립에서만 틀린다.
+
+    합칠 관절의 자식들은 오프셋도 회전도 그대로 둔다. 위 식이 그 앞의 변환을
+    똑같이 재현하므로 손댈 이유가 없다.
+    """
+    parent = None
+    target = None
+
+    def find(joint: BvhJoint) -> None:
+        nonlocal parent, target
+        for child in joint.children:
+            if child.name == name:
+                parent, target = joint, child
+                return
+            find(child)
+
+    find(bvh.root)
+    if target is None:
+        if bvh.root.name == name:
+            raise ValueError(f"루트({name})는 부모가 없어 합칠 수 없습니다")
+        return bvh
+    if not any(c.endswith("position") for c in parent.channels):
+        raise ValueError(
+            f"{parent.name} 에 위치 채널이 없어 {name} 의 오프셋을 흡수할 수 없습니다"
+        )
+
+    columns = _column_map(bvh.root)
+    parent_start, _ = columns[id(parent)]
+    target_start, target_count = columns[id(target)]
+
+    new_frames: list[list[float]] = []
+    for row in bvh.frames:
+        merged = list(row)
+        px, py, pz = _axis_values(parent, row, parent_start, "rotation")
+        cx, cy, cz = _axis_values(target, row, target_start, "rotation")
+        parent_quat = euler_to_quat(px, py, pz)
+        combined = quat_mul(parent_quat, euler_to_quat(cx, cy, cz))
+        _write_axis_values(parent, merged, parent_start, "rotation", quat_to_euler(combined))
+
+        tx, ty, tz = _axis_values(target, row, target_start, "position")
+        carried = quat_rotate(
+            parent_quat,
+            (target.offset[0] + tx, target.offset[1] + ty, target.offset[2] + tz),
+        )
+        moved = _axis_values(parent, row, parent_start, "position")
+        _write_axis_values(
+            parent, merged, parent_start, "position",
+            (moved[0] + carried[0], moved[1] + carried[1], moved[2] + carried[2]),
+        )
+        new_frames.append([v for i, v in enumerate(merged)
+                           if not target_start <= i < target_start + target_count])
+
+    def copy_joint(joint: BvhJoint) -> BvhJoint:
+        children: list[BvhJoint] = []
+        for child in joint.children:
+            # 합칠 관절 자리에 그 자식들이 그대로 들어선다 — 순서를 지켜야 남은
+            # 관절들의 열 순서가 프레임 자르기와 어긋나지 않는다.
+            if child is target:
+                children.extend(copy_joint(grand) for grand in child.children)
+            else:
+                children.append(copy_joint(child))
+        return BvhJoint(
+            name=joint.name,
+            offset=joint.offset,
+            channels=list(joint.channels),
+            children=children,
+            end_site=joint.end_site,
+        )
+
+    return BvhFile(root=copy_joint(bvh.root), frame_time=bvh.frame_time, frames=new_frames)
 
 
 def _collect_columns(
@@ -348,6 +545,118 @@ def has_upright_spine(text: str) -> bool:
     if spine is None:
         return True
     return abs(spine.offset[1]) >= abs(spine.offset[0])
+
+
+def recenter_ground(bvh: BvhFile) -> BvhFile:
+    """0프레임의 지면 위치(X,Z)가 월드 원점에 오도록 전체 궤적을 평행이동한다.
+
+    게임에서 뽑은 클립은 연출 위치에서 녹화된 그대로라 시작점이 원점이 아니다
+    (실측: 레미엘 96개 중 83개, 엘렌 75개 중 38개가 0.3 이상 벗어나 시작하고,
+    최대 16을 넘는다). 그대로 임포트하면 캐릭터가 원점과 무관한 자리에 서고,
+    배치 간격(x_offset)도 그 위에 얹혀서 의미가 없어진다.
+
+    높이(Y)는 건드리지 않는다 — 공중 클립은 떠서 시작하는 것이 맞다. 회전도
+    건드리지 않는다: 어디를 보고 시작하는지는 데이터다.
+    """
+    axis_col = {}
+    for i, ch in enumerate(bvh.root.channels):
+        low = ch.lower()
+        if low == "xposition":
+            axis_col[0] = i
+        elif low == "zposition":
+            axis_col[2] = i
+    if not axis_col or not bvh.frames:
+        return bvh
+    shift = {
+        col: -(bvh.root.offset[axis] + bvh.frames[0][col])
+        for axis, col in axis_col.items()
+    }
+    if all(abs(v) < 1e-12 for v in shift.values()):
+        return bvh
+    new_frames = []
+    for row in bvh.frames:
+        new_row = list(row)
+        for col, delta in shift.items():
+            new_row[col] += delta
+        new_frames.append(new_row)
+    return BvhFile(root=bvh.root, frame_time=bvh.frame_time, frames=new_frames)
+
+
+def rig_height(bvh: BvhFile) -> float:
+    """쉬는 자세 골격의 세로 길이 — 이 파일이 주장하는 캐릭터 키.
+
+    ``biped.loadMocapFile`` 은 바이패드를 **파일 치수에 맞춰 다시 만든다**.
+    그래서 이 값이 곧 임포트 뒤 바이패드의 키가 된다.
+
+    실측(2026-08-19): 게임에서 뽑은 클립은 미터라 엘렌 1.2 · 레미엘 1.1~2.3 ·
+    컷신 30.1 이고, Kimodo 는 센티미터라 176.4 다. 섞어 쓰면 같은 씬에 키가
+    100배 다른 바이패드가 선다.
+    """
+    heights: list[float] = []
+
+    def visit(joint: BvhJoint, y: float) -> None:
+        y += joint.offset[1]
+        heights.append(y)
+        for child in joint.children:
+            visit(child, y)
+        if joint.end_site is not None:
+            heights.append(y + joint.end_site[1])
+
+    visit(bvh.root, 0.0)
+    return max(heights) - min(heights) if heights else 0.0
+
+
+def scale_bvh(bvh: BvhFile, factor: float) -> BvhFile:
+    """뼈 길이와 이동을 같은 배율로 키운다.
+
+    회전 채널은 건드리지 않는다 — 각도는 크기와 무관하다. 반대로 오프셋만 키우고
+    이동 채널을 두면 다리는 길어졌는데 보폭은 그대로라 발이 미끄러진다.
+    """
+    if factor == 1.0:
+        return bvh
+
+    def copy_joint(joint: BvhJoint) -> BvhJoint:
+        return BvhJoint(
+            name=joint.name,
+            offset=tuple(v * factor for v in joint.offset),  # type: ignore[arg-type]
+            channels=list(joint.channels),
+            children=[copy_joint(c) for c in joint.children],
+            end_site=(
+                tuple(v * factor for v in joint.end_site)  # type: ignore[arg-type]
+                if joint.end_site is not None
+                else None
+            ),
+        )
+
+    root = copy_joint(bvh.root)
+    columns = _column_map(bvh.root)
+    position_cols: list[int] = []
+
+    def collect(joint: BvhJoint) -> None:
+        start, _ = columns[id(joint)]
+        for i, ch in enumerate(joint.channels):
+            if ch.lower().endswith("position"):
+                position_cols.append(start + i)
+        for child in joint.children:
+            collect(child)
+
+    collect(bvh.root)
+    frames = [
+        [v * factor if i in set(position_cols) else v for i, v in enumerate(row)]
+        for row in bvh.frames
+    ]
+    return BvhFile(root=root, frame_time=bvh.frame_time, frames=frames)
+
+
+def scale_to_height(bvh: BvhFile, target: float) -> BvhFile:
+    """골격 키가 ``target`` 이 되도록 통째로 조정한다.
+
+    키를 못 재는 파일(오프셋이 전부 0)은 그대로 둔다 — 0 으로 나누지 않는다.
+    """
+    current = rig_height(bvh)
+    if current <= 0.0 or target <= 0.0:
+        return bvh
+    return scale_bvh(bvh, target / current)
 
 
 def offset_root(bvh: BvhFile, offset: tuple[float, float, float]) -> BvhFile:
@@ -476,16 +785,30 @@ def prepare_for_biped(
     speed: float = 1.0,
     trim_range: tuple[float, float] = (0.0, 1.0),
     time_map: Optional[Sequence[float]] = None,
+    recenter: bool = True,
+    target_height: Optional[float] = None,
 ) -> str:
     """Rewrite BVH text so 3ds Max biped.loadMocapFile accepts it.
 
     ``time_map`` 을 주면 균일 ``speed`` 대신 비균일 타임워프를 적용한다.
     인덱스는 트림된 뒤 클립 기준이다. 주지 않으면 기존 경로 그대로다.
+
+    ``recenter`` 는 0프레임 지면 위치를 원점으로 평행이동한다(기본 켬). 끄는 것은
+    프리-Task2 바이트 호환을 검증하는 골든 테스트뿐이다.
     """
     bvh = parse_bvh(text)
+    # 어긋난 OFFSET 을 먼저 바로잡는다 — 아래 단계가 전부 OFFSET 위에서 돈다.
+    bvh = fold_constant_positions(bvh)
     bvh = strip_static_root(bvh)
     bvh = prune_joints(bvh, prune)
     bvh = rename_for_biped(bvh)
+    # 크기 정규화는 재중심·오프셋보다 **앞**에 온다. 배치 오프셋은 씬 단위라
+    # 파일 배율에 딸려 커지면 자리가 어긋난다.
+    if target_height is not None:
+        bvh = scale_to_height(bvh, target_height)
+    if recenter:
+        # 원점에서 시작해야 배치 간격이 "원점 기준 n번째 자리"가 된다
+        bvh = recenter_ground(bvh)
     bvh = offset_root(bvh, offset)
     bvh = trim(bvh, trim_range[0], trim_range[1])
     if time_map is None:

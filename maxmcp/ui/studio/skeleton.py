@@ -41,21 +41,25 @@ def fk(bvh: BvhFile, frame: int) -> dict[str, Vec3]:
 
     def visit(joint: BvhJoint, parent_pos: Vec3, parent_rot: Mat3) -> None:
         nonlocal col
-        trans: Vec3 = (0.0, 0.0, 0.0)
+        # 위치 채널은 OFFSET 에 더하는 델타가 아니라 그 축의 로컬 좌표 **그 자체**다.
+        # Blender BVH 익스포터(fbx_to_bvh 가 쓴다)는 자식 관절 위치 채널에 쉬는
+        # 자세의 OFFSET 과 거의 같은 절대값을 넣는데, 여기에 OFFSET 을 또 더하면
+        # 뼈가 두 배가 된다 — 실측으로 fk 가 잰 허벅지 0.7515 는 오프셋 0.3757 의
+        # 정확히 2배였고, 두 값이 미묘하게 다른 관절(엘렌 무릎: z 0.0039 vs
+        # 0.0004)에서는 자세가 틀어져 프리뷰가 역관절을 그렸다. Blender 임포터와
+        # 원본 FBX 를 정답으로 두고 맞췄다(무릎각 27도 -> 36.12도).
+        local_list = list(joint.offset)
         rot = _IDENTITY
         for name in joint.channels:
             value = row[col]
             axis = name[0].upper()
             if name.lower().endswith("position"):
-                idx = {"X": 0, "Y": 1, "Z": 2}[axis]
-                trans = tuple(  # type: ignore[assignment]
-                    value if i == idx else trans[i] for i in range(3)
-                )
+                local_list[{"X": 0, "Y": 1, "Z": 2}[axis]] = value
             else:
                 rot = _mul(rot, _rot(axis, value))
             col += 1
 
-        local = tuple(joint.offset[i] + trans[i] for i in range(3))
+        local = tuple(local_list)
         world = _apply(parent_rot, local)  # type: ignore[arg-type]
         pos = tuple(parent_pos[i] + world[i] for i in range(3))
         out[joint.name] = pos  # type: ignore[assignment]
