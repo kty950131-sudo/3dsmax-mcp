@@ -20,6 +20,8 @@ MANIFEST_NAME = "artoke-manifest.json"
 # 만드는 파일이고, 동기화가 건드리지 않는다 — 사이트에 올리지 않기로 한 클립을
 # 스튜디오에서만 선반에 얹으려면 이게 필요하다. 사이트에는 아무것도 보내지 않는다.
 LOCAL_SHELF_NAME = "local-shelf.json"
+#: 맥스에서 손본 클립을 두는 곳. 원본과 같은 이름을 써서 경로만 봐도 짝이 드러난다.
+POLISHED_DIR = "polished"
 
 
 class Clip(NamedTuple):
@@ -33,6 +35,9 @@ class Clip(NamedTuple):
     # 로컬이다 — 사이트에서 내려온 클립은 예외 없이 접두사를 달고 저장된다.
     # 카드에 표시하려고 들고 다닌다: 사이트에 없는 클립은 지우면 되돌릴 곳이 없다.
     local: bool = False
+    # polished/ 에 같은 이름의 손본 클립이 있는가. 목록에 표시하지 않으면 같은
+    # 클립을 두 번 손보거나, 이미 고친 것을 원본으로 착각한다.
+    polished: bool = False
 
 
 def extract_tags(stem: str) -> tuple[str, ...]:
@@ -80,6 +85,14 @@ def scan(folder: str) -> list[Clip]:
     if not os.path.isdir(folder):
         return []
     shelf = load_shelf(folder)
+    # polished/ 는 하위 폴더라 목록 스캔에 안 잡힌다(재귀하지 않는다). 여기서
+    # 이름만 모아 두고 표시에만 쓴다.
+    polished_dir = os.path.join(folder, POLISHED_DIR)
+    polished = (
+        {n for n in os.listdir(polished_dir) if n.lower().endswith(".bvh")}
+        if os.path.isdir(polished_dir)
+        else set()
+    )
     clips: list[Clip] = []
     for name in sorted(os.listdir(folder)):
         if not name.lower().endswith(".bvh"):
@@ -101,6 +114,7 @@ def scan(folder: str) -> list[Clip]:
                 sub=sub,
                 detail=detail,
                 local=not synced,
+                polished=name in polished,
             )
         )
     return clips

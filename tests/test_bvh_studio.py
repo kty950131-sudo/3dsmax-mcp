@@ -1721,3 +1721,58 @@ def test_studio_page_says_why_blending_is_unavailable() -> None:
     body = html.split("function renderBlendControls")[1].split("\nfunction ")[0]
     assert "8방향 세트가 없어" in body
     assert "phase.json" in body
+
+
+# ---- 우클릭 메뉴 ----
+# 우클릭이 곧 삭제였다. 폴리싱 저장·되돌리기가 붙으면서 세 갈래가 됐으므로
+# 메뉴로 바꾼다 — 실수로 지우는 것도 한 겹 막힌다.
+
+
+def test_right_click_opens_a_menu_not_the_delete_modal() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert 'class="clip-menu"' in html
+    for action in ("polish-save", "polish-revert", "menu-delete"):
+        assert f'data-action="{action}"' in html, action
+
+
+def test_menu_calls_the_export_and_revert_bridges() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    menu = html[html.index('data-action="polish-save"') :]
+    # 폴리싱 저장은 내보내기 슬롯을 쓴다 — BVH 쓰기는 한 곳뿐이다
+    assert "export_biped_bvh" in menu
+
+
+# ---- 폴리싱 상태 표시 ----
+# 어느 클립에 폴리싱본이 있는지 목록에서 보여야 한다. 안 보이면 같은 클립을
+# 두 번 손보거나, 이미 고친 것을 원본으로 착각한다.
+
+
+def test_scan_marks_clips_that_have_a_polished_take(tmp_path) -> None:
+    from maxmcp.ui.studio.library import scan
+
+    (tmp_path / "run-f.bvh").write_text("HIERARCHY", encoding="utf-8")
+    (tmp_path / "run-r.bvh").write_text("HIERARCHY", encoding="utf-8")
+    polished = tmp_path / "polished"
+    polished.mkdir()
+    (polished / "run-f.bvh").write_text("HIERARCHY", encoding="utf-8")
+
+    by_stem = {clip.stem: clip for clip in scan(str(tmp_path))}
+    assert by_stem["run-f"].polished is True
+    assert by_stem["run-r"].polished is False
+
+
+def test_polished_folder_is_not_listed_as_clips(tmp_path) -> None:
+    """polished/ 안의 파일이 목록에 또 뜨면 같은 클립이 두 번 보인다."""
+    from maxmcp.ui.studio.library import scan
+
+    (tmp_path / "run-f.bvh").write_text("HIERARCHY", encoding="utf-8")
+    polished = tmp_path / "polished"
+    polished.mkdir()
+    (polished / "run-f.bvh").write_text("HIERARCHY", encoding="utf-8")
+
+    assert [clip.stem for clip in scan(str(tmp_path))] == ["run-f"]
+
+
+def test_card_shows_the_polished_mark() -> None:
+    html = STUDIO_PAGE.read_text(encoding="utf-8")
+    assert "clip.polished" in html

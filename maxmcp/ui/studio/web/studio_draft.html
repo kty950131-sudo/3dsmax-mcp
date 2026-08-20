@@ -187,6 +187,26 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 /* 카드 설명. 브라우저 기본 title 툴팁은 Max 의 웹뷰에서 카드 아래 고정된 자리에
    뜨고 늦게 나타난다 — 커서를 옮겨 가며 여러 장을 훑을 때 어느 카드 설명인지
    알기 어렵다. 커서를 따라오게 직접 그린다. */
+.clip-card.is-polished::after {
+  content: ""; position: absolute; top: .4rem; right: .4rem;
+  width: .5rem; height: .5rem; border-radius: 50%;
+  background: #e0524d; box-shadow: 0 0 0 2px rgba(0,0,0,.35);
+}
+
+.clip-menu {
+  position: fixed; z-index: 60; min-width: 9rem; padding: .25rem;
+  background: var(--panel, #24242c); border: 1px solid var(--line, #3a3a45);
+  border-radius: .5rem; box-shadow: 0 6px 20px rgba(0,0,0,.45);
+  display: flex; flex-direction: column;
+}
+.clip-menu button {
+  text-align: left; background: none; border: 0; padding: .4rem .6rem;
+  border-radius: .35rem; color: inherit; cursor: pointer;
+}
+.clip-menu button:hover { background: var(--hover, #33333d); }
+.clip-menu button.danger:hover { background: #5a2a2a; }
+.clip-menu hr { border: 0; border-top: 1px solid var(--line, #3a3a45); margin: .25rem 0; }
+
 .clip-tip {
   position: fixed;
   z-index: 60;
@@ -467,6 +487,15 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
   </div>
 </div>
 </section>
+
+<!-- 우클릭 메뉴. 우클릭이 곧 삭제였는데 폴리싱이 붙어 세 갈래가 됐다.
+     메뉴로 바꾸면 실수로 지우는 것도 한 겹 막힌다. -->
+<div class="clip-menu" hidden>
+  <button data-action="polish-save">폴리싱 저장</button>
+  <button data-action="polish-revert">되돌리기</button>
+  <hr>
+  <button data-action="menu-delete" class="danger">삭제</button>
+</div>
 
 <div class="confirm-overlay">
   <div class="confirm-box">
@@ -1230,6 +1259,9 @@ function makeCard(clip) {
   // 사이트에서 내려온 클립은 접두사가 붙어 저장된다. 접두사가 없으면 이 PC 에만
   // 있는 것이고, 동기화가 다시 받아 주지 않으므로 파랗게 표시한다.
   if (clip.local) card.classList.add("is-local");
+  /* 폴리싱본이 있으면 카드에 점을 찍는다. 안 보이면 같은 클립을 두 번 손보거나
+     이미 고친 것을 원본으로 착각한다. */
+  if (clip.polished) card.classList.add("is-polished");
   card.innerHTML =
     "<canvas></canvas><span class='thumb-badge'>MAX</span>" +
     "<span class='local-badge' title='이 PC 에만 있는 클립 — 동기화로 복구되지 않습니다'>LOCAL</span>" +
@@ -1298,6 +1330,7 @@ function clipTooltip(clip) {
     }
   }
   if (clip.local) lines.push("이 PC 에만 있는 클립");
+  if (clip.polished) lines.push("폴리싱본 있음 (polished/)");
   return lines.join("\n");
 }
 
@@ -1654,12 +1687,63 @@ function deleteClip(clip) {
   });
 }
 
+const clipMenu = document.querySelector(".clip-menu");
+/* 메뉴가 겨냥한 클립. 메뉴를 연 뒤 다른 카드를 골라도 대상이 바뀌지 않아야 한다. */
+let menuClip = null;
+
+function closeClipMenu() { clipMenu.hidden = true; menuClip = null; }
+document.addEventListener("click", (e) => {
+  if (!clipMenu.hidden && !clipMenu.contains(e.target)) closeClipMenu();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeClipMenu(); });
+window.addEventListener("scroll", closeClipMenu, true);
+
 grid.addEventListener("contextmenu", (e) => {
   const card = e.target.closest(".clip-card");
   if (!card) return;
   e.preventDefault();
-  const clip = state.clips.find((c) => c.stem === card.dataset.stem);
-  if (clip) openDeleteConfirm(clip);
+  menuClip = state.clips.find((c) => c.stem === card.dataset.stem) || null;
+  if (!menuClip) return;
+  /* 커서 자리에 띄우되 화면 밖으로 나가지 않게 민다. */
+  clipMenu.hidden = false;
+  const box = clipMenu.getBoundingClientRect();
+  clipMenu.style.left = Math.min(e.clientX, window.innerWidth - box.width - 8) + "px";
+  clipMenu.style.top = Math.min(e.clientY, window.innerHeight - box.height - 8) + "px";
+});
+
+clipMenu.addEventListener("click", (e) => {
+  const action = e.target.closest("button")?.dataset.action;
+  const clip = menuClip;
+  closeClipMenu();
+  if (!action || !clip) return;
+
+  if (action === "menu-delete") { openDeleteConfirm(clip); return; }
+
+  if (!BRIDGE.obj) { setStatus("(목업) " + action + " — " + clip.stem); return; }
+  const sel = document.querySelector('[data-field="biped"]');
+
+  if (action === "polish-save") {
+    /* 폴리싱본은 원본 옆 polished/ 에 같은 이름으로 둔다 — 경로만 봐도 짝이 드러난다.
+       BVH 쓰기는 내보내기 슬롯 하나뿐이라 그것을 그대로 쓴다. */
+    if (!sel.value) { setStatus("바이패드를 선택하세요", "error"); return; }
+    const folder = document.querySelector('[data-field="folder"]').value || "";
+    const path = folder + "\polished\\" + clip.stem + ".bvh";
+    setStatus("폴리싱 저장 중… " + clip.stem);
+    bcall("export_biped_bvh", JSON.stringify({ biped: sel.value, path: path }), (res) => {
+      setStatus(res.ok ? "폴리싱 저장 " + clip.stem : res.error, res.ok ? "ok" : "error");
+    });
+    return;
+  }
+
+  if (action === "polish-revert") {
+    /* 되돌리기는 polished/ 의 파일만 지운다. 원본은 손대지 않았으므로 그것으로 끝난다. */
+    const folder = document.querySelector('[data-field="folder"]').value || "";
+    bcall("delete_clip", JSON.stringify({
+      folder: folder, path: folder + "\polished\\" + clip.stem + ".bvh",
+    }), (res) => {
+      setStatus(res.ok ? "되돌림 " + clip.stem : res.error, res.ok ? "ok" : "error");
+    });
+  }
 });
 
 /* 최근 폴더도 카드와 같은 몸짓으로 지운다 — 우클릭 후 확인. */
