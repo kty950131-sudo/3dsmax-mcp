@@ -32,10 +32,13 @@ class Rule(NamedTuple):
 # 순서가 중요하다. ``*-end`` 는 더 넓은 규칙보다 먼저 와야 하고 (``dash-cut-01-end``
 # 는 종료지 지속이 아니다), ``idle-afk`` 는 ``idle`` 보다 먼저 와야 한다.
 COMBAT_PACKAGE_RULES: tuple[Rule, ...] = (
-    # 기본 연계 — Normal_01/02/03 이 1타/2타/3타다
-    Rule("attack-normal-01-*", "attack", "combo", "hit1"),
-    Rule("attack-normal-02-*", "attack", "combo", "hit2"),
-    Rule("attack-normal-03-*", "attack", "combo", "hit3"),
+    # 기본 연계 — Normal_01/02/03 이 1타/2타/3타다. 번호 뒤 두 번째 인덱스는
+    # 패키지마다 있기도 없기도 하다(``attack-normal-01-01`` / ``attack-normal-01``)
+    # 그래서 접미사를 요구하지 않는다. 4타까지 있는 캐릭터도 있다.
+    Rule("attack-normal-01*", "attack", "combo", "hit1"),
+    Rule("attack-normal-02*", "attack", "combo", "hit2"),
+    Rule("attack-normal-03*", "attack", "combo", "hit3"),
+    Rule("attack-normal-04*", "attack", "combo", "hit4"),
     # 분기 연계
     Rule("attack-branch-01*", "attack", "branch", "b1"),
     Rule("attack-branch-02*", "attack", "branch", "b2"),
@@ -53,10 +56,23 @@ COMBAT_PACKAGE_RULES: tuple[Rule, ...] = (
     # 지원 — AssaultAid 는 교대 지원, Rush 는 협공
     Rule("attack-assaultaid*", "attack", "assist", "switch"),
     Rule("attack-rush*", "attack", "assist", "team"),
+    # 버스트 — EX 와 Max 는 같은 기술의 상위 단계다. 이름은 attack 으로 시작하지만
+    # 일반 연계가 아니라 자원을 모아 쓰는 최종기라 궁극기 선반에 둔다.
+    Rule("attack-burst-ex-max*", "skill", "ultimate", "max"),
+    Rule("attack-burst-ex-*", "skill", "ultimate", "ex"),
+    Rule("attack-burst-*", "skill", "ultimate", "base"),
+    # 특수기 — EX 는 강화판이다. 에너지를 써서 나가는 공격이라 charge 다.
+    Rule("attack-exspecial*", "attack", "charge", "ex"),
+    Rule("attack-special*", "attack", "charge", "base"),
+    # 상태 전환 자체는 타격이 아니라 기술 발동이다.
+    Rule("attack-changestate*", "skill", "cast", "state"),
     # 회피·피격·죽음
     Rule("evade-*", "evade", "step"),
+    # 대시 회피는 이동 대시와 이름만 같은 계열이라 먼저 갈라낸다.
+    Rule("dash-evade*", "evade", "step", "dash"),
     Rule("hit-h-*", "hit", "flinch", "heavy"),
     Rule("hit-l-*", "hit", "flinch", "light"),
+    Rule("hit-shake*", "hit", "flinch", "shake"),
     Rule("hitfly-*", "hit", "launch", "up"),
     Rule("death*", "death", "fall", "front"),
     # 대기 — afk 가 idle 보다 먼저
@@ -66,6 +82,17 @@ COMBAT_PACKAGE_RULES: tuple[Rule, ...] = (
     Rule("run*", "locomotion", "run"),
     Rule("walk*", "locomotion", "walk"),
     Rule("turnback*", "locomotion", "turn"),
+    # 이동 대시 — 공격 대시(``attack-dash-*``)와 다른 이동기다. 가장 빠른 이동이라
+    # 질주 선반에 둔다.
+    Rule("dash-start*", "locomotion", "sprint", "start"),
+    Rule("dash-end*", "locomotion", "sprint", "end"),
+    Rule("dash-loop*", "locomotion", "sprint", "loop"),
+    # 공중 상태 이동·진입 — 발이 땅에 없는 이동이라 지상 이동과 섞지 않는다.
+    Rule("move-*-air*-loop", "locomotion", "jump", "air"),
+    Rule("start-airstate*", "locomotion", "jump", "start"),
+    # 스킬 — 번호가 붙은 기술 슬롯. 마무리 일격은 최종기 쪽이다.
+    Rule("skill[0-9]*", "skill", "cast"),
+    Rule("finish-*", "skill", "ultimate", "finish"),
     # 교대
     Rule("switchin-attack*", "switch", "in", "assist"),
     Rule("switchin-*", "switch", "in", "normal"),

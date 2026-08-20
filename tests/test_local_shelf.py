@@ -37,6 +37,38 @@ turnback walk walk-end walk-start walk-start-end
 """.split()
 
 
+# 두 번째 패키지(다른 캐릭터). 같은 게임이라 이름 규칙은 같은데 기술 구성이 달라
+# 이 패키지에만 있는 계열이 있다 — 버스트, 번호 붙은 스킬, 공중 상태 이동, 이동
+# 대시. 한 패키지만 픽스처로 두면 규칙을 고치다 다른 쪽을 조용히 깬다.
+PACKAGE_2 = """
+attack-assaultaid-end attack-assaultaid attack-burst-01-end attack-burst-01
+attack-burst-ex-01-end attack-burst-ex-01 attack-burst-ex-02-end
+attack-burst-ex-02 attack-burst-ex-max01 attack-burst-ex-max02-end
+attack-burst-ex-max02 attack-changestate-02 attack-changestate
+attack-counter-end attack-counter attack-exspecial-end attack-exspecial
+attack-normal-01-end attack-normal-01 attack-normal-02-end attack-normal-02
+attack-normal-03-end attack-normal-03 attack-normal-04-end attack-normal-04
+attack-parryaid-h-end attack-parryaid-h attack-parryaid-l-end
+attack-parryaid-l attack-parryaid-start attack-rush-end attack-rush
+attack-special-end attack-special dash-end dash-evade dash-loop-02 dash-loop
+dash-start death evade-back-02 evade-back evade-front-02 evade-front
+evade-to-run-01 finish-airstate-front finish-ex-airstate-end
+finish-ex-airstate-start finish-ex-airstate hit-h-back hit-h-front hit-l-back
+hit-l-front hit-shake hitfly-back hitfly-front idle-afk
+idle-airstate-back-loop idle-airstate-front-loop idle-loop move-b-airback-loop
+move-b-airfront-loop move-f-airback-loop move-f-airfront-loop
+move-l-airback-loop move-l-airfront-loop move-r-airback-loop
+move-r-airfront-loop run-end run-loop-01 run-loop-02 run-transform-01
+run-transform-02 skill01-airstate-back skill01-airstate-front
+skill02-airstate-back skill02-airstate-front skill03-airstate-back
+skill03-airstate-front skill04-airstate-front skill05-airstate-back
+start-airstate-back switchin-attack-end switchin-attack-ex-extra-end
+switchin-attack-ex-extra switchin-attack-ex-start switchin-attack-ex
+switchin-attack switchin-normal switchout-airstate-back switchout-normal
+walk-end walk-loop walk-start-end walk-start walk-to-run-01
+""".split()
+
+
 def shelf_of(slug: str) -> tuple:
     rule = assign(slug)
     return None if rule is None else (rule.category, rule.sub, rule.detail)
@@ -89,6 +121,43 @@ def test_every_motion_in_the_package_lands_somewhere() -> None:
     # skin 은 모션이 아니라 메시다 — 유일하게 미배정으로 남아야 한다.
     unmatched = [slug for slug in PACKAGE if assign(slug) is None]
     assert unmatched == ["skin"]
+
+
+def test_every_motion_in_the_second_package_lands_somewhere() -> None:
+    # 이쪽은 메시 파일이 없다 — 96 개 전부 선반에 올라가야 한다.
+    unmatched = [slug for slug in PACKAGE_2 if assign(slug) is None]
+    assert unmatched == []
+
+
+@pytest.mark.parametrize(
+    "slug,expected",
+    [
+        # 두 번째 인덱스가 없는 연계. 4 타까지 있다.
+        ("attack-normal-01", ("attack", "combo", "hit1")),
+        ("attack-normal-04-end", ("attack", "combo", "hit4")),
+        # 버스트는 최종기다. EX 와 Max 는 같은 기술의 상위 단계라 갈라만 둔다.
+        ("attack-burst-01", ("skill", "ultimate", "base")),
+        ("attack-burst-ex-01-end", ("skill", "ultimate", "ex")),
+        ("attack-burst-ex-max02", ("skill", "ultimate", "max")),
+        # 특수기와 강화특수기
+        ("attack-special", ("attack", "charge", "base")),
+        ("attack-exspecial-end", ("attack", "charge", "ex")),
+        # 이동 대시 — 공격 대시와 다른 계열이고, 회피 파생만 따로 간다.
+        ("dash-start", ("locomotion", "sprint", "start")),
+        ("dash-loop-02", ("locomotion", "sprint", "loop")),
+        ("dash-evade", ("evade", "step", "dash")),
+        # 공중 상태
+        ("move-b-airback-loop", ("locomotion", "jump", "air")),
+        ("start-airstate-back", ("locomotion", "jump", "start")),
+        # 번호 붙은 스킬과 마무리 일격
+        ("skill03-airstate-front", ("skill", "cast", None)),
+        ("finish-ex-airstate-start", ("skill", "ultimate", "finish")),
+        ("attack-changestate-02", ("skill", "cast", "state")),
+        ("hit-shake", ("hit", "flinch", "shake")),
+    ],
+)
+def test_assigns_the_expected_shelf_in_the_second_package(slug, expected) -> None:
+    assert shelf_of(slug) == expected
 
 
 def test_unknown_names_stay_unshelved() -> None:
