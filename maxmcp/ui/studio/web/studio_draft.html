@@ -493,6 +493,7 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 <div class="clip-menu" hidden>
   <button data-action="polish-save">폴리싱 저장</button>
   <button data-action="polish-revert">되돌리기</button>
+  <button data-action="reveal">파일 위치 열기</button>
   <hr>
   <button data-action="menu-delete" class="danger">삭제</button>
 </div>
@@ -1711,6 +1712,21 @@ grid.addEventListener("contextmenu", (e) => {
   clipMenu.style.top = Math.min(e.clientY, window.innerHeight - box.height - 8) + "px";
 });
 
+/* 폴리싱본은 원본 폴더 아래 polished/ 에 같은 이름으로 둔다.
+
+   함수로 뺀 이유는 세 곳(저장·되돌리기·파일 위치 열기)이 같은 경로를 만들어야
+   해서다. 세 곳에 흩어져 있을 때 전부 백슬래시가 하나씩 모자랐는데, JS 는 `\p` 를
+   모르는 이스케이프로 보고 **백슬래시를 버린다** — 그래서 실제 경로가
+   `<폴더>polished\<이름>.bvh` 라는 형제 폴더를 가리키고 있었다. 디스크에 그런
+   폴더가 없는 것으로 보아 저장이 나간 적이 없다.
+
+   폴더 끝의 구분자를 먼저 떼는 이유는 사용자가 붙여 넣는 경로에 그것이 섞여
+   들어와 `\\polished` 가 되는 일을 막기 위해서다. */
+function polishedPath(folder, stem) {
+  const base = folder.replace(/[\\/]+$/, "");
+  return base + "\\polished\\" + stem + ".bvh";
+}
+
 clipMenu.addEventListener("click", (e) => {
   const action = e.target.closest("button")?.dataset.action;
   const clip = menuClip;
@@ -1722,12 +1738,26 @@ clipMenu.addEventListener("click", (e) => {
   if (!BRIDGE.obj) { setStatus("(목업) " + action + " — " + clip.stem); return; }
   const sel = document.querySelector('[data-field="biped"]');
 
+  if (action === "reveal") {
+    /* 폴더만 여는 대신 그 파일을 선택한 채로 연다 — 라이브러리에 클립이 수십 개라
+       열어 놓고 다시 찾아야 하면 카드를 누른 의미가 없다.
+       폴리싱본이 있으면 그쪽을 연다: 화면이 보여 주고 있는 것이 그것이다. */
+    const folder = document.querySelector('[data-field="folder"]').value || "";
+    const target = clip.polished
+      ? polishedPath(folder, clip.stem)
+      : clip.path;
+    bcall("reveal_clip", target, (res) => {
+      setStatus(res.ok ? "탐색기에서 열기 " + clip.stem : res.error, res.ok ? "ok" : "error");
+    });
+    return;
+  }
+
   if (action === "polish-save") {
     /* 폴리싱본은 원본 옆 polished/ 에 같은 이름으로 둔다 — 경로만 봐도 짝이 드러난다.
        BVH 쓰기는 내보내기 슬롯 하나뿐이라 그것을 그대로 쓴다. */
     if (!sel.value) { setStatus("바이패드를 선택하세요", "error"); return; }
     const folder = document.querySelector('[data-field="folder"]').value || "";
-    const path = folder + "\polished\\" + clip.stem + ".bvh";
+    const path = polishedPath(folder, clip.stem);
     setStatus("폴리싱 저장 중… " + clip.stem);
     bcall("export_biped_bvh", JSON.stringify({ biped: sel.value, path: path }), (res) => {
       setStatus(res.ok ? "폴리싱 저장 " + clip.stem : res.error, res.ok ? "ok" : "error");
@@ -1739,7 +1769,7 @@ clipMenu.addEventListener("click", (e) => {
     /* 되돌리기는 polished/ 의 파일만 지운다. 원본은 손대지 않았으므로 그것으로 끝난다. */
     const folder = document.querySelector('[data-field="folder"]').value || "";
     bcall("delete_clip", JSON.stringify({
-      folder: folder, path: folder + "\polished\\" + clip.stem + ".bvh",
+      folder: folder, path: polishedPath(folder, clip.stem),
     }), (res) => {
       setStatus(res.ok ? "되돌림 " + clip.stem : res.error, res.ok ? "ok" : "error");
     });

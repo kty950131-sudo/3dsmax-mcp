@@ -190,6 +190,44 @@ class StudioBridge(QtCore.QObject):
 
         return reply(run)
 
+    @QtCore.Slot(str, result=str)
+    def reveal_clip(self, path: str) -> str:
+        """탐색기를 그 파일이 선택된 채로 연다.
+
+        폴더만 여는 것으로는 부족하다 — 라이브러리 폴더에 클립이 수십 개라, 열어
+        놓고 다시 눈으로 찾아야 하면 카드를 누른 의미가 없다.
+
+        슬롯은 JS 가 어떤 문자열로도 부를 수 있는 경계다. 실재하는 파일인지 먼저
+        확인하고 절대경로로 정규화한 다음 넘긴다.
+        """
+
+        def run() -> dict:
+            target = os.path.abspath(path)
+            if not os.path.isfile(target):
+                raise FileNotFoundError(f"파일이 없습니다: {target}")
+
+            if os.name != "nt":
+                # 맥스는 윈도우 전용이지만 이 모듈은 테스트에서 다른 OS 로도 import 된다.
+                from maxmcp.ui.studio.compat import QtCore as _qtcore, QtGui
+
+                QtGui.QDesktopServices.openUrl(
+                    _qtcore.QUrl.fromLocalFile(os.path.dirname(target))
+                )
+                return {"revealed": target, "selected": False}
+
+            import subprocess
+
+            # `/select,` 는 쉼표가 경로에 붙어야 한다 — 떼면 탐색기가 인자를 통째로
+            # 무시하고 내 문서를 연다. shell 은 쓰지 않는다: 경로에 공백·괄호가 있으면
+            # 셸이 다시 쪼갠다.
+            #
+            # 탐색기는 성공해도 종료 코드 1 을 준다. 그래서 반환값으로 성패를 재지
+            # 않고, 위에서 파일 존재를 확인한 것으로 갈음한다.
+            subprocess.Popen(["explorer", f"/select,{target}"])
+            return {"revealed": target, "selected": True}
+
+        return reply(run)
+
     @QtCore.Slot(result=str)
     def choose_video(self) -> str:
         def run() -> dict:
