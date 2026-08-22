@@ -7,8 +7,15 @@ from frame to frame. That is why the skeleton jumped between people. It was
 never a tracking failure; there was no detection step at all.
 
 So a person detector runs first, one box is chosen as the subject, and the
-subject is followed forward by box overlap. torchvision is used rather than
+subject is followed forward frame to frame. torchvision is used rather than
 mmdet because `mmcv._ext` is missing in this environment.
+
+Box overlap alone is not enough to follow the subject: when two people cross,
+the wrong box can overlap more. So each candidate is scored by three signals
+folded into one number: overlap with the last box, overlap with a constant-
+velocity prediction of it, and colour-histogram similarity to the subject's
+appearance. A candidate that looks nothing like the subject is rejected even
+if it overlaps.
 """
 
 from __future__ import annotations
@@ -131,6 +138,67 @@ def iou(a, b):
     return overlap / (area_a + area_b - overlap)
 
 
+def box_center(box):
+    return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+
+
+def shift_box(box, velocity):
+    """등속 예측: 직전 상자를 속도만큼 밀어 이번 프레임의 자리를 짐작한다."""
+    dx, dy = velocity
+    return [box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy]
+
+
+def clamp_box(box, width, height):
+    x1 = min(max(0.0, box[0]), width - 2.0)
+    y1 = min(max(0.0, box[1]), height - 2.0)
+    x2 = min(max(x1 + 1.0, box[2]), float(width))
+    y2 = min(max(y1 + 1.0, box[3]), float(height))
+    return [x1, y1, x2, y2]
+
+
+def color_histogram(image, box):
+    """상자 가운데 부분의 HSV 색 분포. 겉모습 비교의 재료다."""
+    import cv2
+    height, width = image.shape[:2]
+    # 상자 가장자리는 배경이 섞이므로 가운데 60% 만 쓴다.
+    margin_x, margin_y = (box[2] - box[0]) * 0.2, (box[3] - box[1]) * 0.2
+    x1 = int(max(0, box[0] + margin_x))
+    x2 = int(min(width, box[2] - margin_x))
+    y1 = int(max(0, box[1] + margin_y))
+    y2 = int(min(height, box[3] - margin_y))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    patch = cv2.cvtColor(image[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+    # 흰 바닥 같은 무채색 배경이 두 상자를 다 지배하면 남남끼리도 상관이 높게
+    # 나온다. 실제로 주인공이 넘어져 상자에 바닥이 많이 들어오자 다른 사람의
+    # 유사도가 0.17 에서 0.83 까지 올랐다. 채도나 밝기가 낮은 픽셀은 빼고 센다.
+    mask = cv2.inRange(patch, (0, 40, 40), (180, 255, 255))
+    if cv2.countNonZero(mask) < 50:
+        return None     # 색이 있는 픽셀이 없으면 겉모습을 논할 수 없다
+    histogram = cv2.calcHist([patch], [0, 1], mask, [30, 32], [0, 180, 0, 256])
+    cv2.normalize(histogram, histogram)
+    return histogram
+
+
+def appearance_similarity(reference, histogram):
+    """색 분포의 상관을 0~1 로 접는다. 비교할 것이 없으면 중립인 0.5 를 준다."""
+    import cv2
+    if reference is None or histogram is None:
+        return 0.5
+    return max(0.0, min(1.0, cv2.compareHist(reference, histogram, cv2.HISTCMP_CORREL)))
+
+
+def group_ranges(values):
+    """[3,4,5,9] 를 [[3,5],[9,9]] 로 묶는다. 끊긴 구간을 사람이 읽기 좋게 한다."""
+    ranges = []
+    for value in values:
+        if ranges and value == ranges[-1][1] + 1:
+            ranges[-1][1] = value
+        else:
+            ranges.append([value, value])
+    return ranges
+
+
 def main() -> None:
     args = parse_args()
     project = args.mmpose_repo / "projects" / "rtmpose3d"
@@ -241,7 +309,10 @@ def main() -> None:
     index = 0
     image_size = None
     subject = None          # 지금 따라가는 상자
-    carried = []            # 검출이 없어 직전 상자를 이어 쓴 프레임
+    velocity = [0.0, 0.0]   # 상자 중심의 프레임당 이동. 등속 예측의 재료다
+    reference_hist = None   # 주인공의 겉모습(색 분포) 기준
+    carried = []            # 검출을 놓쳐 예측 상자를 이어 쓴 프레임
+    ambiguous = []          # 두 후보의 점수가 비슷해 갈아탈 위험이 있던 프레임
     reseeded = []           # 씨앗으로 다시 잡은 프레임
     selection = None        # 무엇을 주인공으로 골랐는지 기록해 둔다
     while True:
@@ -255,35 +326,70 @@ def main() -> None:
             box = [0.0, 0.0, float(width), float(height)]
         else:
             if index in seeds:
-                box = seeds[index]
+                # 씨앗은 사용자가 확정한 자리다. 속도와 겉모습 기준을 여기서 다시 잡는다.
+                box = [float(v) for v in seeds[index]]
                 if index > 0:
                     reseeded.append(index)
                 if selection is None:
-                    selection = {"frame": index, "box": [float(v) for v in box], "source": "seed"}
+                    selection = {"frame": index, "box": list(box), "source": "seed"}
+                velocity = [0.0, 0.0]
+                reference_hist = color_histogram(image, box)
+                subject = list(box)
+            elif subject is None:
+                # 첫 주인공. 씨앗이 없으면 가장 크게 잡힌 사람을 쓴다.
+                people = detect_people(image)
+                if len(people) == 0:
+                    raise RuntimeError(f"{index}번 프레임에서 사람을 찾지 못했습니다. --seed 로 상자를 주십시오")
+                areas = [(b[2] - b[0]) * (b[3] - b[1]) for b in people]
+                box = [float(v) for v in people[int(np.argmax(areas))]]
+                selection = {"frame": index, "box": list(box), "source": "largest"}
+                velocity = [0.0, 0.0]
+                reference_hist = color_histogram(image, box)
+                subject = list(box)
             else:
                 people = detect_people(image)
-                if subject is None:
-                    # 첫 주인공. 씨앗이 없으면 가장 크게 잡힌 사람을 쓴다.
-                    if len(people) == 0:
-                        raise RuntimeError(f"{index}번 프레임에서 사람을 찾지 못했습니다. --seed 로 상자를 주십시오")
-                    areas = [(b[2] - b[0]) * (b[3] - b[1]) for b in people]
-                    box = [float(v) for v in people[int(np.argmax(areas))]]
-                    selection = {"frame": index, "box": list(box), "source": "largest"}
+                predicted = shift_box(subject, velocity)
+                # 세 근거(직전 상자 겹침, 등속 예측 겹침, 겉모습)를 한 점수로 합친다.
+                # 교차 순간에는 겹침만으로 남의 상자가 이길 수 있어서, 겉모습이
+                # 확연히 다른 후보는 겹쳐도 애초에 후보에서 뺀다.
+                scored = []
+                for candidate in people:
+                    iou_now = iou(subject, candidate)
+                    iou_predicted = iou(predicted, candidate)
+                    if max(iou_now, iou_predicted) < 0.05:
+                        continue    # 화면 반대편의 사람이 겉모습만으로 붙는 일을 막는다
+                    histogram = color_histogram(image, candidate)
+                    similarity = appearance_similarity(reference_hist, histogram)
+                    if reference_hist is not None and similarity < 0.15:
+                        continue
+                    score = 0.3 * iou_now + 0.3 * iou_predicted + 0.4 * similarity
+                    scored.append((score, histogram, [float(v) for v in candidate]))
+                scored.sort(key=lambda item: item[0], reverse=True)
+                if not scored or scored[0][0] < 0.3:
+                    # 놓쳤다. 예측 상자를 이어 쓴다 — 톱다운은 상자만 있으면
+                    # 자세를 내므로 쓰러진 구간에서도 추정이 이어진다.
+                    box = clamp_box(predicted, width, height)
+                    carried.append(index)
+                    velocity = [v * 0.8 for v in velocity]
+                    subject = list(box)
                 else:
-                    # 직전 상자와 가장 많이 겹치는 검출로 잇는다.
-                    scored = [(iou(subject, b), b) for b in people]
-                    best = max(scored, key=lambda pair: pair[0]) if scored else (0.0, None)
-                    if best[0] < 0.2:
-                        # 놓쳤다. 직전 상자를 이어 쓴다 — 톱다운은 상자만 있으면
-                        # 자세를 내므로 쓰러진 구간에서도 추정이 이어진다.
-                        box = [float(v) for v in subject]
-                        carried.append(index)
-                    else:
-                        box = [float(v) for v in best[1]]
-            # 상자 떨림이 자세 떨림으로 번지지 않게 가볍게 고른다.
-            box = box if subject is None else [
-                float(s) * 0.4 + float(c) * 0.6 for s, c in zip(subject, box)]
-            subject = [float(v) for v in box]
+                    best_score, best_hist, best_box = scored[0]
+                    unambiguous = len(scored) == 1 or best_score - scored[1][0] >= 0.15
+                    if not unambiguous:
+                        ambiguous.append(index)
+                    # 상자 떨림이 자세 떨림으로 번지지 않게 가볍게 고른다.
+                    box = [s * 0.4 + c * 0.6 for s, c in zip(subject, best_box)]
+                    delta = [n - o for n, o in zip(box_center(box), box_center(subject))]
+                    velocity = [0.7 * v + 0.3 * d for v, d in zip(velocity, delta)]
+                    # 겉모습 기준은 확실할 때만 천천히 따라간다. 교차 중에 남의
+                    # 색이 스며들면 기준 자체가 오염되기 때문이다.
+                    if best_hist is not None:
+                        if reference_hist is None:
+                            reference_hist = best_hist
+                        elif unambiguous:
+                            reference_hist = reference_hist * 0.9 + best_hist * 0.1
+                            cv2.normalize(reference_hist, reference_hist)
+                    subject = list(box)
 
         bbox = np.array([box], dtype=np.float32)
         result = inference_topdown(model, image, bbox)[0].pred_instances
@@ -303,7 +409,13 @@ def main() -> None:
         index += 1
     capture.release()
     if carried:
-        print(f"검출을 놓쳐 직전 상자를 이어 쓴 프레임 {len(carried)}개: {carried[:20]}")
+        text = ", ".join(f"{a}~{b}" if a != b else str(a) for a, b in group_ranges(carried))
+        print(f"검출을 놓쳐 예측 상자를 이어 쓴 프레임 {len(carried)}개: {text}")
+        print("길게 이어지는 구간은 시작 프레임을 --list-people 로 살펴보고 --pick 이나 --seed 로 다시 잡으십시오")
+    if ambiguous:
+        text = ", ".join(f"{a}~{b}" if a != b else str(a) for a, b in group_ranges(ambiguous))
+        print(f"두 후보의 점수가 비슷해 갈아탈 위험이 있던 프레임 {len(ambiguous)}개: {text}")
+        print("결과를 겹쳐 보기로 확인하고, 틀렸으면 그 프레임에 --pick 이나 --seed 를 주어 다시 잡으십시오")
     if reseeded:
         print(f"씨앗으로 다시 잡은 프레임: {reseeded}")
     if not frames:
@@ -319,6 +431,7 @@ def main() -> None:
         "image_size": image_size,
         "person_selection": selection,
         "carried_frames": carried,
+        "ambiguous_frames": ambiguous,
         "frames": frames,
     }, ensure_ascii=False), encoding="utf-8")
 
