@@ -66,7 +66,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-detect", action="store_true",
         help="검출을 끄고 예전처럼 화면 전체를 상자로 쓴다. 사람이 한 명뿐인 영상의 대조군용이다.")
+    parser.add_argument(
+        "--list-people", type=int, metavar="FRAME", default=None,
+        help="그 프레임에서 검출된 사람에 번호를 붙여 보여 주고 끝낸다. --preview 로 그림도 낸다.")
+    parser.add_argument(
+        "--preview", type=Path, default=None,
+        help="--list-people 이 번호를 그려 넣은 그림을 여기에 저장한다.")
+    parser.add_argument(
+        "--pick", action="append", default=[], metavar="FRAME:N",
+        help="그 프레임의 N 번 후보를 주인공으로 삼는다. --list-people 로 번호를 먼저 본다.")
+    parser.add_argument(
+        "--select", action="store_true",
+        help="첫 프레임을 창으로 띄워 후보를 클릭해 고른다. 화면이 있는 곳에서만 쓴다.")
     return parser.parse_args()
+
+
+def parse_pick(text):
+    """`0:2` 를 (0, 2) 로 읽는다."""
+    frame, _, number = text.partition(":")
+    return int(frame), int(number)
+
+
+def read_frame(path, index):
+    import cv2
+    capture = cv2.VideoCapture(str(path))
+    capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+    ok, image = capture.read()
+    capture.release()
+    if not ok:
+        raise RuntimeError(f"{index}번 프레임을 읽지 못했습니다")
+    return image
+
+
+def annotate(image, boxes):
+    """후보마다 상자와 번호를 그린다. 번호가 곧 --pick 에 넣을 값이다."""
+    import cv2
+    canvas = image.copy()
+    for number, box in enumerate(boxes):
+        x1, y1, x2, y2 = (int(v) for v in box)
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 220, 255), 3)
+        cv2.rectangle(canvas, (x1, y1 - 42), (x1 + 56, y1), (0, 220, 255), -1)
+        cv2.putText(canvas, str(number), (x1 + 10, y1 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 0), 3)
+    return canvas
 
 
 def parse_seed(text):
@@ -131,14 +173,68 @@ def main() -> None:
             weights=FasterRCNN_ResNet50_FPN_V2_Weights.COCO_V1).eval().to("cuda:0")
     PERSON_LABEL = 1
 
-    seeds = dict(parse_seed(text) for text in args.seed)
-
     def detect_people(image):
         tensor = to_tensor(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).to("cuda:0")
         with torch.no_grad():
             found = detector([tensor])[0]
         keep = (found["labels"] == PERSON_LABEL) & (found["scores"] > args.detect_score)
-        return found["boxes"][keep].cpu().numpy()
+        order = found["scores"][keep].argsort(descending=True)
+        return found["boxes"][keep][order].cpu().numpy()
+
+    # 후보를 보여 주고 끝내는 길. 화면이 없어도 번호를 고를 수 있게 한다.
+    if args.list_people is not None:
+        if detector is None:
+            raise SystemExit("--no-detect 와 함께 쓸 수 없습니다")
+        image = read_frame(args.input, args.list_people)
+        people = detect_people(image)
+        print(f"{args.list_people}번 프레임에서 사람 {len(people)}명")
+        for number, box in enumerate(people):
+            print("  %d  x %4.0f~%4.0f  y %4.0f~%4.0f  (폭 %3.0f 높이 %3.0f)"
+                  % (number, box[0], box[2], box[1], box[3], box[2] - box[0], box[3] - box[1]))
+        if args.preview:
+            args.preview.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(args.preview), annotate(image, people))
+            print(f"그림 저장 {args.preview}")
+        print(f"고르려면: --pick {args.list_people}:<번호>")
+        return
+
+    seeds = dict(parse_seed(text) for text in args.seed)
+
+    # 번호로 고른 것을 상자로 바꿔 씨앗에 넣는다. --seed 와 같은 자리에서 쓰인다.
+    for frame_index, number in (parse_pick(text) for text in args.pick):
+        people = detect_people(read_frame(args.input, frame_index))
+        if number >= len(people):
+            raise SystemExit(f"{frame_index}번 프레임에는 후보가 {len(people)}명뿐입니다")
+        seeds[frame_index] = [float(v) for v in people[number]]
+
+    # 창을 띄워 클릭으로 고르는 길. 화면이 있는 곳에서만 쓴다.
+    if args.select:
+        if detector is None:
+            raise SystemExit("--no-detect 와 함께 쓸 수 없습니다")
+        pick_frame = 0
+        image = read_frame(args.input, pick_frame)
+        people = detect_people(image)
+        chosen = {}
+
+        def on_click(event, x, y, flags, _):
+            if event != cv2.EVENT_LBUTTONDOWN:
+                return
+            for number, box in enumerate(people):
+                if box[0] <= x <= box[2] and box[1] <= y <= box[3]:
+                    chosen["box"] = [float(v) for v in box]
+                    chosen["number"] = number
+
+        window = "주인공을 클릭하십시오 (Esc 로 취소)"
+        cv2.imshow(window, annotate(image, people))
+        cv2.setMouseCallback(window, on_click)
+        while "box" not in chosen:
+            if cv2.waitKey(30) == 27:
+                break
+        cv2.destroyWindow(window)
+        if "box" not in chosen:
+            raise SystemExit("고르지 않았습니다")
+        print(f"{chosen['number']}번 후보를 골랐습니다")
+        seeds[pick_frame] = chosen["box"]
 
     frames = []
     previous = None
@@ -163,7 +259,7 @@ def main() -> None:
                 if index > 0:
                     reseeded.append(index)
                 if selection is None:
-                    selection = {"frame": index, "box": list(box), "source": "seed"}
+                    selection = {"frame": index, "box": [float(v) for v in box], "source": "seed"}
             else:
                 people = detect_people(image)
                 if subject is None:
