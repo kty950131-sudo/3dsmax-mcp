@@ -405,7 +405,11 @@ def main() -> None:
             smoothed = previous * 0.35 + current * 0.65
             current = np.where(reliable, smoothed, previous)
         previous = current
-        frames.append(build_frame_record(index, raw_points, raw_scores, current, image_points))
+        record = build_frame_record(index, raw_points, raw_scores, current, image_points)
+        # 프레임마다 쓴 상자를 남긴다. 이 트랙이 있어야 그 사람만 잘라 낸 영상을
+        # 만들 수 있고, 그 영상을 언리얼에 넣어 골격을 갖춘 자세를 받아 올 수 있다.
+        record["box"] = [float(v) for v in box]
+        frames.append(record)
         index += 1
     capture.release()
     if carried:
