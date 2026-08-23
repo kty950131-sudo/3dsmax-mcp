@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -181,11 +182,29 @@ def color_histogram(image, box):
 
 
 def appearance_similarity(reference, histogram):
-    """색 분포의 상관을 0~1 로 접는다. 비교할 것이 없으면 중립인 0.5 를 준다."""
+    """색 분포의 상관을 0~1 로 접는다. 비교할 것이 없으면 None 을 준다.
+
+    예전에는 중립값 0.5 를 돌려주었는데, 그것이 무채색 영상에서 실패를 만들었다.
+    회색뿐인 영상은 채도 문턱을 넘는 픽셀이 없어 히스토그램이 아예 안 만들어지고,
+    그러면 모든 후보가 0.5 를 받는다. 가중치가 0.4 이므로 점수마다 0.20 이 상수로
+    얹히고, 버티기 문턱 0.3 은 겹침 평균 0.167 만 넘으면 통과하는 문턱으로
+    내려앉는다. 없는 신호가 가산점을 주면 안 되므로, 없을 때는 없다고 말한다.
+    """
     import cv2
     if reference is None or histogram is None:
-        return 0.5
+        return None
     return max(0.0, min(1.0, cv2.compareHist(reference, histogram, cv2.HISTCMP_CORREL)))
+
+
+def association_score(iou_now, iou_predicted, similarity):
+    """세 근거를 한 점수로 접는다. 겉모습을 못 쓰면 겹침 둘로만 나눈다.
+
+    가중치를 남은 항에 다시 나누어 주므로, 겉모습이 있든 없든 점수의 눈금이
+    같아진다. 그래야 버티기 문턱 하나로 두 경우를 다 다룰 수 있다.
+    """
+    if similarity is None:
+        return 0.5 * iou_now + 0.5 * iou_predicted
+    return 0.3 * iou_now + 0.3 * iou_predicted + 0.4 * similarity
 
 
 def group_ranges(values):
@@ -360,11 +379,24 @@ def main() -> None:
                         continue    # 화면 반대편의 사람이 겉모습만으로 붙는 일을 막는다
                     histogram = color_histogram(image, candidate)
                     similarity = appearance_similarity(reference_hist, histogram)
-                    if reference_hist is not None and similarity < 0.15:
+                    if similarity is not None and similarity < 0.15:
                         continue
-                    score = 0.3 * iou_now + 0.3 * iou_predicted + 0.4 * similarity
+                    score = association_score(iou_now, iou_predicted, similarity)
                     scored.append((score, histogram, [float(v) for v in candidate]))
                 scored.sort(key=lambda item: item[0], reverse=True)
+                if os.environ.get("RTMW3D_TRACE"):
+                    parts = []
+                    for candidate in people:
+                        i_now = iou(subject, candidate)
+                        i_pred = iou(predicted, candidate)
+                        sim = appearance_similarity(
+                            reference_hist, color_histogram(image, candidate))
+                        shown = "none" if sim is None else f"{sim:.2f}"
+                        parts.append(
+                            f"iou={i_now:.2f}/{i_pred:.2f} sim={shown} "
+                            f"s={association_score(i_now, i_pred, sim):.2f}")
+                    print(f"TRACE {index} n={len(people)} " + " | ".join(parts),
+                          flush=True)
                 if not scored or scored[0][0] < 0.3:
                     # 놓쳤다. 예측 상자를 이어 쓴다 — 톱다운은 상자만 있으면
                     # 자세를 내므로 쓰러진 구간에서도 추정이 이어진다.
