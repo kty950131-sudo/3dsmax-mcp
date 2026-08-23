@@ -64,8 +64,10 @@ def sync_motions(
 ) -> dict:
     """새/변경된 모션을 dest_dir 에 <prefix><name> 으로 받는다.
 
-    반환: {"downloaded": [로컬 이름], "remote_total": int, "etag": str|None,
-           "unchanged": bool}  — unchanged 는 ETag 304 로 아무것도 안 봤다는 뜻.
+    반환: {"downloaded": [로컬 이름], "failed": [{"name", "reason"}],
+           "remote_total": int, "etag": str|None, "unchanged": bool}
+    — unchanged 는 ETag 304 로 아무것도 안 봤다는 뜻이고, failed 는 목록에는
+    있는데 받지 못한 파일이다(사이트 목록이 틀렸다는 신호).
     """
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
@@ -92,14 +94,28 @@ def sync_motions(
     remote = manifest["motions"]
     local_sizes = {p.name: p.stat().st_size for p in dest.glob("*.bvh")}
     todo = plan_sync(remote, local_sizes, prefix)
+    # 한 파일이 실패해도 나머지는 받는다. 매니페스트에 올라 있는데 배포되지
+    # 않은 파일이 하나 섞이면(파생물이 .gitignore 에 걸려 커밋되지 않는 경우가
+    # 있다) 예전에는 여기서 예외가 터져 **동기화 전체가 죽었다**. 그러면 아래
+    # 매니페스트 쓰기도 건너뛰어서 라이브러리가 낡은 채로 남는다 — 실제로
+    # run-f_biped.bvh 404 하나 때문에 27개가 하루 넘게 안 들어왔다.
+    # 위의 phase.json 이 이미 같은 이유로 감싸져 있다.
+    downloaded, failed = [], []
     for entry in todo:
-        download_motion(entry["name"], dest / (prefix + entry["name"]), base=base)
+        try:
+            download_motion(entry["name"], dest / (prefix + entry["name"]), base=base)
+        except Exception as error:  # noqa: BLE001 - 한 건 실패가 전체를 깨지 않는다
+            failed.append({"name": entry["name"], "reason": str(error)})
+            continue
+        downloaded.append(prefix + entry["name"])
     # 매니페스트를 폴더에 남긴다 — 라이브러리가 오프라인에서도 분류를 알 수 있게.
     (dest / "artoke-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return {
-        "downloaded": [prefix + e["name"] for e in todo],
+        "downloaded": downloaded,
+        # 조용히 넘어가지 않는다. 사이트에 올라간 목록이 틀렸다는 신호다.
+        "failed": failed,
         "remote_total": len(remote),
         "etag": new_etag,
         "unchanged": False,

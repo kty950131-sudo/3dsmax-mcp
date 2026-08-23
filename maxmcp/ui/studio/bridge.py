@@ -11,7 +11,13 @@ import traceback
 from typing import Any, Callable, Optional
 
 from maxmcp.ui.studio.compat import QtCore, QtWidgets
-from maxmcp.ui.studio.library import cache_path, delete_clip, load_shelf, scan
+from maxmcp.ui.studio.library import (
+    cache_path,
+    delete_clip,
+    folder_policy,
+    load_shelf,
+    scan,
+)
 from maxmcp.ui.studio import settings
 from maxmcp.ui.studio.thumb import load_pose_data
 from maxmcp.ui.studio.video_jobs import VideoJobController
@@ -95,10 +101,14 @@ class StudioBridge(QtCore.QObject):
                         "detail": clip.detail,
                         "local": clip.local,
                         "polished": clip.polished,
+                        "source": clip.source,
                     }
                     for clip in scan(folder)
                 ],
                 "categories": load_shelf(folder)["categories"],
+                # 이 루트를 사이트에 올려도 되는가. 출처가 있는 자료를 모아 둔 칸은
+                # 폴더 이름만으로 구별되지 않아서, 화면에 크게 적어 두려고 같이 보낸다.
+                "policy": folder_policy(folder),
                 # 폴더가 없는 것과 폴더에 .bvh 가 없는 것은 사용자가 할 일이
                 # 다르다 — 앞은 경로를 고쳐야 하고 뒤는 파일을 넣어야 한다.
                 # scan 은 둘 다 빈 목록이라 여기서 갈라 준다.
@@ -310,6 +320,44 @@ class StudioBridge(QtCore.QObject):
 
         return reply(run)
 
+    @QtCore.Slot(result=str)
+    def selected_biped(self) -> str:
+        """뷰포트에서 고른 바이패드의 루트 이름. 화면이 짧은 주기로 물어본다.
+
+        바이패드를 잡아 둔 채 임포트를 누르면 새로 만드는 것이 아니라 그
+        바이패드에 적용되어야 하므로, "대상" 칸이 씬 선택을 따라가야 한다.
+        """
+
+        def run() -> dict:
+            from maxmcp.ui.studio.biped_pose import selected_root_name
+
+            return {"name": selected_root_name()}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def biped_layers(self, biped: str) -> str:
+        """레이어 목록과 현재 레이어. 뷰포트 선택이 목록보다 우선한다."""
+
+        def run() -> dict:
+            from maxmcp.ui.studio.biped_pose import layer_state
+
+            return layer_state(biped)
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def biped_layer_op(self, payload_json: str) -> str:
+        """``{"biped", "op": create|delete|select|toggle|collapse, "index"?}``."""
+
+        def run() -> dict:
+            from maxmcp.ui.studio.biped_pose import layer_op
+
+            p = json.loads(payload_json)
+            return layer_op(p.get("biped", ""), p.get("op", "select"), p.get("index"))
+
+        return reply(run)
+
     @QtCore.Slot(str, result=str)
     def choose_bvh_path(self, suggested: str) -> str:
         """내보낼 BVH 저장 위치를 묻는다. 취소하면 빈 문자열.
@@ -412,5 +460,142 @@ class StudioBridge(QtCore.QObject):
             from maxmcp.helpers.github_sync import sync_motions
 
             return sync_motions(folder)
+
+        return reply(run)
+
+    # ---- 포즈 선반 --------------------------------------------------------
+    # 카드 목록은 Max 없이도 나온다(.cpy 만 읽는다). 적용은 Max 안에서만.
+
+    @QtCore.Slot(str, result=str)
+    def hand_poses(self, shelf: str) -> str:
+        """선반 카드 목록 ``[{index, name, image, kind}]``.
+
+        썸네일과 이름은 .cpy 파일에서 읽고(Max 없이도 된다), 종류(posture/pose/track)와
+        그 종류 안의 번호는 Max 에게 묻는다. 씬에 바이패드가 없으면 전부 포스처로 둔다 —
+        같은 이름의 포스처가 실제로 대부분이고, 적용 시점에 바이패드가 정해지면
+        범위 검사가 잡아 준다.
+        """
+
+        def run() -> list:
+            from maxmcp.ui.studio.hand_poses import pose_cards, shelf_info, source_side
+
+            info = shelf_info(shelf or "hand")
+            cards = pose_cards(info["path"], cache_dir=self._cache_dir)
+            catalog = {}
+            try:
+                from maxmcp.ui.studio.biped_pose import copy_catalog
+
+                catalog = copy_catalog(shelf or "hand")
+            except Exception:
+                catalog = {}
+            for card in cards:
+                entry = catalog.get(card["name"])
+                card["kind"] = entry["kind"] if entry else info["kind"]
+                if entry:
+                    card["index"] = entry["index"]
+                    card["source"] = entry.get("source", "")
+                else:
+                    # Max 에게 못 물었을 때는 이름의 첫 글자로 짐작한다.
+                    card["source"] = source_side(card["name"]) if info["sides"] else ""
+                if not info["sides"]:
+                    card["source"] = ""
+            return cards
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def apply_hand_pose(self, payload_json: str) -> str:
+        """``{"biped", "index", "side": right|left|both, "kind", "key"}``.
+
+        biped 는 목록에서 고른 이름이지만 **뷰포트 선택이 우선**한다 — 아무 부위나
+        눌러 둔 채 카드를 누르면 그 바이패드에 붙는다. key 가 true 면 현재 프레임에
+        키를 남긴다.
+        """
+
+        def run() -> dict:
+            from maxmcp.ui.studio.biped_pose import apply_hand_pose
+
+            p = json.loads(payload_json)
+            return apply_hand_pose(
+                p.get("biped", ""),
+                int(p["index"]),
+                p.get("side", "right"),
+                p.get("kind", "posture"),
+                bool(p.get("key", False)),
+                p.get("shelf", "hand"),
+            )
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def save_pose(self, payload_json: str) -> str:
+        """``{"shelf": hand|body, "biped", "side", "name"}`` — 지금 자세를 떠서
+        선반 .cpy 에 굽는다. 이름은 저장 직전에 창으로 받는다(빈 이름이면 맥스가
+        붙이는 이름 그대로)."""
+
+        def run() -> dict:
+            from maxmcp.ui.studio.biped_pose import save_copy
+
+            p = json.loads(payload_json)
+            return save_copy(
+                p.get("shelf", "hand"),
+                p.get("biped", ""),
+                p.get("side", "right"),
+                p.get("name", ""),
+            )
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def delete_pose(self, payload_json: str) -> str:
+        """``{"shelf", "name", "biped"}`` — 선반에서 포즈 하나를 지운다."""
+
+        def run() -> dict:
+            from maxmcp.ui.studio.biped_pose import delete_copy
+
+            p = json.loads(payload_json)
+            return delete_copy(p.get("shelf", "hand"), p.get("name", ""), p.get("biped", ""))
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def ask_pose_name(self, payload_json: str) -> str:
+        """저장할 이름을 묻는 작은 창. ``{"title", "label", "suggested"}``.
+
+        취소하면 ``ok`` 가 false 다. 맥스의 messageBox 와 달리 스튜디오 자신의 Qt
+        창이라 MCP 를 막지 않는다(폴더 고르기와 같은 방식이다)."""
+
+        def run() -> dict:
+            from maxmcp.ui.studio.compat import QtWidgets
+
+            p = json.loads(payload_json) if payload_json else {}
+            text, ok = QtWidgets.QInputDialog.getText(
+                None,
+                p.get("title", "포즈 이름"),
+                p.get("label", "선반에 올릴 이름 (비우면 맥스 기본 이름)"),
+                text=p.get("suggested", ""),
+            )
+            return {"name": (text or "").strip() if ok else "", "ok": bool(ok)}
+
+        return reply(run)
+
+    @QtCore.Slot(str, result=str)
+    def save_anim(self, payload_json: str) -> str:
+        """``{"folder", "biped", "name", "overwrite"}`` — 지금 잡혀 있는 바이패드의
+        애니를 클립 폴더에 .bvh 로 쓴다. 저장하는 순간 라이브러리 카드가 된다.
+
+        같은 이름이 있으면 쓰지 않고 ``{"exists": true}`` 로 돌아온다. 화면이 확인을
+        받은 뒤 overwrite 로 다시 부른다."""
+
+        def run() -> dict:
+            from maxmcp.ui.studio.biped_export import save_anim_to_library
+
+            p = json.loads(payload_json)
+            return save_anim_to_library(
+                p.get("folder", ""),
+                p.get("biped", ""),
+                p.get("name", ""),
+                bool(p.get("overwrite", False)),
+            )
 
         return reply(run)
