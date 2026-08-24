@@ -66,6 +66,34 @@ def _walk(rt, controller, role: str, limit: int = 12):
         yield link, node
 
 
+# 손가락 다섯 개. 바이패드는 한 역할(`rFingers`)에 전부 평탄화해서 담으므로
+# 링크 번호에서 어느 손가락의 몇 번째 마디인지 되짚어야 한다.
+_FINGERS = ("Thumb", "Index", "Middle", "Ring", "Pinky")
+
+
+def _finger_name(tag: str, link: int, per_finger: int) -> str:
+    """SOMA 손가락 이름. 예전에는 `LeftFinger1`..`15` 로 평탄하게 썼다.
+
+    그 이름은 어느 규격에도 없어서 리타게팅이 대응을 못 찾았고, 손 포즈를
+    캐릭터에 얹으면 **손가락이 통째로 사라졌다**(웹 뷰어에서 실측: 포즈 34장이
+    전부 같은 그림). 몸통은 이미 SOMA 계열 이름을 쓰고 있었으므로 손가락도
+    맞춘다.
+
+    **바이패드에는 손허리뼈(metacarpal)가 없다.** SOMA 는 손가락마다 네 마디를
+    두는데(1=손허리, 2~4=마디) 바이패드는 세 마디뿐이라, 그 셋이 SOMA 의
+    2~4 에 붙는다. 엄지는 SOMA 도 세 마디라 1~3 에 그대로 붙는다.
+    (`bone-naming.ts` 의 biped↔metahuman 표와 같은 규칙이다.)
+    """
+    index = (link - 1) // per_finger
+    segment = (link - 1) % per_finger + 1
+    if index >= len(_FINGERS):
+        return f"{tag}Finger{link}"      # 손가락이 다섯을 넘으면 옛 이름으로 둔다
+    finger = _FINGERS[index]
+    if finger == "Thumb":
+        return f"{tag}Hand{finger}{segment}"
+    return f"{tag}Hand{finger}{segment + 1}"
+
+
 def _biped_joints(rt, controller) -> list[_BipedJoint]:
     """그 리그에 실제로 있는 링크만 부모 우선 순서로 읽는다."""
     pelvis = next(_walk(rt, controller, "pelvis", limit=1), None)
@@ -128,8 +156,9 @@ def _biped_joints(rt, controller) -> list[_BipedJoint]:
         hand = f"{tag}Hand"
         previous = hand
         if any(j.name == hand for j in joints):
+            per = max(1, int(getattr(controller, "fingerLinks", 3)))
             for link, node in _walk(rt, controller, f"{side}fingers", limit=40):
-                name = f"{tag}Finger{link}"
+                name = _finger_name(tag, link, per)
                 add(name, previous, node)
                 previous = name
 
