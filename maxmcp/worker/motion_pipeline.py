@@ -10,7 +10,7 @@ import subprocess
 import threading
 from typing import Any, Callable
 
-from maxmcp.rtmw3d.motion import convert_rtmw3d_file
+from maxmcp.worker.postprocess_bridge import convert_with_postprocess
 from maxmcp.rtmw3d.runtime import Rtmw3dReadiness, build_rtmw3d_command
 
 
@@ -41,7 +41,8 @@ class MotionPipeline:
         self,
         readiness: Rtmw3dReadiness,
         process_factory: Callable[..., Any] = subprocess.Popen,
-        converter: Callable[[Path, Path], int] = convert_rtmw3d_file,
+        # 기본은 후처리 판. 실패하면 다리가 원래 변환기로 물러난다.
+        converter: Callable[[Path, Path], int] = convert_with_postprocess,
     ) -> None:
         self._readiness = readiness
         self._process_factory = process_factory

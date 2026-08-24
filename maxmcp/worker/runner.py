@@ -8,7 +8,7 @@ from pathlib import Path
 import threading
 from typing import Any, Callable
 
-from maxmcp.rtmw3d.motion import convert_rtmw3d_file
+from maxmcp.worker.postprocess_bridge import convert_with_postprocess
 from maxmcp.rtmw3d.runtime import Rtmw3dReadiness, default_readiness
 from maxmcp.worker.api_client import ArtokeApiClient, UploadTarget, WorkerApiError
 from maxmcp.worker.artifacts import (
@@ -60,7 +60,7 @@ class ArtokeWorker:
         artifact_builder: Callable[..., tuple[LocalArtifact, ...]] = build_artifacts,
         uploader: Callable[[UploadTarget, LocalArtifact], None] = _upload,
         correction_applier: Callable[[Path, Path, Path], Path] = apply_tracking_corrections,
-        converter: Callable[[Path, Path], int] = convert_rtmw3d_file,
+        converter: Callable[[Path, Path], int] = convert_with_postprocess,
         heartbeat_interval: float = 20.0,
     ) -> None:
         self._api = api

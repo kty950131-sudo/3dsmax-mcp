@@ -167,6 +167,14 @@ def build_artifacts(
         },
         "warnings": warnings,
     }
+    # 후처리 다리가 BVH 옆에 남긴 보고. 지표와 대상 전환 프레임이 든다. 없으면
+    # (옛 워커·후처리 실패) 필드도 없다 — 사이트는 있을 때만 보여 준다.
+    report_path = pipeline.bvh.with_suffix(".postprocess.json")
+    if report_path.is_file():
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        metadata["postprocess"] = report
+        if report.get("target_switch_frames"):
+            warnings.append("target_switch_detected")
     metadata_path.write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2),
         encoding="utf-8",
