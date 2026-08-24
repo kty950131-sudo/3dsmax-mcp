@@ -109,6 +109,11 @@ class KimodoPipeline:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # text=True 만 주면 Windows 는 cp949 로 읽는다. docker 출력의 UTF-8
+            # 진행바 문자(0xe2…)에서 리더 스레드가 죽어 파이프라인이 통째로
+            # 실패했다(08-24 실측). 콘솔 출력은 기록용이라 깨진 글자는 바꿔치운다.
+            encoding="utf-8",
+            errors="replace",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         with self._lock:
