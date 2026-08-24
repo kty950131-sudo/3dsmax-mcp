@@ -373,6 +373,34 @@ def test_run_forever_cleans_stale_jobs_before_polling(tmp_path: Path) -> None:
     assert not stale.exists()
 
 
+def test_prompt_source_passes_filename_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 파일 이름 문지기가 영상 확장자만 알던 시절, 첫 프롬프트 작업이
+    # invalid_source_filename 으로 즉시 거부됐다(2026-08-24 라이브 실측).
+    api = Api()
+    api.claim = lambda: ClaimedJob(
+        JOB_ID, "prompt.kimodo.json", "owner/job/source/prompt.kimodo.json", "https://signed", 3.0,
+    )
+    download, build, upload, _uploads = dependencies(tmp_path)
+
+    class FakeKimodo:
+        def run(self, _src, workspace, _on_stage, _cancelled):
+            path = workspace / "internal"
+            path.write_text("x", encoding="utf-8")
+            return PipelineArtifacts(path, path, path, 1)
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr("maxmcp.worker.runner.KimodoPipeline", FakeKimodo)
+    worker = ArtokeWorker(
+        api, lambda: readiness(tmp_path), tmp_path / "cache",
+        downloader=download, artifact_builder=build, uploader=upload,
+    )
+
+    assert worker.run_once() is RunResult.COMPLETED
+    assert api.failed is None
+
+
 def test_worker_rejects_non_video_source_filename(tmp_path: Path) -> None:
     api = Api()
     claim = api.claim()

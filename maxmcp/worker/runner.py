@@ -98,7 +98,12 @@ class ArtokeWorker:
             return RunResult.IDLE
         if (
             Path(claim.source_filename).name != claim.source_filename
-            or Path(claim.source_filename).suffix.lower() not in VIDEO_EXTENSIONS
+            or (
+                Path(claim.source_filename).suffix.lower() not in VIDEO_EXTENSIONS
+                # 프롬프트 작업(.kimodo.json)도 정당한 소스다 — 이 문지기가 영상만
+                # 알던 시절의 잔재로 첫 프롬프트 작업을 즉시 거부했다(08-24 실측).
+                and not is_prompt_source(claim.source_filename)
+            )
         ):
             self._api.finish_failed(claim.job_id, "invalid_source_filename")
             return RunResult.FAILED
