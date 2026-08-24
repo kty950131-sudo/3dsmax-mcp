@@ -38,7 +38,7 @@ def convert_with_postprocess(source: str | Path, output: str | Path) -> int:
         metrics = mt.measure(output)
         report = {
             "applied": True,
-            "pipeline": {k: log[k] for k in ("smooth_sigma", "prior_penalty", "rot_sigma") if k in log},
+            "pipeline": {k: log[k] for k in ("smooth_sigma", "prior_penalty", "rot_sigma", "rom_clamped") if k in log},
             "target_switch_frames": log.get("target_switch_frames", []),
             "foot_plant": log.get("foot_plant"),
             "metrics": {
