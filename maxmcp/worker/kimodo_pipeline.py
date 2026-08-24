@@ -144,9 +144,17 @@ class KimodoPipeline:
                 pass
             raise RuntimeError((stderr or stdout or "kimodo_gen failed").strip()[-2000:])
 
-        # 표본 1개 규칙이라 `<tag>_00.bvh` 하나다. 경로가 바뀌어도 잡히게 훑는다.
+        # 표본 1개면 kimodo_gen 은 폴더가 아니라 **단일 파일**(`output/<tag>.bvh`)로
+        # 저장한다 — `<tag>/` 폴더에 `_00` 접미사가 붙는 것은 다표본 때다. 폴더만
+        # 뒤지다가 성공한 생성을 "BVH 없음"으로 오판했다(08-24 실측, 16분 낭비).
+        # 두 모양을 다 받는다.
         out_dir = self._kimodo_dir / "output" / tag
-        found = sorted(out_dir.glob("*_00.bvh")) or sorted(out_dir.rglob("*.bvh"))
+        flat = self._kimodo_dir / "output" / f"{tag}.bvh"
+        found = (
+            sorted(out_dir.glob("*_00.bvh")) or sorted(out_dir.rglob("*.bvh"))
+            if out_dir.is_dir()
+            else []
+        ) or ([flat] if flat.is_file() else [])
         if not found:
             raise RuntimeError(f"Kimodo 가 BVH 를 만들지 않았습니다: {out_dir}")
 

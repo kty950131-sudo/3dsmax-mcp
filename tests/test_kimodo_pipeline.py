@@ -65,6 +65,26 @@ def test_runs_kimodo_and_collects_bvh(tmp_path):
     assert trace["seed"] == 42 and trace["prompt"].startswith("A person waves")
 
 
+def test_collects_flat_single_sample_bvh(tmp_path):
+    # num_samples 1 이면 kimodo_gen 은 `output/<tag>.bvh` 단일 파일로 저장한다.
+    # 폴더만 뒤지다가 성공한 생성을 "BVH 없음"으로 오판했다 (2026-08-24 실측).
+    kimodo = tmp_path / "kimodo"; kimodo.mkdir()
+    class FlatOutput:
+        returncode = 0
+        def __init__(self, command, **_):
+            tag = command[command.index("--output") + 1].split("/", 1)[1]
+            out = kimodo / "output"
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f"{tag}.bvh").write_text(
+                "HIERARCHY\nROOT Hips\n{\n}\nMOTION\nFrames: 90\nFrame Time: 0.0333\n",
+                encoding="utf-8")
+        def communicate(self): return "", ""
+    pipe = KimodoPipeline(process_factory=FlatOutput, kimodo_dir=kimodo)
+    result = pipe.run(spec(tmp_path), tmp_path / "ws", lambda *_: None, lambda: False)
+    assert result.frame_count == 90
+    assert result.bvh.is_file()
+
+
 def test_missing_bvh_raises(tmp_path):
     kimodo = tmp_path / "kimodo"; kimodo.mkdir()
     class NoOutput:
