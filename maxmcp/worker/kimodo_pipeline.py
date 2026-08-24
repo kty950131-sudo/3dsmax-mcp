@@ -64,6 +64,16 @@ class KimodoPipeline:
         self._process: Any = None
         self._cancelled = threading.Event()
 
+    def _docker_cp(self, container_path: str, dest: Path) -> bool:
+        """컨테이너에서 산출물을 꺼낸다. 성공하면 True."""
+        result = subprocess.run(
+            ["docker", "compose", "cp", f"demo:{container_path}", str(dest)],
+            cwd=str(self._kimodo_dir),
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return result.returncode == 0 and dest.is_file()
+
     def cancel(self) -> None:
         self._cancelled.set()
         with self._lock:
@@ -145,9 +155,12 @@ class KimodoPipeline:
             raise RuntimeError((stderr or stdout or "kimodo_gen failed").strip()[-2000:])
 
         # 표본 1개면 kimodo_gen 은 폴더가 아니라 **단일 파일**(`output/<tag>.bvh`)로
-        # 저장한다 — `<tag>/` 폴더에 `_00` 접미사가 붙는 것은 다표본 때다. 폴더만
-        # 뒤지다가 성공한 생성을 "BVH 없음"으로 오판했다(08-24 실측, 16분 낭비).
-        # 두 모양을 다 받는다.
+        # 저장한다 — `<tag>/` 폴더에 `_00` 접미사가 붙는 것은 다표본 때다. 그리고
+        # 호스트 output 마운트는 믿을 수 없다: 컨테이너 안에는 BVH 가 있는데
+        # 호스트에는 안 보이는 것을 실측했다(08-24, 두 번 18분씩 낭비). 그래서
+        # 호스트를 먼저 훑되, 없으면 docker compose cp 로 컨테이너에서 꺼낸다.
+        on_stage("converting", 65)
+        bvh_path = workspace / f"{source_path.stem}_kimodo.bvh"
         out_dir = self._kimodo_dir / "output" / tag
         flat = self._kimodo_dir / "output" / f"{tag}.bvh"
         found = (
@@ -155,12 +168,16 @@ class KimodoPipeline:
             if out_dir.is_dir()
             else []
         ) or ([flat] if flat.is_file() else [])
-        if not found:
+        if found:
+            shutil.copy2(found[0], bvh_path)
+        elif not any(
+            self._docker_cp(container_path, bvh_path)
+            for container_path in (
+                f"/workspace/output/{tag}.bvh",
+                f"/workspace/output/{tag}/{tag}_00.bvh",
+            )
+        ):
             raise RuntimeError(f"Kimodo 가 BVH 를 만들지 않았습니다: {out_dir}")
-
-        on_stage("converting", 65)
-        bvh_path = workspace / f"{source_path.stem}_kimodo.bvh"
-        shutil.copy2(found[0], bvh_path)
         frame_count = _bvh_frames(bvh_path)
 
         on_stage("validating", 85)

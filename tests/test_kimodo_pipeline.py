@@ -85,12 +85,35 @@ def test_collects_flat_single_sample_bvh(tmp_path):
     assert result.bvh.is_file()
 
 
-def test_missing_bvh_raises(tmp_path):
+class NoOutput:
+    returncode = 0
+    def __init__(self, *a, **k): pass
+    def communicate(self): return "", ""
+
+
+def test_falls_back_to_docker_cp_when_host_mount_is_stale(tmp_path, monkeypatch):
+    # 컨테이너 안에는 BVH 가 있는데 호스트 output 에는 안 보였다 (2026-08-24
+    # 실측, 마운트 어긋남). 호스트에 없으면 docker compose cp 로 꺼내야 한다.
     kimodo = tmp_path / "kimodo"; kimodo.mkdir()
-    class NoOutput:
-        returncode = 0
-        def __init__(self, *a, **k): pass
-        def communicate(self): return "", ""
     pipe = KimodoPipeline(process_factory=NoOutput, kimodo_dir=kimodo)
+    asked = []
+    def fake_cp(container_path, dest):
+        asked.append(container_path)
+        if container_path.endswith("_00.bvh"):
+            return False
+        dest.write_text(
+            "HIERARCHY\nROOT Hips\n{\n}\nMOTION\nFrames: 90\nFrame Time: 0.0333\n",
+            encoding="utf-8")
+        return True
+    monkeypatch.setattr(pipe, "_docker_cp", fake_cp)
+    result = pipe.run(spec(tmp_path), tmp_path / "ws", lambda *_: None, lambda: False)
+    assert result.frame_count == 90
+    assert asked and asked[0].startswith("/workspace/output/")
+
+
+def test_missing_bvh_raises(tmp_path, monkeypatch):
+    kimodo = tmp_path / "kimodo"; kimodo.mkdir()
+    pipe = KimodoPipeline(process_factory=NoOutput, kimodo_dir=kimodo)
+    monkeypatch.setattr(pipe, "_docker_cp", lambda *_: False)
     with pytest.raises(RuntimeError, match="BVH"):
         pipe.run(spec(tmp_path), tmp_path / "ws", lambda *_: None, lambda: False)
