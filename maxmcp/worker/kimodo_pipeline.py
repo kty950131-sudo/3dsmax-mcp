@@ -44,7 +44,10 @@ def _sha256(path: Path) -> str:
 
 
 def _bvh_frames(path: Path) -> int:
-    match = re.search(r"Frames:\s*(\d+)", path.read_text(encoding="utf-8", errors="replace")[:4096])
+    # 앞부분만 잘라 읽지 않는다. SOMA 뼈대는 HIERARCHY 가 14KB 를 넘어
+    # `Frames:` 가 4096자 컷 밖에 있었고, 성공한 생성을 여기서 떨어뜨렸다
+    # (2026-08-24 실측, 세 번째 15분 낭비). 파일이 200KB 급이라 통짜로 읽는다.
+    match = re.search(r"Frames:\s*(\d+)", path.read_text(encoding="utf-8", errors="replace"))
     if not match:
         raise RuntimeError("Kimodo BVH 에 Frames 가 없습니다")
     return int(match.group(1))
