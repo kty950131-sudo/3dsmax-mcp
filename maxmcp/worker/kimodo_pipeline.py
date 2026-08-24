@@ -131,6 +131,17 @@ class KimodoPipeline:
         if self._cancelled.is_set() or cancelled():
             raise PipelineCancelled()
         if process.returncode != 0:
+            # 서버에는 error_code 만 남아 실패가 장님이 된다. 전체 출력을 로컬에
+            # 남겨 둔다 — 워크스페이스는 청소되므로 kimodo 쪽에 쓴다.
+            try:
+                log_dir = self._kimodo_dir / "output"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                (log_dir / f"{tag}.error.log").write_text(
+                    f"exit={process.returncode}\n--- stdout ---\n{stdout or ''}\n--- stderr ---\n{stderr or ''}",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
             raise RuntimeError((stderr or stdout or "kimodo_gen failed").strip()[-2000:])
 
         # 표본 1개 규칙이라 `<tag>_00.bvh` 하나다. 경로가 바뀌어도 잡히게 훑는다.
