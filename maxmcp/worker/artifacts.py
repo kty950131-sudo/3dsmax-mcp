@@ -135,20 +135,37 @@ def build_artifacts(
     if abs(frame_time - (1 / 30)) > 0.0001:
         warnings.append("bvh_frame_rate_not_30fps")
 
-    command = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-ss", f"{max(duration_seconds / 2, 0):.3f}",
-        "-i", str(video), "-frames:v", "1",
-        "-vf", "scale=640:-2", "-y", str(thumbnail),
-    ]
-    result = process_runner(
-        command,
-        capture_output=True,
-        text=True,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if result.returncode != 0 or not thumbnail.is_file():
-        raise RuntimeError("ffmpeg thumbnail generation failed")
+    if video.name.lower().endswith(".kimodo.json"):
+        # 문장 입력 작업은 영상이 없다. BVH 중간 프레임의 뼈대를 그린다.
+        # 그마저 실패하면 빈 카드를 만든다 — 게시 계약이 4종을 요구하므로
+        # 썸네일이 없다고 작업을 실패시키는 것이 더 나쁘다.
+        try:
+            _skeleton_thumbnail(bvh, thumbnail)
+        except Exception:
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=0x0b0c10:s=640x360",
+                "-frames:v", "1", "-y", str(thumbnail),
+            ]
+            process_runner(command, capture_output=True, text=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if not thumbnail.is_file():
+            raise RuntimeError("prompt thumbnail generation failed")
+    else:
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-ss", f"{max(duration_seconds / 2, 0):.3f}",
+            "-i", str(video), "-frames:v", "1",
+            "-vf", "scale=640:-2", "-y", str(thumbnail),
+        ]
+        result = process_runner(
+            command,
+            capture_output=True,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0 or not thumbnail.is_file():
+            raise RuntimeError("ffmpeg thumbnail generation failed")
 
     trace = json.loads(pipeline.trace.read_text(encoding="utf-8"))
     metadata = {
@@ -190,3 +207,34 @@ def build_artifacts(
         LocalArtifact(kind, path, path.stat().st_size, sha256_file(path))
         for kind, path in files
     )
+
+
+def _skeleton_thumbnail(bvh_path: Path, out: Path) -> None:
+    """BVH 중간 프레임의 뼈대를 640x360 웹피 그림으로 그린다.
+
+    pose-prior 의 FK 를 빌린다(postprocess_bridge 와 같은 폴더 규약). 문장
+    입력 작업의 카드가 실제 생성된 동작을 보여 주게 하기 위한 것이다.
+    """
+    import sys
+    from maxmcp.worker.postprocess_bridge import POSE_PRIOR_DIR
+    if str(POSE_PRIOR_DIR) not in sys.path:
+        sys.path.insert(0, str(POSE_PRIOR_DIR))
+    import bvh as bvhmod  # noqa: WPS433
+    import numpy as np  # noqa: WPS433
+    from PIL import Image, ImageDraw  # noqa: WPS433
+
+    b = bvhmod.read(bvh_path)
+    W = bvhmod.world_positions(b, b.names)
+    mid = W[W.shape[0] // 2]
+    tree = bvhmod.offsets(b.header, b.names)
+    span = float(np.ptp(mid[:, 1])) or 1.0
+    center = mid.mean(axis=0)
+    im = Image.new("RGB", (640, 360), (11, 12, 16))
+    draw = ImageDraw.Draw(im)
+    def dot(p):
+        return (320 + (p[0] - center[0]) / span * 260, 200 - (p[1] - center[1]) / span * 260)
+    for i, name in enumerate(b.names):
+        parent = tree[name][0]
+        if parent in b.names:
+            draw.line([dot(mid[b.names.index(parent)]), dot(mid[i])], fill=(124, 156, 255), width=4)
+    im.save(out, format="WEBP", quality=85)

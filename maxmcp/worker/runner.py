@@ -8,6 +8,7 @@ from pathlib import Path
 import threading
 from typing import Any, Callable
 
+from maxmcp.worker.kimodo_pipeline import KimodoPipeline, is_prompt_source
 from maxmcp.worker.postprocess_bridge import convert_with_postprocess
 from maxmcp.rtmw3d.runtime import Rtmw3dReadiness, default_readiness
 from maxmcp.worker.api_client import ArtokeApiClient, UploadTarget, WorkerApiError
@@ -180,7 +181,13 @@ class ArtokeWorker:
                     )
                 else:
                     phase = "pipeline_failed"
-                    pipeline = self._pipeline_factory(report)
+                    # 문장 입력 작업은 트래킹이 아니라 Kimodo 생성으로 간다.
+                    # 겉모양(PipelineArtifacts)이 같아 게시 쪽은 갈래를 모른다.
+                    pipeline = (
+                        KimodoPipeline()
+                        if is_prompt_source(claim.source_filename)
+                        else self._pipeline_factory(report)
+                    )
                     pipeline_result = pipeline.run(
                         source,
                         workspace.path,
