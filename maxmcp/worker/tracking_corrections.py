@@ -12,6 +12,7 @@ from maxmcp.rtmw3d.motion import BODY23_NAMES, load_rtmw3d
 
 
 _EDIT_FIELDS = {"frame", "joint", "x", "y", "state"}
+RTMW3D_FOCAL = (1145.04940459, 1143.78109572)  # mmpose rtmpose3d 기본 카메라
 _EDIT_STATES = {"manual", "propagated"}
 
 
@@ -73,9 +74,22 @@ def apply_tracking_corrections(
         image_keypoints = target.get("image_keypoints")
         if not isinstance(image_keypoints, dict):
             raise ValueError("source frame has no image keypoints")
+        # 편집 좌표는 픽셀, keypoints 는 미터다. 예전엔 픽셀을 미터 칸에 그대로
+        # 넣어 관절이 수백 m 밖으로 날아가고 IK 가 팔다리를 접었다(2026-08-25 실측).
+        # RTMW3D 의 핀홀 상수(f=1145.049, 1143.781)로 픽셀 이동량을 같은 깊이의
+        # 미터 이동량으로 바꾼다. 깊이는 편집으로 알 수 없으니 그대로 둔다.
+        previous_pixels = image_keypoints.get(joint)
+        px, py, pz = target["keypoints"][joint]
+        depth = -pz
+        if not (isinstance(previous_pixels, list) and len(previous_pixels) == 2) or depth <= 0:
+            raise ValueError("source frame has no usable camera depth for correction")
+        u0, v0 = float(previous_pixels[0]), float(previous_pixels[1])
         image_keypoints[joint] = [x, y]
-        z = target["keypoints"][joint][2]
-        target["keypoints"][joint] = [x, -y, z]
+        target["keypoints"][joint] = [
+            px + (x - u0) * depth / RTMW3D_FOCAL[0],
+            py - (y - v0) * depth / RTMW3D_FOCAL[1],
+            pz,
+        ]
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None

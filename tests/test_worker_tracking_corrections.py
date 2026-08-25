@@ -9,7 +9,8 @@ from maxmcp.worker.tracking_corrections import apply_tracking_corrections
 
 def tracking_payload() -> dict[str, object]:
     keypoints = {
-        joint: [float(index), float(index + 1), float(index + 2)]
+        # z 는 카메라 앞이 음수다(추출기가 [x, -y, -z] 로 적는다). 보정 변환이 깊이 -z 를 쓴다.
+        joint: [float(index), float(index + 1), -float(index + 2)]
         for index, joint in enumerate(BODY23_NAMES)
     }
     image_keypoints = {
@@ -52,7 +53,16 @@ def test_applies_body23_corrections_without_mutating_source(tmp_path: Path) -> N
 
     result = json.loads(result_path.read_text(encoding="utf-8"))
     assert result["frames"][0]["image_keypoints"]["left_wrist"] == [310.5, 205.0]
-    assert result["frames"][0]["keypoints"]["left_wrist"] == [310.5, -205.0, 11.0]
+    # 픽셀 이동량 → 같은 깊이의 미터 이동량(RTMW3D 핀홀 f=1145.049/1143.781).
+    # 픽셀을 미터 칸에 그대로 넣던 예전 동작은 관절을 수백 m 밖으로 던졌다.
+    src = tracking_payload()["frames"][0]
+    u0, v0 = src["image_keypoints"]["left_wrist"]
+    px, py, pz = src["keypoints"]["left_wrist"]
+    depth = -pz
+    x, y, z = result["frames"][0]["keypoints"]["left_wrist"]
+    assert z == pz
+    assert abs(x - (px + (310.5 - u0) * depth / 1145.04940459)) < 1e-9
+    assert abs(y - (py - (205.0 - v0) * depth / 1143.78109572)) < 1e-9
     assert source.read_bytes() == original
     assert result_path == output
 

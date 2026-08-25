@@ -325,6 +325,8 @@ def main() -> None:
 
     frames = []
     previous = None
+    previous_raw = None
+    previous_image = None
     index = 0
     image_size = None
     subject = None          # 지금 따라가는 상자
@@ -377,6 +379,14 @@ def main() -> None:
                     iou_predicted = iou(predicted, candidate)
                     if max(iou_now, iou_predicted) < 0.05:
                         continue    # 화면 반대편의 사람이 겉모습만으로 붙는 일을 막는다
+                    # 크기가 갑자기 달라지는 후보는 다른 사람이다(말 탄 기수 상자는
+                    # 궁수 상자의 2배가 넘었다 — 2026-08-25 실측, 궁수→기수 갈아탐).
+                    # 단, 몸을 웅크리면 자기 상자도 작아지므로 작은 쪽은 막지 않는다 —
+                    # 0.5 하한을 두었더니 78프레임 뒤로 궁수를 영영 못 찾았다.
+                    area_now = (subject[2] - subject[0]) * (subject[3] - subject[1])
+                    area_c = (candidate[2] - candidate[0]) * (candidate[3] - candidate[1])
+                    if area_now > 0 and area_c / area_now > 2.0 and len(people) > 1:
+                        continue
                     histogram = color_histogram(image, candidate)
                     similarity = appearance_similarity(reference_hist, histogram)
                     if similarity is not None and similarity < 0.15:
@@ -408,7 +418,10 @@ def main() -> None:
                     best_score, best_hist, best_box = scored[0]
                     unambiguous = len(scored) == 1 or best_score - scored[1][0] >= 0.15
                     if not unambiguous:
+                        # 두 후보가 비슷하면 억지로 고르지 않는다 — 고른 쪽이 남이면
+                        # 그 프레임 자세가 남의 것이 된다. 놓친 것으로 적고 예측만 잇는다.
                         ambiguous.append(index)
+                        carried.append(index)
                     # 상자 떨림이 자세 떨림으로 번지지 않게 가볍게 고른다.
                     box = [s * 0.4 + c * 0.6 for s, c in zip(subject, best_box)]
                     delta = [n - o for n, o in zip(box_center(box), box_center(subject))]
@@ -423,21 +436,33 @@ def main() -> None:
                             cv2.normalize(reference_hist, reference_hist)
                     subject = list(box)
 
-        bbox = np.array([box], dtype=np.float32)
-        result = inference_topdown(model, image, bbox)[0].pred_instances
-        raw_points = result.keypoints[0, :23]
-        raw_scores = result.keypoint_scores[0, :23]
-        # `keypoints` 는 미터 단위 3D 다. 화면 좌표는 `transformed_keypoints` 에 있다.
-        # 예전에는 3D 의 x·y 를 화면 좌표로 적어서, 겹쳐 보기가 모든 관절을 왼쪽 위
-        # 구석에 그렸다. 상자 39~855 픽셀에 대해 이 값이 57~834 로 들어온다.
-        image_points = result.transformed_keypoints[0, :23]
-        current = raw_points.copy()
-        if previous is not None:
-            reliable = raw_scores[:, None] >= 0.2
-            smoothed = previous * 0.35 + current * 0.65
-            current = np.where(reliable, smoothed, previous)
+        lost = bool(carried) and carried[-1] == index and previous is not None
+        if lost:
+            # 놓친 프레임: 예측 상자 밑에는 다른 사람이나 말이 있을 수 있다. 그 자세를
+            # 내보내면 IK 가 남의 몸에 맞추며 팔다리를 접는다(2026-08-25 실측). 마지막
+            # 좋은 자세를 그대로 두고 신뢰도를 0 으로 내려, 뒤 단계가 보간하게 한다.
+            raw_points = previous_raw.copy()
+            raw_scores = np.zeros(23, dtype=np.float32)
+            image_points = previous_image.copy()
+            current = previous
+        else:
+            bbox = np.array([box], dtype=np.float32)
+            result = inference_topdown(model, image, bbox)[0].pred_instances
+            raw_points = result.keypoints[0, :23]
+            raw_scores = result.keypoint_scores[0, :23]
+            # `keypoints` 는 미터 단위 3D 다. 화면 좌표는 `transformed_keypoints` 에 있다.
+            # 예전에는 3D 의 x·y 를 화면 좌표로 적어서, 겹쳐 보기가 모든 관절을 왼쪽 위
+            # 구석에 그렸다. 상자 39~855 픽셀에 대해 이 값이 57~834 로 들어온다.
+            image_points = result.transformed_keypoints[0, :23]
+            current = raw_points.copy()
+            if previous is not None:
+                reliable = raw_scores[:, None] >= 0.2
+                smoothed = previous * 0.35 + current * 0.65
+                current = np.where(reliable, smoothed, previous)
+            previous_raw, previous_image = raw_points.copy(), np.array(image_points).copy()
         previous = current
         record = build_frame_record(index, raw_points, raw_scores, current, image_points)
+        record["lost"] = lost
         # 프레임마다 쓴 상자를 남긴다. 이 트랙이 있어야 그 사람만 잘라 낸 영상을
         # 만들 수 있고, 그 영상을 언리얼에 넣어 골격을 갖춘 자세를 받아 올 수 있다.
         record["box"] = [float(v) for v in box]
