@@ -5,7 +5,9 @@ from __future__ import annotations
 from enum import Enum
 import json
 from pathlib import Path
+import sys
 import threading
+import traceback
 from typing import Any, Callable
 
 from maxmcp.worker.kimodo_pipeline import KimodoPipeline, is_prompt_source
@@ -153,7 +155,14 @@ class ArtokeWorker:
         try:
             with JobWorkspace.open(self._cache_root, claim.job_id) as workspace:
                 source = workspace.path / claim.source_filename
-                self._downloader(claim.download_url, source)
+                if not claim.download_url:
+                    # 로컬 앱으로 넣은 작업은 서버에 원본이 없을 수 있다. 관절 교정만이면
+                    # 원본 없이도 되지만, 주인공 재추출은 원본이 있어야 한다(08-26 실측:
+                    # downloadUrl=null 인 채로 같은 작업을 5초마다 다시 잡는 고리에 빠졌다).
+                    if claim.edit_revision <= 0:
+                        raise ValueError("claim has no source download url")
+                else:
+                    self._downloader(claim.download_url, source)
                 if cancelled.is_set():
                     raise PipelineCancelled()
                 if claim.edit_revision > 0:
@@ -168,6 +177,9 @@ class ArtokeWorker:
                         raise PipelineCancelled()
 
                     subject = read_subject_box(edits)
+                    if subject is not None and not claim.download_url:
+                        phase = "source_unavailable"
+                        raise ValueError("subject re-extraction needs the source video")
                     if subject is not None:
                         # 주인공 다시 지정: 관절 교정이 아니라 그 상자를 씨앗으로
                         # 원본 영상에서 처음부터 다시 추출한다(2026-08-25, 궁수→기수 갈아탐).
@@ -263,11 +275,15 @@ class ArtokeWorker:
         except WorkerApiError as exc:
             if exc.status == 409:
                 return RunResult.LEASE_LOST
+            print(f"[artoke-worker] job {claim.job_id} failed at {phase}: {exc}", file=sys.stderr)
             self._api.finish_failed(claim.job_id, phase)
             return RunResult.FAILED
         except Exception:
             if lease_lost.is_set():
                 return RunResult.LEASE_LOST
+            # 원인을 남긴다 — 예전엔 조용히 삼켜서 "downloading 에서 멈춤"만 보였다(08-26).
+            print(f"[artoke-worker] job {claim.job_id} failed at {phase}:", file=sys.stderr)
+            traceback.print_exc()
             self._api.finish_failed(claim.job_id, phase)
             return RunResult.FAILED
         finally:
