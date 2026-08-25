@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from maxmcp.rtmw3d.motion import BODY23_NAMES
-from maxmcp.worker.tracking_corrections import apply_tracking_corrections
+from maxmcp.worker.tracking_corrections import apply_tracking_corrections, read_subject_box
 
 
 def tracking_payload() -> dict[str, object]:
@@ -70,7 +70,7 @@ def test_applies_body23_corrections_without_mutating_source(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     ("edits", "message"),
     [
-        ({"frame": 0}, "array"),
+        ({"imageEdits": {"frame": 0}}, "array"),
         ([{"frame": 1, "joint": "left_wrist", "x": 1, "y": 2, "state": "manual"}], "frame"),
         ([{"frame": 0, "joint": "pelvis", "x": 1, "y": 2, "state": "manual"}], "joint"),
         ([{"frame": 0, "joint": "left_wrist", "x": -1, "y": 2, "state": "manual"}], "coordinate"),
@@ -116,3 +116,28 @@ def test_atomic_output_never_reuses_or_removes_source_named_like_legacy_temp(
 
     assert source.read_bytes() == original
     assert output.exists()
+
+
+def test_accepts_site_shaped_document(tmp_path: Path) -> None:
+    edits = [{"frame": 0, "joint": "left_wrist", "x": 1, "y": 2, "state": "manual"}]
+    source, edits_path, output = write_inputs(tmp_path, {"imageEdits": edits, "poseEdits": []})
+
+    apply_tracking_corrections(source, edits_path, output)
+
+    assert output.exists()
+
+
+def test_read_subject_box(tmp_path: Path) -> None:
+    edits_path = tmp_path / "edits.json"
+    edits_path.write_text(json.dumps({"imageEdits": [], "poseEdits": []}), encoding="utf-8")
+    assert read_subject_box(edits_path) is None
+
+    edits_path.write_text(json.dumps({
+        "imageEdits": [],
+        "subjectBox": {"frame": 3, "x1": 10, "y1": 20, "x2": 110.5, "y2": 220},
+    }), encoding="utf-8")
+    assert read_subject_box(edits_path) == (3, (10.0, 20.0, 110.5, 220.0))
+
+    edits_path.write_text(json.dumps({"subjectBox": {"frame": 0, "x1": 5, "y1": 5, "x2": 5, "y2": 9}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="subject box"):
+        read_subject_box(edits_path)

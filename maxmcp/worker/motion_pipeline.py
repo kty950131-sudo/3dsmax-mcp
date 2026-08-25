@@ -64,6 +64,7 @@ class MotionPipeline:
         workspace: Path,
         on_stage: Callable[[str, int], None],
         cancelled: Callable[[], bool],
+        extra_args: tuple[str, ...] = (),
     ) -> PipelineArtifacts:
         if self._cancelled.is_set() or cancelled():
             raise PipelineCancelled()
@@ -71,7 +72,7 @@ class MotionPipeline:
         body_path = workspace / f"{video_path.stem}_rtmw3d.json"
         bvh_path = workspace / f"{video_path.stem}_rtmw3d_tpose.bvh"
         trace_path = workspace / f"{video_path.stem}_rtmw3d_trace.json"
-        command = build_rtmw3d_command(video_path, body_path, self._readiness)
+        command = build_rtmw3d_command(video_path, body_path, self._readiness, extra_args)
 
         on_stage("extracting", 15)
         process = self._process_factory(

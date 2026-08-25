@@ -42,6 +42,7 @@ def convert_with_postprocess(source: str | Path, output: str | Path) -> int:
             "target_switch_frames": log.get("target_switch_frames", []),
             # 추적을 놓쳐 마지막 자세로 채운 구간 — UI 타임라인이 주황으로 표시한다(08-25).
             "lost_segments": log.get("lost_segments", []),
+            "frame_count": log.get("frames"),
             "gated_frames": {
                 "low_confidence": log.get("low_confidence_frames", 0),
                 "bone_outlier": log.get("bone_outlier_frames", 0),

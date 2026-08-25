@@ -25,6 +25,26 @@ def _coordinate(value: Any) -> float:
     return result
 
 
+def read_subject_box(edits_json: Path) -> tuple[int, tuple[float, float, float, float]] | None:
+    """교정 문서에 주인공 상자가 있으면 (frame, (x1, y1, x2, y2)) 를 돌려준다.
+
+    상자는 원본 영상 픽셀 좌표다(추출기 --seed 와 같은 공간). 있으면 워커는
+    관절 교정 대신 그 상자를 씨앗으로 처음부터 다시 추출한다.
+    """
+    document = json.loads(Path(edits_json).read_text(encoding="utf-8"))
+    box = document.get("subjectBox") if isinstance(document, dict) else None
+    if not isinstance(box, dict):
+        return None
+    try:
+        frame = int(box["frame"])
+        coords = tuple(float(box[k]) for k in ("x1", "y1", "x2", "y2"))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("subject box is invalid") from exc
+    if frame < 0 or coords[2] <= coords[0] or coords[3] <= coords[1]:
+        raise ValueError("subject box is invalid")
+    return frame, coords
+
+
 def apply_tracking_corrections(
     source_json: Path,
     edits_json: Path,
@@ -41,6 +61,10 @@ def apply_tracking_corrections(
     load_rtmw3d(source)
     document = json.loads(source.read_text(encoding="utf-8"))
     corrections = json.loads(edits_path.read_text(encoding="utf-8"))
+    # 사이트는 `{imageEdits, poseEdits, subjectBox?}` 로 올린다(service.ts). 예전 배열
+    # 꼴도 받는다. poseEdits(3D 자세 편집)는 아직 이 경로에서 쓰지 않는다.
+    if isinstance(corrections, dict):
+        corrections = corrections.get("imageEdits", [])
     if not isinstance(corrections, list):
         raise ValueError("correction document must be an array")
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 
 @dataclass(frozen=True)
@@ -43,11 +44,15 @@ def default_readiness(project_root: Path | None = None) -> Rtmw3dReadiness:
 
 
 def build_rtmw3d_command(
-    video: Path, output: Path, runtime: Rtmw3dReadiness
+    video: Path, output: Path, runtime: Rtmw3dReadiness, extra_args: Sequence[str] = ()
 ) -> list[str]:
-    """Build the extractor command without shell interpolation."""
+    """Build the extractor command without shell interpolation.
+
+    `extra_args` 는 추출기 옵션을 그대로 덧붙인다 — 주인공 다시 지정이
+    `--seed FRAME:x1,y1,x2,y2` 를 넘기는 자리다(2026-08-25).
+    """
     project_root = Path(__file__).resolve().parents[2]
-    return [
+    return [*[
         str(runtime.environment / "Scripts" / "python.exe"),
         str(project_root / "scripts" / "run-rtmw3d.py"),
         "--mmpose-repo",
@@ -58,4 +63,4 @@ def build_rtmw3d_command(
         str(video),
         "--output",
         str(output),
-    ]
+    ], *extra_args]

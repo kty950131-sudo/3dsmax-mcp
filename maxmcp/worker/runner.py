@@ -19,7 +19,7 @@ from maxmcp.worker.artifacts import (
     upload_signed_artifact,
 )
 from maxmcp.worker.motion_pipeline import MotionPipeline, PipelineArtifacts, PipelineCancelled
-from maxmcp.worker.tracking_corrections import apply_tracking_corrections
+from maxmcp.worker.tracking_corrections import apply_tracking_corrections, read_subject_box
 from maxmcp.worker.workspace import JobWorkspace, cleanup_stale
 
 
@@ -167,23 +167,38 @@ class ArtokeWorker:
                     if cancelled.is_set():
                         raise PipelineCancelled()
 
-                    phase = "correction_failed"
-                    update_stage("converting", 65)
-                    corrected = workspace.path / "corrected.rtmw3d.json"
-                    self._correction_applier(original_tracking, edits, corrected)
-                    bvh = workspace.path / "corrected.bvh"
-                    frame_count = self._converter(corrected, bvh)
-                    trace = workspace.path / "corrected.trace.json"
-                    trace.write_text(json.dumps({
-                        "backend": "OpenMMLab RTMW3D-L",
-                        "editRevision": claim.edit_revision,
-                    }), encoding="utf-8")
-                    pipeline_result = PipelineArtifacts(
-                        corrected,
-                        bvh,
-                        trace,
-                        frame_count,
-                    )
+                    subject = read_subject_box(edits)
+                    if subject is not None:
+                        # 주인공 다시 지정: 관절 교정이 아니라 그 상자를 씨앗으로
+                        # 원본 영상에서 처음부터 다시 추출한다(2026-08-25, 궁수→기수 갈아탐).
+                        phase = "pipeline_failed"
+                        seed_frame, (x1, y1, x2, y2) = subject
+                        pipeline = self._pipeline_factory(report)
+                        pipeline_result = pipeline.run(
+                            source,
+                            workspace.path,
+                            update_stage,
+                            cancelled.is_set,
+                            extra_args=("--seed", f"{seed_frame}:{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}"),
+                        )
+                    else:
+                        phase = "correction_failed"
+                        update_stage("converting", 65)
+                        corrected = workspace.path / "corrected.rtmw3d.json"
+                        self._correction_applier(original_tracking, edits, corrected)
+                        bvh = workspace.path / "corrected.bvh"
+                        frame_count = self._converter(corrected, bvh)
+                        trace = workspace.path / "corrected.trace.json"
+                        trace.write_text(json.dumps({
+                            "backend": "OpenMMLab RTMW3D-L",
+                            "editRevision": claim.edit_revision,
+                        }), encoding="utf-8")
+                        pipeline_result = PipelineArtifacts(
+                            corrected,
+                            bvh,
+                            trace,
+                            frame_count,
+                        )
                 else:
                     phase = "pipeline_failed"
                     # 문장 입력 작업은 트래킹이 아니라 Kimodo 생성으로 간다.
