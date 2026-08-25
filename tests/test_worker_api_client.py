@@ -218,3 +218,33 @@ def test_remote_api_requires_https() -> None:
     with pytest.raises(ValueError, match="HTTPS"):
         ArtokeApiClient("http://artoke.com", "token")
     ArtokeApiClient("http://localhost:3000", "token")
+
+
+def test_claim_accepts_local_rebuild_without_object_path() -> None:
+    # 로컬 앱 작업의 재빌드: objectPath 는 없고, 주인공 재추출이면 downloadUrl 만 온다.
+    payload = {
+        "job": {"id": "job-1", "sourceFilename": "walk.mp4", "sourceDurationSeconds": 8.0, "editRevision": 4},
+        "source": {
+            "objectPath": None, "downloadUrl": "https://signed/preview",
+            "trackingUrl": "https://signed/tracking", "editsUrl": "https://signed/edits",
+        },
+    }
+    client = ArtokeApiClient("https://artoke.test", "t" * 64, opener=lambda *_a, **_k: Response(200, payload))
+
+    claim = client.claim()
+
+    assert claim is not None
+    assert claim.object_path is None
+    assert claim.download_url == "https://signed/preview"
+    assert claim.edit_revision == 4
+
+
+def test_claim_rejects_fresh_job_without_source() -> None:
+    payload = {
+        "job": {"id": "job-1", "sourceFilename": "walk.mp4", "sourceDurationSeconds": 8.0, "editRevision": 0},
+        "source": {"objectPath": None, "downloadUrl": None},
+    }
+    client = ArtokeApiClient("https://artoke.test", "t" * 64, opener=lambda *_a, **_k: Response(200, payload))
+
+    with pytest.raises(WorkerApiError):
+        client.claim()
