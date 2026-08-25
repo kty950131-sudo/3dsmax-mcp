@@ -80,6 +80,10 @@ class MotionPipeline:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # 추출기 출력에 진행 막대 같은 UTF-8 글자가 섞인다. 기본(cp949) 디코딩은
+            # 읽기 스레드를 죽여 결과를 통째로 잃는다(08-26 실측).
+            encoding="utf-8",
+            errors="replace",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         with self._lock:
