@@ -18,6 +18,7 @@ from maxmcp.ui.studio import biped_export
 from maxmcp.ui.studio.skeleton import fk
 from maxmcp.ui.studio.biped_export import (
     biped_frames,
+    biped_rest_basis,
     biped_rest_offsets,
     biped_skeleton,
     export_biped_bvh,
@@ -246,35 +247,53 @@ def test_every_joint_carries_its_parent() -> None:
     assert joints["Head"] == "Neck"
 
 
+class _ExplodingTransform:
+    """읽는 순간 터지는 변환. 피겨 모드가 복구되는지만 보려고 쓴다."""
+
+    @property
+    def translation(self):
+        raise RuntimeError("rest read failed")
+
+
 def test_rest_offsets_leave_figure_mode_even_when_reading_fails() -> None:
     rt = _rig()
     controller = MagicMock()
     controller.figureMode = False
     joints = biped_skeleton(rt, controller)
-    rt.inverse.side_effect = RuntimeError("local transform failed")
+    rt.biped.getNode(controller, "pelvis", link=1).transform = _ExplodingTransform()
 
-    with pytest.raises(RuntimeError, match="local transform failed"):
+    with pytest.raises(RuntimeError, match="rest read failed"):
         biped_rest_offsets(rt, controller, joints)
 
+    # 여기서 피겨 모드에 남으면 이후 키 편집 자체가 달라진다.
     assert controller.figureMode is False
 
 
-def test_rest_offsets_convert_the_measured_max_basis_to_bvh() -> None:
-    """척추1 실측 로컬 이동의 길이 축이 BVH에서도 같은 길이로 남아야 한다."""
+def test_rest_offset_is_the_world_bone_vector_not_the_parent_local_one() -> None:
+    """OFFSET 은 피겨 자세의 **월드** 뼈 벡터다.
+
+    부모 로컬 이동을 쓰면 바이패드 본의 로컬 축이 뼈를 따라 누워 있어서 휴식
+    골격이 통째로 +X 로 눕는다. 그 파일을 다시 바이패드로 읽으면 골격부터
+    누운 채 만들어져 자세가 깨진다. 여기서는 부모가 90도 돌아 있어도 OFFSET 이
+    월드 차이 그대로 남는지를 못박는다.
+    """
     rt = _rig()
     controller = MagicMock()
     pelvis = rt.biped.getNode(controller, "pelvis", link=1)
     spine = rt.biped.getNode(controller, "spine", link=1)
+    pelvis.transform = FakeMatrix(translation=(0.0, 0.0, 100.0), z_degrees=90.0)
+    spine.transform = FakeMatrix(translation=(0.0, 0.0, 107.548), z_degrees=90.0)
+    # 부모 로컬로 재면 축이 섞인다. 그 값을 쓰지 않는다는 것을 함께 못박는다.
     spine.transform.local_to(
-        pelvis.transform,
-        FakeMatrix(translation=(7.548, 2.498, 0.142)),
+        pelvis.transform, FakeMatrix(translation=(7.548, 2.498, 0.142))
     )
 
     offsets = biped_rest_offsets(rt, controller, [("Hips", None), ("Chest", "Hips")])
 
     # Max는 Z-up이고 BVH는 Y-up이다. X를 유지해 손의 좌우가 같게 하고 오른손계를
-    # 보존하면 Max (x,y,z) -> BVH (x,z,-y)가 된다.
-    assert offsets["Chest"] == pytest.approx((7.548, 0.142, -2.498), abs=1e-6)
+    # 보존하면 Max (x,y,z) -> BVH (x,z,-y)가 된다. 척추는 위(+Y)로 서야 한다.
+    assert offsets["Chest"] == pytest.approx((0.0, 7.548, 0.0), abs=1e-6)
+    assert offsets["Hips"] == pytest.approx((0.0, 0.0, 0.0), abs=1e-6)
 
 
 @pytest.mark.parametrize(
@@ -351,32 +370,65 @@ def test_empty_frame_range_has_no_rows() -> None:
 
 
 def test_quaternion_convention_is_measured_from_matrix_rows() -> None:
+    """행렬의 행으로 잰다. ``matrix3.rotation`` 이 켤레를 돌려줘도 흔들리지 않는다."""
     rt = _rig()
     controller = MagicMock()
     pelvis = rt.biped.getNode(controller, "pelvis", link=1)
-    # 행렬은 +90도인데 rotation 프로퍼티만 켤레(-90도)를 돌려주는 버전이다.
+    joints = [("Hips", None)]
+    # 휴식은 정면, 애니는 +90도. 행렬은 +90도인데 rotation 프로퍼티만 켤레를 준다.
+    pelvis.transform = FakeMatrix(z_degrees=0.0)
+    _offsets, rest = biped_rest_basis(rt, controller, joints)
     pelvis.transform = FakeMatrix(z_degrees=90.0, reported_degrees=-90.0)
 
-    row = biped_frames(rt, controller, [("Hips", None)], 0, 0)[0]
+    row = biped_frames(rt, controller, joints, 0, 0, rest=rest)[0]
 
-    # 켤레 판별은 Max 기저에서 끝낸 뒤, Max Z 회전을 BVH Y 회전으로 옮긴다.
+    # Max Z 회전이 BVH Y 회전으로 간다. 채널 선언은 Z,Y,X 라 가운데가 Y다.
     assert row[3:] == pytest.approx([0.0, 90.0, 0.0], abs=1e-6)
 
 
-def test_child_rotation_uses_parent_local_axes_and_zyx_channel_order() -> None:
+def test_child_channel_is_the_parent_delta_taken_out_in_zyx_order() -> None:
+    """자식 채널은 **부모의 변화를 뺀 나머지**다.
+
+    휴식이 둘 다 정면일 때 부모가 30도, 자식이 세계에서 50도 돌면 자식 채널은
+    20도여야 한다. 부모 회전이 두 번 들어가면 팔다리가 통째로 접힌다.
+    """
     rt = _rig()
     controller = MagicMock()
     pelvis = rt.biped.getNode(controller, "pelvis", link=1)
     spine = rt.biped.getNode(controller, "spine", link=1)
+    joints = [("Hips", None), ("Chest", "Hips")]
+    pelvis.transform = FakeMatrix(z_degrees=0.0)
+    spine.transform = FakeMatrix(z_degrees=0.0)
+    _offsets, rest = biped_rest_basis(rt, controller, joints)
     pelvis.transform = FakeMatrix(z_degrees=30.0)
     spine.transform = FakeMatrix(z_degrees=50.0)
-    spine.transform.local_to(pelvis.transform, FakeMatrix(z_degrees=20.0))
 
-    row = biped_frames(rt, controller, [("Hips", None), ("Chest", "Hips")], 0, 0)[0]
+    row = biped_frames(rt, controller, joints, 0, 0, rest=rest)[0]
 
     # Max Z는 BVH Y가 된다. 채널 선언은 그대로 Z,Y,X이므로 Y 회전은 가운데다.
     assert row[3:6] == pytest.approx([0.0, 30.0, 0.0], abs=1e-6)
     assert row[6:9] == pytest.approx([0.0, 20.0, 0.0], abs=1e-6)
+
+
+def test_rest_pose_rotation_is_taken_out_so_the_rest_frame_is_identity() -> None:
+    """휴식 자세가 기울어 있어도, 그 자세 그대로면 채널은 0 이다.
+
+    이것이 OFFSET 을 월드로 쓰는 대가이자 목적이다. 휴식 골격이 곧 피겨 자세이므로
+    아무것도 안 움직였으면 회전도 0 이어야 한다.
+    """
+    rt = _rig()
+    controller = MagicMock()
+    pelvis = rt.biped.getNode(controller, "pelvis", link=1)
+    spine = rt.biped.getNode(controller, "spine", link=1)
+    joints = [("Hips", None), ("Chest", "Hips")]
+    pelvis.transform = FakeMatrix(z_degrees=17.0)
+    spine.transform = FakeMatrix(z_degrees=-42.0)
+    _offsets, rest = biped_rest_basis(rt, controller, joints)
+
+    row = biped_frames(rt, controller, joints, 0, 0, rest=rest)[0]
+
+    assert row[3:6] == pytest.approx([0.0, 0.0, 0.0], abs=1e-6)
+    assert row[6:9] == pytest.approx([0.0, 0.0, 0.0], abs=1e-6)
 
 
 def _export_rt() -> tuple[MagicMock, MagicMock]:
@@ -620,3 +672,81 @@ def test_rotation_keeps_its_magnitude() -> None:
 
 def test_identity_stays_identity() -> None:
     assert max(abs(v) for v in _roundtrip(0.0, 0.0, 0.0)) < 1e-6
+
+
+def test_world_positions_survive_a_rest_pose_that_is_not_the_animated_pose() -> None:
+    """휴식과 애니가 다를 때도 FK 가 진짜 월드 좌표를 낸다.
+
+    옛 방식(부모 로컬 OFFSET)과 새 방식(월드 OFFSET + 휴식으로부터의 변화)이
+    갈리는 자리가 정확히 여기다. 뼈를 옆으로(+X) 두고 부모를 90도 돌리면,
+    자식은 앞(+Y)으로 가야 한다 — 축이나 기저가 하나라도 어긋나면 어긋난 자리에 선다.
+    """
+    rt = _rig()
+    controller = MagicMock()
+    pelvis = rt.biped.getNode(controller, "pelvis", link=1)
+    spine = rt.biped.getNode(controller, "spine", link=1)
+    joints = [("Hips", None), ("Chest", "Hips")]
+
+    # 휴식: 골반 위에서 뼈가 옆으로 7.5 뻗어 있다
+    pelvis.transform = FakeMatrix(translation=(0.0, 0.0, 100.0))
+    spine.transform = FakeMatrix(translation=(7.5, 0.0, 100.0))
+    offsets, rest = biped_rest_basis(rt, controller, joints)
+    assert offsets["Chest"] == pytest.approx((7.5, 0.0, 0.0), abs=1e-6)
+
+    # 애니: 골반이 Z축으로 90도 돌아 뼈가 앞(+Y)을 향한다
+    pelvis.transform = FakeMatrix(translation=(0.0, 0.0, 100.0), z_degrees=90.0)
+    spine.transform = FakeMatrix(translation=(0.0, 7.5, 100.0), z_degrees=90.0)
+    frames = biped_frames(rt, controller, joints, 0, 0, rest=rest)
+
+    bvh = BvhFile(
+        root=biped_export._bvh_tree(joints, offsets),
+        frame_time=1.0 / 30.0,
+        frames=frames,
+    )
+    positions = fk(bvh, 0)
+
+    # Max (x,y,z) -> BVH (x,z,-y)
+    assert positions["Hips"] == pytest.approx((0.0, 100.0, 0.0), abs=1e-6)
+    assert positions["Chest"] == pytest.approx((0.0, 100.0, -7.5), abs=1e-6)
+
+
+def test_channels_follow_the_tree_not_the_flat_joint_list() -> None:
+    """채널은 계층 선언 순서(깊이우선)로 나가야 한다.
+
+    실제 리그의 평탄한 목록은 팔 → 다리 → 손가락 순인데, 손가락은 손의 자식이라
+    트리에서는 팔 바로 뒤에 온다. 목록 순서로 쓰면 **다리 자리부터** 채널이 밀려
+    엉뚱한 관절에 붙는다(실측으로 다리·손가락·오른쪽 전체가 깨졌다).
+    """
+    joints = [
+        ("Hips", None),
+        ("Hand", "Hips"),
+        ("Leg", "Hips"),      # 목록에서는 손가락보다 앞
+        ("Finger", "Hand"),   # 트리에서는 다리보다 앞
+    ]
+
+    assert biped_export._channel_order(joints) == ["Hips", "Hand", "Finger", "Leg"]
+
+
+def test_frame_rows_are_written_in_tree_order() -> None:
+    """행의 숫자 배치가 트리 순서를 따르는지 값으로 확인한다."""
+    rt = _rig()
+    controller = MagicMock()
+    pelvis = rt.biped.getNode(controller, "pelvis", link=1)
+    spine = rt.biped.getNode(controller, "spine", link=1)
+    head = rt.biped.getNode(controller, "head", link=1)
+    joints = [("Hips", None), ("Head", "Chest"), ("Chest", "Hips")]
+
+    for node in (pelvis, spine, head):
+        node.transform = FakeMatrix()
+    _offsets, rest = biped_rest_basis(rt, controller, joints)
+    pelvis.transform = FakeMatrix()
+    spine.transform = FakeMatrix(z_degrees=10.0)
+    head.transform = FakeMatrix(z_degrees=25.0)
+
+    row = biped_frames(rt, controller, joints, 0, 0, rest=rest)[0]
+
+    # 트리 순서는 Hips(6) → Chest(3) → Head(3) 다. 목록 순서(Hips, Head, Chest)로
+    # 쓰면 아래 두 값이 서로 자리를 바꾼다.
+    assert row[3:6] == pytest.approx([0.0, 0.0, 0.0], abs=1e-6)    # Hips 회전
+    assert row[6:9] == pytest.approx([0.0, 10.0, 0.0], abs=1e-6)   # Chest
+    assert row[9:12] == pytest.approx([0.0, 15.0, 0.0], abs=1e-6)  # Head (25 - 10)

@@ -5,10 +5,13 @@ from __future__ import annotations
 from enum import Enum
 import json
 from pathlib import Path
+import sys
 import threading
+import traceback
 from typing import Any, Callable
 
-from maxmcp.rtmw3d.motion import convert_rtmw3d_file
+from maxmcp.worker.kimodo_pipeline import KimodoPipeline, is_prompt_source
+from maxmcp.worker.postprocess_bridge import convert_with_postprocess
 from maxmcp.rtmw3d.runtime import Rtmw3dReadiness, default_readiness
 from maxmcp.worker.api_client import ArtokeApiClient, UploadTarget, WorkerApiError
 from maxmcp.worker.artifacts import (
@@ -18,7 +21,7 @@ from maxmcp.worker.artifacts import (
     upload_signed_artifact,
 )
 from maxmcp.worker.motion_pipeline import MotionPipeline, PipelineArtifacts, PipelineCancelled
-from maxmcp.worker.tracking_corrections import apply_tracking_corrections
+from maxmcp.worker.tracking_corrections import apply_tracking_corrections, read_subject_box
 from maxmcp.worker.workspace import JobWorkspace, cleanup_stale
 
 
@@ -60,7 +63,7 @@ class ArtokeWorker:
         artifact_builder: Callable[..., tuple[LocalArtifact, ...]] = build_artifacts,
         uploader: Callable[[UploadTarget, LocalArtifact], None] = _upload,
         correction_applier: Callable[[Path, Path, Path], Path] = apply_tracking_corrections,
-        converter: Callable[[Path, Path], int] = convert_rtmw3d_file,
+        converter: Callable[[Path, Path], int] = convert_with_postprocess,
         heartbeat_interval: float = 20.0,
     ) -> None:
         self._api = api
@@ -97,7 +100,12 @@ class ArtokeWorker:
             return RunResult.IDLE
         if (
             Path(claim.source_filename).name != claim.source_filename
-            or Path(claim.source_filename).suffix.lower() not in VIDEO_EXTENSIONS
+            or (
+                Path(claim.source_filename).suffix.lower() not in VIDEO_EXTENSIONS
+                # 프롬프트 작업(.kimodo.json)도 정당한 소스다 — 이 문지기가 영상만
+                # 알던 시절의 잔재로 첫 프롬프트 작업을 즉시 거부했다(08-24 실측).
+                and not is_prompt_source(claim.source_filename)
+            )
         ):
             self._api.finish_failed(claim.job_id, "invalid_source_filename")
             return RunResult.FAILED
@@ -147,7 +155,14 @@ class ArtokeWorker:
         try:
             with JobWorkspace.open(self._cache_root, claim.job_id) as workspace:
                 source = workspace.path / claim.source_filename
-                self._downloader(claim.download_url, source)
+                if not claim.download_url:
+                    # 로컬 앱으로 넣은 작업은 서버에 원본이 없을 수 있다. 관절 교정만이면
+                    # 원본 없이도 되지만, 주인공 재추출은 원본이 있어야 한다(08-26 실측:
+                    # downloadUrl=null 인 채로 같은 작업을 5초마다 다시 잡는 고리에 빠졌다).
+                    if claim.edit_revision <= 0:
+                        raise ValueError("claim has no source download url")
+                else:
+                    self._downloader(claim.download_url, source)
                 if cancelled.is_set():
                     raise PipelineCancelled()
                 if claim.edit_revision > 0:
@@ -161,26 +176,50 @@ class ArtokeWorker:
                     if cancelled.is_set():
                         raise PipelineCancelled()
 
-                    phase = "correction_failed"
-                    update_stage("converting", 65)
-                    corrected = workspace.path / "corrected.rtmw3d.json"
-                    self._correction_applier(original_tracking, edits, corrected)
-                    bvh = workspace.path / "corrected.bvh"
-                    frame_count = self._converter(corrected, bvh)
-                    trace = workspace.path / "corrected.trace.json"
-                    trace.write_text(json.dumps({
-                        "backend": "OpenMMLab RTMW3D-L",
-                        "editRevision": claim.edit_revision,
-                    }), encoding="utf-8")
-                    pipeline_result = PipelineArtifacts(
-                        corrected,
-                        bvh,
-                        trace,
-                        frame_count,
-                    )
+                    subject = read_subject_box(edits)
+                    if subject is not None and not claim.download_url:
+                        phase = "source_unavailable"
+                        raise ValueError("subject re-extraction needs the source video")
+                    if subject is not None:
+                        # 주인공 다시 지정: 관절 교정이 아니라 그 상자를 씨앗으로
+                        # 원본 영상에서 처음부터 다시 추출한다(2026-08-25, 궁수→기수 갈아탐).
+                        phase = "pipeline_failed"
+                        seed_frame, (x1, y1, x2, y2) = subject
+                        pipeline = self._pipeline_factory(report)
+                        pipeline_result = pipeline.run(
+                            source,
+                            workspace.path,
+                            update_stage,
+                            cancelled.is_set,
+                            extra_args=("--seed", f"{seed_frame}:{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}"),
+                        )
+                    else:
+                        phase = "correction_failed"
+                        update_stage("converting", 65)
+                        corrected = workspace.path / "corrected.rtmw3d.json"
+                        self._correction_applier(original_tracking, edits, corrected)
+                        bvh = workspace.path / "corrected.bvh"
+                        frame_count = self._converter(corrected, bvh)
+                        trace = workspace.path / "corrected.trace.json"
+                        trace.write_text(json.dumps({
+                            "backend": "OpenMMLab RTMW3D-L",
+                            "editRevision": claim.edit_revision,
+                        }), encoding="utf-8")
+                        pipeline_result = PipelineArtifacts(
+                            corrected,
+                            bvh,
+                            trace,
+                            frame_count,
+                        )
                 else:
                     phase = "pipeline_failed"
-                    pipeline = self._pipeline_factory(report)
+                    # 문장 입력 작업은 트래킹이 아니라 Kimodo 생성으로 간다.
+                    # 겉모양(PipelineArtifacts)이 같아 게시 쪽은 갈래를 모른다.
+                    pipeline = (
+                        KimodoPipeline()
+                        if is_prompt_source(claim.source_filename)
+                        else self._pipeline_factory(report)
+                    )
                     pipeline_result = pipeline.run(
                         source,
                         workspace.path,
@@ -236,11 +275,15 @@ class ArtokeWorker:
         except WorkerApiError as exc:
             if exc.status == 409:
                 return RunResult.LEASE_LOST
+            print(f"[artoke-worker] job {claim.job_id} failed at {phase}: {exc}", file=sys.stderr)
             self._api.finish_failed(claim.job_id, phase)
             return RunResult.FAILED
         except Exception:
             if lease_lost.is_set():
                 return RunResult.LEASE_LOST
+            # 원인을 남긴다 — 예전엔 조용히 삼켜서 "downloading 에서 멈춤"만 보였다(08-26).
+            print(f"[artoke-worker] job {claim.job_id} failed at {phase}:", file=sys.stderr)
+            traceback.print_exc()
             self._api.finish_failed(claim.job_id, phase)
             return RunResult.FAILED
         finally:

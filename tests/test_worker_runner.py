@@ -164,8 +164,9 @@ def test_correction_rebuild_skips_inference_and_publishes_exact_revision(tmp_pat
         "image_size": {"width": 1920, "height": 1080},
         "frames": [{
             "index": 0,
+            # z 는 음수여야 카메라 앞이다(깊이 = -z). 픽셀→미터 보정이 깊이를 본다.
             "keypoints": {
-                joint: [float(index), float(index + 1), float(index + 2)]
+                joint: [float(index), float(index + 1), -float(index + 2)]
                 for index, joint in enumerate(BODY23_NAMES)
             },
             "image_keypoints": {
@@ -194,7 +195,13 @@ def test_correction_rebuild_skips_inference_and_publishes_exact_revision(tmp_pat
 
     def convert(source, output):
         corrected = json.loads(source.read_text(encoding="utf-8"))
-        assert corrected["frames"][0]["keypoints"]["left_wrist"][:2] == [310.5, -205.0]
+        # 편집은 픽셀로 들어오고 keypoints 는 미터로 남는다(741752d). 픽셀은
+        # image_keypoints 에 그대로, 미터 좌표는 원본에서 움직였는지만 본다.
+        frame0 = corrected["frames"][0]
+        assert frame0["image_keypoints"]["left_wrist"] == [310.5, 205.0]
+        wrist_index = BODY23_NAMES.index("left_wrist")
+        assert frame0["keypoints"]["left_wrist"][:2] != [float(wrist_index), float(wrist_index + 1)]
+        assert frame0["keypoints"]["left_wrist"][2] == -float(wrist_index + 2)
         output.write_text(
             "HIERARCHY\nROOT Pelvis\nMOTION\nFrames: 1\nFrame Time: 0.0333333333\n",
             encoding="utf-8",
@@ -371,6 +378,34 @@ def test_run_forever_cleans_stale_jobs_before_polling(tmp_path: Path) -> None:
     worker.run_forever(stop)
 
     assert not stale.exists()
+
+
+def test_prompt_source_passes_filename_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 파일 이름 문지기가 영상 확장자만 알던 시절, 첫 프롬프트 작업이
+    # invalid_source_filename 으로 즉시 거부됐다(2026-08-24 라이브 실측).
+    api = Api()
+    api.claim = lambda: ClaimedJob(
+        JOB_ID, "prompt.kimodo.json", "owner/job/source/prompt.kimodo.json", "https://signed", 3.0,
+    )
+    download, build, upload, _uploads = dependencies(tmp_path)
+
+    class FakeKimodo:
+        def run(self, _src, workspace, _on_stage, _cancelled):
+            path = workspace / "internal"
+            path.write_text("x", encoding="utf-8")
+            return PipelineArtifacts(path, path, path, 1)
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr("maxmcp.worker.runner.KimodoPipeline", FakeKimodo)
+    worker = ArtokeWorker(
+        api, lambda: readiness(tmp_path), tmp_path / "cache",
+        downloader=download, artifact_builder=build, uploader=upload,
+    )
+
+    assert worker.run_once() is RunResult.COMPLETED
+    assert api.failed is None
 
 
 def test_worker_rejects_non_video_source_filename(tmp_path: Path) -> None:

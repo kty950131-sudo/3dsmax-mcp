@@ -10,7 +10,7 @@ import subprocess
 import threading
 from typing import Any, Callable
 
-from maxmcp.rtmw3d.motion import convert_rtmw3d_file
+from maxmcp.worker.postprocess_bridge import convert_with_postprocess
 from maxmcp.rtmw3d.runtime import Rtmw3dReadiness, build_rtmw3d_command
 
 
@@ -41,7 +41,8 @@ class MotionPipeline:
         self,
         readiness: Rtmw3dReadiness,
         process_factory: Callable[..., Any] = subprocess.Popen,
-        converter: Callable[[Path, Path], int] = convert_rtmw3d_file,
+        # 기본은 후처리 판. 실패하면 다리가 원래 변환기로 물러난다.
+        converter: Callable[[Path, Path], int] = convert_with_postprocess,
     ) -> None:
         self._readiness = readiness
         self._process_factory = process_factory
@@ -63,6 +64,7 @@ class MotionPipeline:
         workspace: Path,
         on_stage: Callable[[str, int], None],
         cancelled: Callable[[], bool],
+        extra_args: tuple[str, ...] = (),
     ) -> PipelineArtifacts:
         if self._cancelled.is_set() or cancelled():
             raise PipelineCancelled()
@@ -70,7 +72,7 @@ class MotionPipeline:
         body_path = workspace / f"{video_path.stem}_rtmw3d.json"
         bvh_path = workspace / f"{video_path.stem}_rtmw3d_tpose.bvh"
         trace_path = workspace / f"{video_path.stem}_rtmw3d_trace.json"
-        command = build_rtmw3d_command(video_path, body_path, self._readiness)
+        command = build_rtmw3d_command(video_path, body_path, self._readiness, extra_args)
 
         on_stage("extracting", 15)
         process = self._process_factory(
@@ -78,6 +80,10 @@ class MotionPipeline:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # 추출기 출력에 진행 막대 같은 UTF-8 글자가 섞인다. 기본(cp949) 디코딩은
+            # 읽기 스레드를 죽여 결과를 통째로 잃는다(08-26 실측).
+            encoding="utf-8",
+            errors="replace",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         with self._lock:

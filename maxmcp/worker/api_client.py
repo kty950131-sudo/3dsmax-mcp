@@ -23,8 +23,10 @@ class WorkerApiError(RuntimeError):
 class ClaimedJob:
     job_id: str
     source_filename: str
-    object_path: str
-    download_url: str
+    # 로컬 앱으로 넣은 작업(local_ephemeral)은 서버에 원본이 없어 둘 다 비어 올 수 있다.
+    # 주인공 재추출처럼 원본이 필요한 재빌드에는 서버가 미리보기 사본 URL 을 채워 준다.
+    object_path: str | None
+    download_url: str | None
     duration_seconds: float
     edit_revision: int = 0
     tracking_url: str | None = None
@@ -99,13 +101,20 @@ class ArtokeApiClient:
             source = payload["source"]
             if not isinstance(job, dict) or not isinstance(source, dict):
                 raise TypeError
-            required_strings = (
-                job.get("id"), job.get("sourceFilename"),
-                source.get("objectPath"), source.get("downloadUrl"),
-            )
+            required_strings = (job.get("id"), job.get("sourceFilename"))
             if any(not isinstance(value, str) or not value for value in required_strings):
                 raise TypeError
             edit_revision = job.get("editRevision", 0)
+            object_path = source.get("objectPath")
+            download_url = source.get("downloadUrl")
+            for value in (object_path, download_url):
+                if value is not None and (not isinstance(value, str) or not value):
+                    raise TypeError
+            # 새 추출(revision 0)은 원본이 반드시 있어야 한다. 예전엔 로컬 작업의 재빌드
+            # (objectPath=null)까지 여기서 버려서, RPC 가 잡아 둔 lease 만 남고 일은 안 하는
+            # 고리를 90초마다 반복했다(08-26 실측).
+            if edit_revision == 0 and (object_path is None or download_url is None):
+                raise TypeError
             tracking_url = source.get("trackingUrl")
             edits_url = source.get("editsUrl")
             if (
@@ -131,7 +140,7 @@ class ArtokeApiClient:
                 raise ValueError
             return ClaimedJob(
                 job_id=job["id"], source_filename=job["sourceFilename"],
-                object_path=source["objectPath"], download_url=source["downloadUrl"],
+                object_path=object_path, download_url=download_url,
                 duration_seconds=duration_seconds,
                 edit_revision=edit_revision,
                 tracking_url=tracking_url,

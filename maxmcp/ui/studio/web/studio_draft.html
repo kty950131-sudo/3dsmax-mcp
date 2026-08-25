@@ -199,6 +199,9 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
   border-radius: .5rem; box-shadow: 0 6px 20px rgba(0,0,0,.45);
   display: flex; flex-direction: column;
 }
+/* `display: flex` 가 브라우저 기본 `[hidden] { display: none }` 을 이겨서, 우클릭
+   메뉴가 켜는 것과 무관하게 늘 왼쪽 위에 떠 있었다 (폴더 경로 칸을 가렸다). */
+.clip-menu[hidden] { display: none; }
 .clip-menu button {
   text-align: left; background: none; border: 0; padding: .4rem .6rem;
   border-radius: .35rem; color: inherit; cursor: pointer;
@@ -262,6 +265,73 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
 .preview canvas { width: 100%; flex: 1 1 auto; min-height: 0; display: block; border-radius: 4px; background: #232326; }
 .preview-bar { display: flex; gap: 6px; margin-top: 7px; }
 .preview-bar button { flex: 1; padding: 4px; font-size: 12px; }
+
+/* 포즈 선반: .cpy 에 내장된 TGA 썸네일을 클립 카드 자리에 그대로 보여준다.
+   오른손/왼손/양손은 둘째 줄 칩이다. 누르면 "임포트 후" 바이패드의 현재 프레임·
+   현재 레이어에 키가 찍힌다 — 레이어는 맥스 모션 패널에서 고른다. */
+.pose-card { position: relative; width: 139px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; cursor: pointer; background: #232326; padding: 0; }
+.pose-card img { width: 100%; display: block; aspect-ratio: 139 / 113; object-fit: cover; }
+.pose-card span { position: absolute; left: 0; right: 0; bottom: 0; font-size: 11px; text-align: center; background: rgba(0,0,0,.55); color: #ddd; padding: 2px 0; }
+.pose-card:hover { border-color: var(--accent); }
+.pose-card.is-last { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.pose-card .kind { top: 0; bottom: auto; left: auto; right: 0; width: auto; padding: 1px 5px; font-size: 10px;
+  background: var(--accent); color: #1a1a1a; font-weight: 600; border-radius: 0 0 0 4px; }
+/* 카드 위 삭제 단추. 평소에는 숨어 있다 — 적용하려고 카드를 누르는 것이 훨씬
+   잦은 동작이라, 지우기 표적이 늘 떠 있으면 실수로 누르기 쉽다. */
+.pose-card .del {
+  top: 0; bottom: auto; left: auto; right: 0; width: 18px; height: 18px; padding: 0;
+  line-height: 18px; font-size: 13px; background: rgba(0,0,0,.6); color: #F5B642;
+  border-radius: 0 0 0 4px; display: none;
+}
+.pose-card:hover .del { display: block; }
+.pose-card .del:hover { background: #F5B642; color: #1a1a1a; }
+/* R/L 뱃지가 같은 자리를 쓰므로, 삭제 단추가 뜨면 그 왼쪽으로 비켜난다. */
+.pose-card:hover .kind { right: 18px; }
+
+/* 방향 칩 뒤에 붙는 "키 찍기" 토글. 켜면 붙여넣기를 animate 컨텍스트로 감싸 키를 남긴다. */
+.cat-chip.is-key { margin-left: 10px; border-style: dashed; }
+.cat-chip.is-key.is-on { border-style: solid; }
+
+/* 거르는 칩이 아니라 누르면 바로 일이 벌어지는 단추다. 색으로 갈라 놓는다. */
+.cat-chip.is-save { margin-left: 10px; border-radius: 3px; border-color: var(--accent); color: var(--accent); }
+.cat-chip.is-save:hover { background: var(--accent); color: #1a1a1a; font-weight: 600; }
+
+/* 포즈 선반은 모션 분류가 아니라 포즈 묶음이라 성격이 다르다. 둥근 분류 칩
+   사이에서 네모로 두어 한눈에 갈리게 한다. 좌우 토글도 같은 네모를 쓴다 —
+   거르는 칩이 아니라 "어디에 넣을지" 를 정하는 스위치라는 뜻이다. */
+.cat-chip.is-square { border-radius: 3px; }
+.cat-chip.is-square.is-on { background: var(--accent); border-color: var(--accent); color: #1a1a1a; font-weight: 600; }
+.cat-chip.is-side { border-radius: 3px; border-style: dashed; }
+.cat-chip.is-side.is-on { border-style: solid; background: var(--accent); border-color: var(--accent); color: #1a1a1a; font-weight: 600; }
+.side-label { color: var(--dim); font-size: 12px; align-self: center; margin-right: 2px; }
+
+/* 애니메이션 레이어. 맥스 모션 패널의 Layers 롤아웃을 옮겨 온 것이다 —
+   포즈를 레이어에 얹고 지우는 동안 패널을 오가지 않게. */
+.layer-list { display: flex; gap: 4px; flex-wrap: wrap; flex: 1 1 auto; min-width: 0; }
+.layer-list button {
+  padding: 2px 8px; font-size: 11px; border-radius: 3px;
+}
+.layer-list button.is-current { background: var(--accent); border-color: var(--accent); color: #1a1a1a; font-weight: 600; }
+.layer-list button.is-off { opacity: .45; text-decoration: line-through; }
+.layer-list .empty { color: var(--dim); font-size: 11px; padding: 3px 0; }
+.layer-bar { display: flex; gap: 4px; }
+.layer-bar button { flex: 1; padding: 3px; font-size: 12px; }
+
+/* 출처 뱃지: 여러 원본 폴더를 한 루트(정션 모음)로 묶으면 카드만 보고는
+   어디서 온 클립인지 알 수 없다. 라이선스가 출처마다 다르므로 늘 보인다. */
+.clip-card .source {
+  position: absolute; left: 4px; bottom: 34px; max-width: calc(100% - 8px);
+  padding: 1px 5px; border-radius: 3px; font-size: 10px; color: #cfd3dc;
+  background: rgba(0,0,0,.62); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 업로드 금지 폴더는 화면 위쪽에 계속 띠를 둔다. 실수로 올리면 스토어 전체가 걸린다. */
+.no-upload {
+  display: none; align-items: center; gap: 8px; margin: 0 0 6px;
+  padding: 6px 10px; border-radius: 6px; font-size: 12px;
+  background: rgba(220, 80, 80, .13); border: 1px solid rgba(220, 80, 80, .45); color: #ffb4b4;
+}
+.no-upload.is-on { display: flex; }
+.no-upload b { color: #ff8f8f; letter-spacing: .04em; }
 
 /* 타임라인 */
 .timeline {
@@ -387,6 +457,10 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
   <button data-action="cancel-video">취소</button>
 </div>
 
+<div class="no-upload" data-no-upload>
+  <b>업로드 금지</b><span data-no-upload-note></span>
+</div>
+
 <div class="body">
   <div class="clip-grid"></div>
 
@@ -434,6 +508,14 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
     <div class="card">
       <h2>임포트 후</h2>
       <div class="row"><label>바이패드</label><select data-field="biped"></select></div>
+      <!-- 레이어0 이 베이스다. 위로 쌓은 레이어는 지우거나 아래로 접을 수 있다. -->
+      <div class="row"><label>레이어</label><div class="layer-list" data-layer-list></div></div>
+      <div class="row layer-bar">
+        <button data-action="layer-add" title="현재 맨 위에 레이어를 하나 더 쌓습니다">+ 추가</button>
+        <button data-action="layer-del" title="지금 고른 레이어를 지웁니다 (되돌릴 수 없습니다)">삭제</button>
+        <button data-action="layer-toggle" title="지금 고른 레이어를 껐다 켭니다">켜기/끄기</button>
+        <button data-action="layer-collapse" title="고른 레이어 하나를 바로 아래 레이어에 합칩니다 (되돌릴 수 없습니다)">레이어 합병</button>
+      </div>
       <!-- In Place Mode 를 여기 둔 이유: 맥스 모션 패널의 그 버튼은 현재 레이어가
            베이스가 아니면 조용히 죽는다(팔 간격을 걸면 그렇게 된다). 이 버튼은
            레이어를 먼저 내리고 켜므로 항상 눌린다. -->
@@ -449,6 +531,9 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
       </div>
       <!-- 맥스에는 BVH 익스포터가 없다(익스포터 목록에 Biovision 없음, CS 는
            .bip/.fig 뿐). 폴리싱한 클립을 꺼내는 유일한 길이라 여기 둔다. -->
+      <!-- 포즈 선반의 "＋ 맥스에서 저장" 과 짝이다. 이쪽은 지금 폴더에 .bvh 로
+           바로 써서 라이브러리 카드로 만든다. 위치를 고르는 것은 아래 단추다. -->
+      <button data-action="save-anim" style="width:100%">＋ 애니 라이브러리에 저장</button>
       <button data-action="export-bvh" style="width:100%">BVH로 내보내기…</button>
       <button data-action="mixer" style="width:100%">Motion Mixer로 보내기</button>
     </div>
@@ -600,6 +685,7 @@ function connectBridge() {
       restoreLastFolder();
       setCurvesOpen(!!settingGet(CURVES_OPEN_KEY, true));
       loadClipsFromBridge();
+      loadHandPoses();
     });
   });
   return true;
@@ -1011,6 +1097,16 @@ function setFolderListOpen(open) {
     .setAttribute("aria-expanded", String(open));
 }
 
+/* 이 라이브러리를 사이트에 올려도 되는가. 폴더에 DO-NOT-UPLOAD.txt 가 있으면
+   출처가 있는 자료(추출본·리타게팅본)를 모아 둔 칸이다 — 폴더 이름만으로는
+   두 칸이 구별되지 않아서 화면 위에 띠로 남겨 둔다. */
+function showUploadPolicy(policy) {
+  const bar = document.querySelector("[data-no-upload]");
+  const blocked = !!policy && policy.upload === false;
+  bar.classList.toggle("is-on", blocked);
+  bar.querySelector("[data-no-upload-note]").textContent = blocked ? policy.note : "";
+}
+
 function loadClipsFromBridge(selectPath) {
   const folder = document.querySelector('[data-field="folder"]').value;
   state.folder = folder;
@@ -1025,6 +1121,7 @@ function loadClipsFromBridge(selectPath) {
     const clips = res.ok ? res.data.clips : [];
     state.clips = clips;
     state.categories = res.ok ? res.data.categories || [] : [];
+    showUploadPolicy(res.ok ? res.data.policy : null);
     state.poseCache.clear();
     state.pending.clear();
     if (!clips.length) state.selected = null;
@@ -1173,8 +1270,105 @@ function refreshBipeds() {
       if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
     }
     updateImportButton();
+    refreshLayers();
   });
 }
+
+/* 뷰포트에서 고른 바이패드를 "대상" 칸에 반영한다.
+
+   이게 없으면 바이패드를 잡아 두고 임포트를 눌러도 대상 칸이 "새 바이패드 생성"
+   이라 새로 하나 더 만든다 — 잡아 둔 뜻과 정반대다. 씬 선택이 바뀔 때만 칸을
+   고치므로, 그 뒤에 목록에서 손으로 고른 값은 덮어쓰지 않는다.
+
+   맥스 콜백 대신 짧은 주기로 물어본다: 창이 닫혀도 맥스에 남는 것이 없어야 하기
+   때문이다 (남은 콜백이 뷰포트를 그릴 때마다 모달을 띄우는 사고를 겪었다). */
+const SELECT_POLL_MS = 600;
+let selectPollAt = 0;
+let selectPollBusy = false;
+let sceneBiped = null;
+
+function pollSelectedBiped(now) {
+  if (!BRIDGE.obj || selectPollBusy || now - selectPollAt < SELECT_POLL_MS) return;
+  selectPollAt = now;
+  selectPollBusy = true;
+  bcall("selected_biped", null, (res) => {
+    selectPollBusy = false;
+    if (!res.ok) return;
+    const name = res.data.name || "";
+    if (name === sceneBiped) return;
+    sceneBiped = name;
+    // 선택을 풀었다고 대상을 되돌리지는 않는다 — 방금 고른 대상이 사라지면 놀란다.
+    if (name) useSceneBiped(name);
+  });
+}
+
+function useSceneBiped(name) {
+  const target = document.querySelector('[data-field="target"]');
+  const biped = document.querySelector('[data-field="biped"]');
+  if (![...target.options].some((o) => o.value === name)) {
+    // 목록에 없는 바이패드다 (방금 만들었거나 이름이 바뀌었다). 다시 읽고 다음 차례에.
+    sceneBiped = null;
+    refreshBipeds();
+    return;
+  }
+  target.value = name;
+  biped.value = name;
+  updateImportButton();
+  refreshLayers();
+  setStatus("대상 바이패드: " + name + " (뷰포트에서 고름)", "ok");
+}
+
+/* ---- 애니메이션 레이어 --------------------------------------------------
+   대상은 서버가 정한다(뷰포트 선택 우선). 레이어0 은 베이스라 지우거나 끌 수 없다. */
+const layerList = document.querySelector("[data-layer-list]");
+let layerCurrent = 0;
+
+function renderLayers(data) {
+  layerList.innerHTML = "";
+  if (!data || !data.layers || !data.layers.length) {
+    const note = document.createElement("span");
+    note.className = "empty";
+    note.textContent = "바이패드를 고르세요";
+    layerList.appendChild(note);
+    layerCurrent = 0;
+    return;
+  }
+  layerCurrent = data.current;
+  for (const layer of data.layers) {
+    const chip = document.createElement("button");
+    chip.dataset.layerIndex = layer.index;
+    chip.textContent = "레이어" + layer.index;
+    chip.title = layer.index === 0 ? "베이스 레이어" : (layer.name || "");
+    if (layer.index === data.current) chip.classList.add("is-current");
+    if (!layer.active) chip.classList.add("is-off");
+    layerList.appendChild(chip);
+  }
+}
+
+function refreshLayers() {
+  if (!BRIDGE.obj) { renderLayers(null); return; }
+  bcall("biped_layers", document.querySelector('[data-field="biped"]').value, (res) => {
+    renderLayers(res.ok ? res.data : null);
+  });
+}
+
+function layerOp(op, index) {
+  if (!BRIDGE.obj) { setStatus("(목업) 레이어는 Max 안에서 동작합니다."); return; }
+  const payload = { biped: document.querySelector('[data-field="biped"]').value, op: op };
+  if (index !== undefined) payload.index = index;
+  bcall("biped_layer_op", JSON.stringify(payload), (res) => {
+    if (!res.ok) { setStatus(res.error, "error"); return; }
+    renderLayers(res.data);
+    setStatus(res.data.biped + " · 레이어" + res.data.current + " (" + res.data.layers.length + "칸)", "ok");
+  });
+}
+
+layerList.addEventListener("click", (e) => {
+  const chip = e.target.closest("[data-layer-index]");
+  if (chip) layerOp("select", Number(chip.dataset.layerIndex));
+});
+
+document.querySelector('[data-field="biped"]').addEventListener("change", refreshLayers);
 
 /* 대상이 기존 바이패드면 버튼이 하는 일이 달라진다 — 라벨로 알려준다 */
 function updateImportButton() {
@@ -1267,6 +1461,13 @@ function makeCard(clip) {
     "<canvas></canvas><span class='thumb-badge'>MAX</span>" +
     "<span class='local-badge' title='이 PC 에만 있는 클립 — 동기화로 복구되지 않습니다'>LOCAL</span>" +
     "<div class='name'></div><div class='tags'></div>";
+  if (clip.source) {
+    const source = document.createElement("span");
+    source.className = "source";
+    source.textContent = clip.source;
+    source.title = "출처 폴더: " + clip.source;
+    card.appendChild(source);
+  }
   card.querySelector(".name").textContent = clip.stem;
   card.querySelector(".tags").textContent = clipMeta(clip.stem);
   card.dataset.tip = clipTooltip(clip);
@@ -1311,6 +1512,10 @@ grid.addEventListener("scroll", () => { TIP.hidden = true; }, { passive: true })
 
 function clipByStem(stem) {
   return state.clips.find((c) => c.stem === stem);
+}
+
+function sourceLine(clip) {
+  return clip && clip.source ? "출처 " + clip.source + "\n" : "";
 }
 
 function clipTooltip(clip) {
@@ -1394,7 +1599,7 @@ function inShelf(clip) {
    일이 일어났는지는 화면이 말해 준다. 결과가 있는 선반은 그대로 둔다 — 선반
    안에서 좁혀 찾는 것도 여전히 되어야 한다. */
 function widenIfShelfHasNoMatch() {
-  if (!currentQuery()) return;
+  if (!currentQuery() || isPoseShelf(state.category)) return;
   if (queryMatches().some(inShelf)) return;
   state.category = "";
   state.sub = "";
@@ -1432,8 +1637,8 @@ function addChip(bar, { value, label, count, on, empty }) {
 function renderShelfChips() {
   // 고르고 있던 칸이 분류표에서 사라졌으면(폴더를 바꿨거나 분류가 갱신됐거나)
   // 그 단계부터 풀어 준다. 안 그러면 존재하지 않는 칸을 고른 채 빈 화면만 본다.
-  let picked = state.category === UNSHELVED ? null : findCategory(state.category);
-  if (state.category && state.category !== UNSHELVED && !picked) state.category = "";
+  let picked = state.category === UNSHELVED || isPoseShelf(state.category) ? null : findCategory(state.category);
+  if (state.category && state.category !== UNSHELVED && !isPoseShelf(state.category) && !picked) state.category = "";
   let pickedSub = picked && (picked.subs || []).find((s) => s.slug === state.sub);
   if (state.sub && !pickedSub) { state.sub = ""; pickedSub = null; }
   const details = (pickedSub && pickedSub.details) || null;
@@ -1461,10 +1666,42 @@ function renderShelfChips() {
     });
   }
 
+  /* 포즈 선반 둘. 모션 분류가 아니라 포즈 묶음이라 네모로 두어 갈라 놓는다. */
+  for (const shelf of [HAND_SHELF, BODY_SHELF]) {
+    const key = SHELF_KEY[shelf];
+    addChip(catBar, {
+      value: shelf, label: SHELF_META[key].chip, count: handPose[key].length,
+      on: state.category === shelf,
+    });
+    catBar.lastChild.classList.add("is-square");
+    catBar.lastChild.title = SHELF_META[key].title;
+  }
+
   const subBar = document.querySelector('[data-field="sub"]');
   subBar.innerHTML = "";
-  subBar.hidden = !picked;
-  if (picked) {
+  subBar.hidden = !picked && !isPoseShelf(state.category);
+  if (isPoseShelf(state.category)) {
+    const meta = SHELF_META[poseShelfKey()];
+    if (meta.sides) {
+      const tag = document.createElement("span");
+      tag.className = "side-label";
+      tag.textContent = "넣을 곳";
+      subBar.appendChild(tag);
+      for (const [value, label] of HAND_SIDES) {
+        addChip(subBar, { value, label, count: null, on: handPose.side === value });
+        subBar.lastChild.classList.add("is-side");
+        subBar.lastChild.title = "카드를 누르면 " + label + "에 들어갑니다";
+      }
+    }
+    /* 붙여넣기는 그냥은 키를 안 남긴다(정적 포즈). 애니메이션으로 쓰려면 이걸 켠다. */
+    addChip(subBar, { value: HAND_KEY, label: "키 찍기", count: null, on: handPose.key });
+    subBar.lastChild.classList.add("is-key");
+    subBar.lastChild.title = "켜면 현재 프레임에 키를 남깁니다 (끄면 포즈만 바뀜)";
+    /* 지금 맥스에 서 있는 자세를 그대로 카드로 만든다. */
+    addChip(subBar, { value: POSE_SAVE, label: "＋ 맥스에서 저장", count: null, on: false });
+    subBar.lastChild.classList.add("is-save");
+    subBar.lastChild.title = meta.saveHint;
+  } else if (picked) {
     addChip(subBar, { value: "", label: "전체", count: null, on: !state.sub });
     for (const sub of picked.subs || []) {
       const n = countClips((c) => c.category === picked.slug && c.sub === sub.slug);
@@ -1534,6 +1771,7 @@ function shelveClips(shown) {
 }
 
 function renderGrid() {
+  if (isPoseShelf(state.category)) { renderPoseGrid(); return; }
   grid.innerHTML = "";
   const shown = queryMatches().filter(inShelf);
   if (!shown.length) {
@@ -1570,16 +1808,62 @@ function renderGrid() {
     // 캔버스는 문서에 붙은 뒤에 그린다 — 떨어진 채 그리면 rect 가 0×0 이라
     // 1픽셀을 카드 크기로 늘린 단색 사각형이 된다.
     grid.appendChild(section);
-    for (const card of cards.children) {
-      const stem = card.dataset.stem;
-      drawPose(card.querySelector("canvas"), poseFor(stem), posterOf(stem), 0);
-      // poseFor 뒤에 다시 쓴다 — makeCard 시점에는 아직 포즈를 요청하기 전이라
-      // 캐시가 비어 있다. 브리지에서는 여기서도 아직 "…" 이고 콜백이 채운다.
-      card.querySelector(".tags").textContent = clipMeta(stem);
-      card.dataset.tip = clipTooltip(clipByStem(stem) || { stem: stem });
-    }
   }
+  fillVisibleCards();
 }
+
+/* 카드 하나를 그리고 포즈를 청한다. 화면에 들어온 카드만 부른다. */
+function fillCard(card) {
+  if (card.dataset.filled) return;
+  card.dataset.filled = "1";
+  const stem = card.dataset.stem;
+  drawPose(card.querySelector("canvas"), poseFor(stem), posterOf(stem), 0);
+  // poseFor 뒤에 다시 쓴다 — makeCard 시점에는 아직 포즈를 요청하기 전이라
+  // 캐시가 비어 있다. 브리지에서는 여기서도 아직 "…" 이고 콜백이 채운다.
+  card.querySelector(".tags").textContent = clipMeta(stem);
+  card.dataset.tip = clipTooltip(clipByStem(stem) || { stem: stem });
+}
+
+/* 포즈 좌표는 카드마다 브리지를 한 번씩 부르고, 그 호출은 파이썬이 BVH 를 통째로
+   파싱한다. 그리드 전체를 한 번에 청하면 클립 600개짜리 라이브러리(여러 원본을
+   정션으로 모아 둔 루트)에서 맥스가 통째로 멈춘다. 그래서 **보이는 카드만** 청하고
+   스크롤할 때마다 새로 보이는 것을 채운다.
+
+   IntersectionObserver 를 쓰지 않는 이유: 페이지가 그려지지 않는 상태(백그라운드
+   탭, 가려진 창)에서는 콜백이 아예 오지 않아 썸네일이 하나도 안 뜨는 것을 봤다.
+   위치를 직접 재면 그런 상태에 기대지 않는다. */
+const FILL_MARGIN = 300;
+
+/* 한 번에 몇 장까지 청할지. 브리지 호출 하나가 BVH 파싱 하나라 그동안 맥스가
+   멈춘다. 화면 가득한 카드를 한꺼번에 청하면 그 멈춤이 눈에 띄게 길어지므로,
+   조금씩 끊어서 청하고 사이사이 화면에 숨 쉴 틈을 준다. 남은 것은 다음 차례에
+   이어서 채운다 — 결국 보이는 것은 전부 채워지고, 순서만 나뉜다. */
+const FILL_BATCH = 6;
+let fillMore = 0;
+
+function fillVisibleCards() {
+  const view = grid.getBoundingClientRect();
+  let budget = FILL_BATCH;
+  let pending = false;
+  for (const card of grid.querySelectorAll(".clip-card:not([data-filled])")) {
+    const box = card.getBoundingClientRect();
+    if (box.bottom <= view.top - FILL_MARGIN || box.top >= view.bottom + FILL_MARGIN) continue;
+    if (budget <= 0) { pending = true; break; }
+    budget -= 1;
+    fillCard(card);
+  }
+  clearTimeout(fillMore);
+  if (pending) fillMore = setTimeout(fillVisibleCards, 30);
+}
+
+let fillPending = 0;
+grid.addEventListener("scroll", () => {
+  if (fillPending) return;
+  fillPending = setTimeout(() => {
+    fillPending = 0;
+    fillVisibleCards();
+  }, 80);
+});
 
 /* 문서 전체에 rAF 루프는 하나뿐이다.
    호버 중인 카드 하나와 프리뷰만 프레임을 돌린다.
@@ -1595,6 +1879,7 @@ function tick(now) {
     }
     if (state.selected) drawPose(previewCanvas, poseFor(state.selected), frameIndex, state.azimuth);
   }
+  pollSelectedBiped(now);
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
@@ -1616,6 +1901,12 @@ grid.addEventListener("mouseleave", () => {
   state.hovered = null;
 });
 grid.addEventListener("click", (e) => {
+  const pose = e.target.closest(".pose-card");
+  if (pose) {
+    if (e.target.dataset.del) deletePose(pose);
+    else applyHandPose(pose);
+    return;
+  }
   const card = e.target.closest(".clip-card");
   if (!card) return;
   if (card.classList.contains("is-broken")) { setStatus("파싱에 실패한 클립입니다.", "error"); return; }
@@ -1650,7 +1941,7 @@ function closeConfirm() {
 }
 
 function openDeleteConfirm(clip) {
-  let note = "라이브러리 폴더에서만 지워집니다 — 홈페이지에는 영향이 없습니다.";
+  let note = "로컬 라이브러리 폴더에서 파일이 지워집니다 — 홈페이지에는 영향이 없습니다.";
   if (clip.stem.startsWith("artoke_"))
     note += "\nArtoke 동기화를 다시 하면 이 클립은 다시 받아집니다.";
   openConfirm("“" + clip.stem + "” 모션을 삭제할까요?", note, () => deleteClip(clip));
@@ -1672,17 +1963,24 @@ function openForgetFolderConfirm(folder) {
 
 function deleteClip(clip) {
   if (clip.stem === state.selected) state.selected = null;
-  if (!BRIDGE.obj || !clip.path) {
-    // 목업: 화면에서만 지워 그룹 재배치를 확인한다
+  if (!BRIDGE.obj) {
+    // 목업(브라우저): 화면에서만 지워 그룹 재배치를 확인한다
     state.clips = state.clips.filter((c) => c.stem !== clip.stem);
     renderGrid();
     setStatus("(목업) 삭제: " + clip.stem);
     return;
   }
+  /* 맥스 안에서는 **화면에서만 지우는 길을 두지 않는다.** 경로가 없으면 카드만
+     사라지고 파일은 남아, 지운 줄 알았는데 다음 새로고침에 다시 나타난다. */
+  if (!clip.path) {
+    setStatus("이 카드에는 파일 경로가 없어 지울 수 없습니다: " + clip.stem, "error");
+    return;
+  }
   const folder = document.querySelector('[data-field="folder"]').value;
   bcall("delete_clip", JSON.stringify({ folder: folder, path: clip.path }), (res) => {
     if (res.ok) {
-      setStatus("삭제: " + res.data.removed.join(", "), "ok");
+      // 어디에서 사라졌는지까지 적는다 — 로컬 파일이 지워졌다는 사실이 보여야 한다.
+      setStatus("로컬에서 삭제: " + res.data.removed.join(", ") + " (" + folder + ")", "ok");
       loadClipsFromBridge();
     } else setStatus(res.error, "error");
   });
@@ -2114,6 +2412,8 @@ document.addEventListener("click", (e) => {
     bcall("open_external", "https://artoke.com/viewer?blend=locomotion", (res) => {
       setStatus(res.ok ? "브라우저에서 블렌드 검수를 열었습니다." : res.error, res.ok ? "ok" : "error");
     });
+  } else if (action === "save-anim") {
+    saveAnim();
   } else if (action === "toggle-curves") {
     setCurvesOpen(!state.curvesOpen);
   } else if (action === "confirm-cancel") {
@@ -2140,6 +2440,29 @@ document.addEventListener("click", (e) => {
     bcall("set_arm_space_visible", JSON.stringify({ biped: sel.value, visible: visible }), (res) => {
       setStatus(res.ok ? res.data.message : res.error, res.ok ? "ok" : "error");
     });
+  } else if (action === "layer-add") {
+    layerOp("create");
+  } else if (action === "layer-del") {
+    if (!BRIDGE.obj) { setStatus("(목업) 레이어는 Max 안에서 동작합니다."); return; }
+    if (layerCurrent < 1) { setStatus("베이스(레이어0)는 지울 수 없습니다 — 지울 레이어를 고르세요.", "error"); return; }
+    // 레이어를 지우면 그 레이어의 키가 사라지고 되돌릴 수 없다. 그래서 물어본다.
+    openConfirm("레이어" + layerCurrent + " 을 지울까요?", "그 레이어에 얹은 키가 사라집니다.",
+      () => layerOp("delete", layerCurrent), "삭제");
+  } else if (action === "layer-toggle") {
+    layerOp("toggle", layerCurrent);
+  } else if (action === "layer-collapse") {
+    /* 합병은 **고른 레이어 하나**만 바로 아래로 내린다(실측: 3칸에서 2번을 합치면
+       2칸이 되고 위 칸은 그대로 남는다). 위아래를 이름으로 적어 어느 둘이 합쳐지는지
+       확인 상자에서 보이게 한다 — "접기" 라는 말로는 무엇이 사라지는지 알 수 없었다. */
+    if (layerCurrent < 1) { setStatus("합병할 레이어를 고르세요 (레이어1 이상).", "error"); return; }
+    const into = layerCurrent - 1;
+    openConfirm(
+      "레이어" + layerCurrent + " 을 레이어" + into + " 에 합칠까요?",
+      "레이어" + layerCurrent + " 의 키가 레이어" + into + " 로 들어가고 그 칸은 없어집니다.\n" +
+        "위에 쌓인 다른 레이어는 그대로 남습니다. 되돌릴 수 없습니다.",
+      () => layerOp("collapse", layerCurrent),
+      "합병"
+    );
   } else if (action === "export-bvh") {
     if (!BRIDGE.obj) { setStatus("(목업) BVH 내보내기"); return; }
     const sel = document.querySelector('[data-field="biped"]');
@@ -2171,12 +2494,28 @@ document.addEventListener("click", (e) => {
   }
 });
 
+/* 검색은 **글자마다 다시 그리지 않는다.**
+
+   renderGrid 는 카드 DOM 을 통째로 다시 만들고, 새로 보이게 된 카드마다
+   `pose_data` 를 부른다. 그 슬롯은 파이썬이 BVH 를 통째로 파싱하는 동기 호출이라
+   맥스가 그동안 멈춘다. 145개짜리 폴더에서 "walk" 네 글자를 치면 그 일이 네 번
+   일어났다 — 그것이 "검색이 너무 느리다" 의 정체다.
+
+   타이핑이 멎은 뒤 한 번만 그린다. 사람이 다음 글자를 치는 간격보다 조금 길게
+   잡아, 단어를 이어 치는 동안에는 아예 그리지 않는다. */
+const SEARCH_DELAY = 200;
+let searchTimer = 0;
+
 document.querySelector('[data-field="search"]').addEventListener("input", () => {
-  // 칩도 같이 다시 그린다 — 숫자가 검색 결과를 따라가야 하고, 선반이 풀렸다면
-  // 그 사실이 보여야 한다.
-  widenIfShelfHasNoMatch();
-  renderShelfChips();
-  renderGrid();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    searchTimer = 0;
+    // 칩도 같이 다시 그린다 — 숫자가 검색 결과를 따라가야 하고, 선반이 풀렸다면
+    // 그 사실이 보여야 한다.
+    widenIfShelfHasNoMatch();
+    renderShelfChips();
+    renderGrid();
+  }, SEARCH_DELAY);
 });
 /* 세 줄을 감싼 곳에서 한 번에 받는다. 위 단계를 바꾸면 아래 단계는 푼다 —
    "공격>돌진>시작" 을 보다가 "이동" 으로 옮겼는데 돌진/시작이 남아 있으면
@@ -2215,6 +2554,20 @@ document.querySelector(".shelf-chips").addEventListener("click", (e) => {
     state.sub = "";
     state.detail = "";
   } else if (field === "sub") {
+    if (chip.dataset.value === HAND_KEY) {
+      handPose.key = !handPose.key;
+      renderShelfChips();
+      renderGrid();
+      return;
+    }
+    if (chip.dataset.value === POSE_SAVE) { savePose(); return; }
+    if (isPoseShelf(state.category)) {
+      handPose.side = chip.dataset.value;
+      renderShelfChips();
+      renderGrid();
+      setStatus("넣을 곳: " + handSideLabel(), "ok");
+      return;
+    }
     state.sub = chip.dataset.value;
     state.detail = "";
   } else {
@@ -2224,6 +2577,263 @@ document.querySelector(".shelf-chips").addEventListener("click", (e) => {
   renderGrid();
 });
 document.querySelector('[data-field="target"]').addEventListener("change", updateImportButton);
+
+/* ---- 포즈 선반 두 개 ----------------------------------------------------
+   카드 목록은 .cpy 파일에서 오고 클립 폴더와 무관하다. 적용과 저장은 Max 안에서만 된다.
+
+   손 포즈는 손목과 손가락만 담는 posture 라 좌우 미러가 있고, 전신 포즈는
+   바이패드 전체를 담는 pose 라 미러가 없다. 전신을 뒤집는 것은 다른 뜻이다. */
+const HAND_SHELF = "__hand__";
+const BODY_SHELF = "__body__";
+const SHELF_KEY = { [HAND_SHELF]: "hand", [BODY_SHELF]: "body" };
+const SHELF_META = {
+  hand: {
+    chip: "손 포즈", head: "HAND POSE", kind: "posture", sides: true,
+    title: "손가락 포즈 묶음 — 카드를 누르면 고른 손에 들어갑니다",
+    saveHint: "지금 맥스에 서 있는 손 자세를 카드로 저장합니다 (고른 쪽 손목과 손가락)",
+    empty: "저장된 손 포즈가 없습니다. 맥스에서 손을 잡고 “＋ 맥스에서 저장” 을 누르세요.",
+  },
+  body: {
+    chip: "포즈", head: "BIPED POSE", kind: "pose", sides: false,
+    title: "바이패드 전신 포즈 — 카드를 누르면 그 자세로 섭니다",
+    saveHint: "지금 맥스에 서 있는 바이패드 전신 자세를 카드로 저장합니다",
+    empty: "저장된 전신 포즈가 없습니다. 맥스에서 자세를 잡고 “＋ 맥스에서 저장” 을 누르세요.",
+  },
+};
+/* 넣을 곳은 **한 번 누르면 그리로 전환된다.** 각각 켜고 끄는 방식도 만들어 봤지만,
+   둘 다 켜진 상태에서 "왼손" 을 누르면 왼손이 *꺼지는* 것이라 눌러도 아무 일이
+   없는 것처럼 보였다(실제로 그 신고를 받았다). 누른 버튼이 곧 넣을 곳이다. */
+const HAND_SIDES = [["left", "왼쪽"], ["right", "오른쪽"], ["both", "양쪽"]];
+const HAND_KEY = "__key__";
+const POSE_SAVE = "__save__";
+const KIND_LABEL = { posture: "", pose: "", track: "애니" };
+/* 카드는 선반별로 따로 들고, 넣을 곳과 키 찍기는 두 선반이 함께 쓴다. */
+const handPose = { hand: [], body: [], last: { hand: "", body: "" }, key: false, side: "right" };
+
+function isPoseShelf(cat) { return cat === HAND_SHELF || cat === BODY_SHELF; }
+function poseShelfKey() { return SHELF_KEY[state.category] || "hand"; }
+function poseCards() { return handPose[poseShelfKey()]; }
+
+function handSide() {
+  return handPose.side;
+}
+
+function handSideLabel() {
+  const found = HAND_SIDES.find(([value]) => value === handPose.side);
+  return found ? found[1] : "오른손";
+}
+
+function loadHandPoses(only) {
+  if (!BRIDGE.obj) {
+    handPose.hand = [1, 2, 3, 4].map((i) => ({
+      index: i, name: (i % 2 ? "RFing0" : "LArm0") + i, image: "", kind: "posture",
+      source: i % 2 ? "right" : "left",
+    }));
+    handPose.body = [{ index: 1, name: "Pose01", image: "", kind: "pose", source: "" }];
+    renderShelfChips();
+    return;
+  }
+  for (const key of only ? [only] : ["hand", "body"]) {
+    bcall("hand_poses", key, (res) => {
+      if (!res.ok) { setStatus(SHELF_META[key].chip + " 목록: " + res.error, "error"); return; }
+      handPose[key] = res.data;
+      renderShelfChips();
+      if (isPoseShelf(state.category) && poseShelfKey() === key) renderGrid();
+    });
+  }
+}
+
+function makePoseCard(c) {
+  const btn = document.createElement("button");
+  btn.className = "pose-card" + (c.name === handPose.last[poseShelfKey()] ? " is-last" : "");
+  btn.dataset.poseIndex = c.index;
+  btn.dataset.poseKind = c.kind || "posture";
+  btn.dataset.poseName = c.name;
+  const from = c.source === "left" ? "왼쪽에서 복사" : c.source === "right" ? "오른쪽에서 복사" : "";
+  btn.title = [c.name, KIND_LABEL[c.kind], from].filter(Boolean).join(" · ");
+  const img = document.createElement("img");
+  img.src = c.image;
+  img.alt = c.name;
+  const tag = document.createElement("span");
+  tag.textContent = c.name;
+  btn.append(img, tag);
+  /* 어느 쪽에서 복사한 포스처인가. 이것이 "왼쪽에 넣기" 가 미러인지 아닌지를 정한다 —
+     오른쪽에서 뜬 포즈를 왼쪽에 넣으면 미러, 왼쪽 것을 왼쪽에 넣으면 그대로다. */
+  if (c.source === "left" || c.source === "right") {
+    const mark = document.createElement("span");
+    mark.className = "kind";
+    mark.textContent = c.source === "left" ? "L" : "R";
+    mark.title = (c.source === "left" ? "왼쪽" : "오른쪽") + "에서 복사한 포즈";
+    btn.appendChild(mark);
+  }
+  /* 포스처(손가락만)가 아닌 카드는 무엇이 바뀌는지 미리 알려 준다 —
+     포즈는 전신 자세, 애니는 구간 전체가 바뀐다. */
+  if (KIND_LABEL[c.kind]) {
+    const kind = document.createElement("span");
+    kind.className = "kind";
+    kind.textContent = KIND_LABEL[c.kind];
+    btn.appendChild(kind);
+  }
+  /* 선반을 스스로 정리할 수 있어야 한다. 저장만 되고 지울 수 없으면 실패한
+     포즈가 계속 쌓인다. 지우기는 되돌릴 수 없으므로 확인을 받는다. */
+  const del = document.createElement("span");
+  del.className = "del";
+  del.dataset.del = "1";
+  del.textContent = "×";
+  del.title = "이 포즈를 선반에서 지웁니다";
+  btn.appendChild(del);
+  return btn;
+}
+
+function renderPoseGrid() {
+  grid.innerHTML = "";
+  const meta = SHELF_META[poseShelfKey()];
+  const cards = poseCards();
+  const section = document.createElement("div");
+  section.className = "clip-group";
+  const label = document.createElement("p");
+  label.className = "clip-group-label";
+  label.textContent = meta.head;
+  const ko = document.createElement("span");
+  ko.className = "ko";
+  ko.textContent = meta.chip + (meta.sides ? " · " + handSideLabel() : "") +
+    (handPose.key ? " · 키 찍기" : "");
+  label.appendChild(ko);
+  section.appendChild(label);
+  const box = document.createElement("div");
+  box.className = "clip-cards";
+  for (const c of cards) box.appendChild(makePoseCard(c));
+  section.appendChild(box);
+  grid.appendChild(section);
+  /* 빈 선반은 왜 비었는지가 아니라 무엇을 하면 채워지는지를 말해야 한다. */
+  if (!cards.length) {
+    const note = document.createElement("div");
+    note.style.cssText = "color:var(--dim);padding:16px";
+    note.textContent = meta.empty;
+    grid.appendChild(note);
+  }
+}
+
+/* 대상은 서버가 정한다: 뷰포트에서 고른 바이패드가 먼저이고, 아무것도 안 골랐을 때만
+   "임포트 후" 목록의 이름을 쓴다. 그래서 여기서 목록이 비었다고 막지 않는다. */
+function applyHandPose(card) {
+  const index = Number(card.dataset.poseIndex);
+  const name = card.dataset.poseName;
+  const shelf = poseShelfKey();
+  if (!BRIDGE.obj) { setStatus("(목업) " + name + " 적용"); return; }
+  const payload = {
+    biped: document.querySelector('[data-field="biped"]').value,
+    index: index,
+    kind: card.dataset.poseKind || SHELF_META[shelf].kind,
+    side: handSide(),
+    key: handPose.key,
+    shelf: shelf,
+  };
+  bcall("apply_hand_pose", JSON.stringify(payload), (res) => {
+    if (!res.ok) { setStatus(res.error, "error"); return; }
+    handPose.last[shelf] = name;
+    for (const c of grid.querySelectorAll(".pose-card")) c.classList.toggle("is-last", c.dataset.poseName === name);
+    setStatus(res.data.message, "ok");
+    /* 손가락을 새로 만들었으면 씬 구성이 바뀐 것이니 목록을 다시 읽는다. */
+    if (res.data.made_fingers) refreshBipeds();
+  });
+}
+
+/* 지금 맥스에 서 있는 자세를 그대로 카드로 만든다. 이름은 저장 직전에 파이썬이
+   띄우는 작은 창으로 받는다. 비우면 맥스가 붙이는 이름을 그대로 쓴다.
+
+   손 포즈는 어느 쪽 손을 뜨는지를 "넣을 곳" 칩이 함께 정한다. 양쪽은 뜰 수
+   없다. 한 번에 한 손만 복사되고, 이름 첫 글자(R/L)가 나중에 미러 여부를 정한다. */
+function savePose() {
+  const shelf = poseShelfKey();
+  const meta = SHELF_META[shelf];
+  if (!BRIDGE.obj) { setStatus("(목업) " + meta.chip + " 저장"); return; }
+  if (meta.sides && handPose.side === "both") {
+    setStatus("저장할 손을 왼쪽이나 오른쪽으로 고르세요. 양쪽은 한 번에 뜰 수 없습니다.", "error");
+    return;
+  }
+  bcall("ask_pose_name", JSON.stringify({}), (asked) => {
+    if (!asked.ok) { setStatus("이름 창: " + asked.error, "error"); return; }
+    if (!asked.data.ok) { setStatus("저장을 취소했습니다."); return; }
+    const payload = {
+      shelf: shelf,
+      biped: document.querySelector('[data-field="biped"]').value,
+      side: handSide(),
+      name: asked.data.name,
+    };
+    bcall("save_pose", JSON.stringify(payload), (res) => {
+      if (!res.ok) { setStatus(res.error, "error"); return; }
+      setStatus(res.data.message, "ok");
+      handPose.last[shelf] = res.data.name;
+      loadHandPoses(shelf);
+      if (res.data.made_fingers) refreshBipeds();
+    });
+  });
+}
+
+/* 지금 잡혀 있는 바이패드의 애니를 클립 폴더에 .bvh 로 쓴다. 대상은 포즈와 같은
+   규칙이다 — 뷰포트에서 고른 것이 먼저이고, 아무것도 안 골랐을 때만 목록의 이름.
+
+   저장할 자리는 지금 보고 있는 클립 폴더다. 위치를 따로 고르고 싶으면 아래
+   "BVH로 내보내기…" 를 쓴다. 이 단추의 값은 저장하는 순간 카드가 된다는 것이다. */
+function saveAnim() {
+  if (!BRIDGE.obj) { setStatus("(목업) 애니 저장"); return; }
+  const folder = document.querySelector('[data-field="folder"]').value.trim();
+  if (!folder) { setStatus("클립 폴더를 먼저 고르세요.", "error"); return; }
+  const biped = document.querySelector('[data-field="biped"]').value;
+  bcall("ask_pose_name", JSON.stringify({
+    title: "애니 이름",
+    label: "라이브러리에 올릴 파일 이름 (.bvh 는 자동)",
+    suggested: biped || "",
+  }), (asked) => {
+    if (!asked.ok) { setStatus("이름 창: " + asked.error, "error"); return; }
+    if (!asked.data.ok) { setStatus("저장을 취소했습니다."); return; }
+    writeAnim(folder, biped, asked.data.name, false);
+  });
+}
+
+function writeAnim(folder, biped, name, overwrite) {
+  const payload = { folder: folder, biped: biped, name: name, overwrite: overwrite };
+  bcall("save_anim", JSON.stringify(payload), (res) => {
+    if (!res.ok) { setStatus(res.error, "error"); return; }
+    /* 같은 이름이 있으면 파이썬이 쓰지 않고 돌아온다. 폴리싱한 클립을 말없이
+       덮어쓰면 되돌릴 방법이 없어서 여기서 확인을 받는다. */
+    if (res.data.exists) {
+      openConfirm(
+        "“" + res.data.name + ".bvh” 가 이미 있습니다. 덮어쓸까요?",
+        "이 폴더의 기존 파일이 사라집니다 — 되돌릴 수 없습니다.",
+        () => writeAnim(folder, biped, name, true),
+        "덮어쓰겠습니다"
+      );
+      return;
+    }
+    setStatus(res.data.message, "ok");
+    /* 저장한 것이 곧 카드다. 목록을 다시 읽어 그 자리에서 보이게 한다. */
+    loadClipsFromBridge();
+  });
+}
+
+function deletePose(card) {
+  const shelf = poseShelfKey();
+  const name = card.dataset.poseName;
+  if (!BRIDGE.obj) { setStatus("(목업) " + name + " 삭제"); return; }
+  openConfirm(
+    "“" + name + "” 포즈를 선반에서 지울까요?",
+    SHELF_META[shelf].chip + " 파일에서 지워집니다. 씬의 바이패드는 그대로입니다.",
+    () => {
+      const payload = {
+        shelf: shelf, name: name,
+        biped: document.querySelector('[data-field="biped"]').value,
+      };
+      bcall("delete_pose", JSON.stringify(payload), (res) => {
+        if (!res.ok) { setStatus(res.error, "error"); return; }
+        setStatus(res.data.message, "ok");
+        loadHandPoses(shelf);
+      });
+    }
+  );
+}
+
 
 document.querySelector('[data-field="blend-angle"]').addEventListener("input", (e) => {
   state.blendAngle = Number(e.target.value);
@@ -2251,8 +2861,10 @@ window.addEventListener("resize", () => { renderTimeline(); drawSpeed(); drawArm
    값으로 읽으므로, 하던 자리에서 이어진다. */
 restoreLastFolder();
 
-if (!connectBridge())
+if (!connectBridge()) {
   setStatus("더미 데이터로 동작 중입니다 — Max 브리지 없음. 클립을 고르세요.");
+  loadHandPoses();
+}
 </script>
 </body>
 </html>
