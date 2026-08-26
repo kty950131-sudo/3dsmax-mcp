@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 
 from maxmcp.rtmw3d.motion import BODY23_NAMES
-from maxmcp.worker.tracking_corrections import apply_tracking_corrections, read_subject_box
+from maxmcp.worker.tracking_corrections import (
+    apply_tracking_corrections,
+    load_correction_snapshot,
+    read_subject_box,
+)
 
 
 def tracking_payload() -> dict[str, object]:
@@ -49,7 +53,8 @@ def test_applies_body23_corrections_without_mutating_source(tmp_path: Path) -> N
     }])
     original = source.read_bytes()
 
-    result_path = apply_tracking_corrections(source, edits, output)
+    snapshot = load_correction_snapshot(edits)
+    result_path = apply_tracking_corrections(source, snapshot.image_edits, output)
 
     result = json.loads(result_path.read_text(encoding="utf-8"))
     assert result["frames"][0]["image_keypoints"]["left_wrist"] == [310.5, 205.0]
@@ -90,7 +95,8 @@ def test_rejects_invalid_correction_documents(
     source, edits_path, output = write_inputs(tmp_path, edits)
 
     with pytest.raises(ValueError, match=message):
-        apply_tracking_corrections(source, edits_path, output)
+        snapshot = load_correction_snapshot(edits_path)
+        apply_tracking_corrections(source, snapshot.image_edits, output)
 
     assert not output.exists()
 
@@ -99,7 +105,8 @@ def test_refuses_to_overwrite_the_immutable_source(tmp_path: Path) -> None:
     source, edits, _output = write_inputs(tmp_path, [])
 
     with pytest.raises(ValueError, match="source"):
-        apply_tracking_corrections(source, edits, source)
+        snapshot = load_correction_snapshot(edits)
+        apply_tracking_corrections(source, snapshot.image_edits, source)
 
 
 def test_atomic_output_never_reuses_or_removes_source_named_like_legacy_temp(
@@ -112,17 +119,53 @@ def test_atomic_output_never_reuses_or_removes_source_named_like_legacy_temp(
     edits = tmp_path / "edits.json"
     edits.write_text("[]", encoding="utf-8")
 
-    apply_tracking_corrections(source, edits, output)
+    snapshot = load_correction_snapshot(edits)
+    apply_tracking_corrections(source, snapshot.image_edits, output)
 
     assert source.read_bytes() == original
     assert output.exists()
 
 
-def test_accepts_site_shaped_document(tmp_path: Path) -> None:
+def test_loads_new_snapshot_without_losing_pose_edits(tmp_path: Path) -> None:
+    pose_edit = {
+        "frame": 0,
+        "joint": "left_elbow",
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+    }
+    _source, edits, _output = write_inputs(tmp_path, {
+        "imageEdits": [],
+        "poseEdits": [pose_edit],
+    })
+
+    snapshot = load_correction_snapshot(edits)
+
+    assert snapshot.image_edits == ()
+    assert snapshot.pose_edits == (pose_edit,)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {},
+        {"imageEdits": []},
+        {"imageEdits": [], "poseEdits": [], "extra": []},
+        {"imageEdits": {}, "poseEdits": []},
+        {"imageEdits": [], "poseEdits": {}},
+    ],
+)
+def test_rejects_malformed_new_snapshots(tmp_path: Path, document: object) -> None:
+    _source, edits, _output = write_inputs(tmp_path, document)
+
+    with pytest.raises(ValueError, match="snapshot"):
+        load_correction_snapshot(edits)
+
+
+def test_accepts_site_shaped_document_with_subject_box(tmp_path: Path) -> None:
     edits = [{"frame": 0, "joint": "left_wrist", "x": 1, "y": 2, "state": "manual"}]
     source, edits_path, output = write_inputs(tmp_path, {"imageEdits": edits, "poseEdits": []})
 
-    apply_tracking_corrections(source, edits_path, output)
+    snapshot = load_correction_snapshot(edits_path)
+    apply_tracking_corrections(source, snapshot.image_edits, output)
 
     assert output.exists()
 
@@ -134,8 +177,10 @@ def test_read_subject_box(tmp_path: Path) -> None:
 
     edits_path.write_text(json.dumps({
         "imageEdits": [],
+        "poseEdits": [],
         "subjectBox": {"frame": 3, "x1": 10, "y1": 20, "x2": 110.5, "y2": 220},
     }), encoding="utf-8")
+    assert load_correction_snapshot(edits_path).image_edits == ()
     assert read_subject_box(edits_path) == (3, (10.0, 20.0, 110.5, 220.0))
 
     edits_path.write_text(json.dumps({"subjectBox": {"frame": 0, "x1": 5, "y1": 5, "x2": 5, "y2": 9}}), encoding="utf-8")

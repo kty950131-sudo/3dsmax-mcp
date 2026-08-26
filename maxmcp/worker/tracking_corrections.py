@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
 import tempfile
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from maxmcp.rtmw3d.motion import BODY23_NAMES, load_rtmw3d
 
@@ -14,15 +15,34 @@ from maxmcp.rtmw3d.motion import BODY23_NAMES, load_rtmw3d
 _EDIT_FIELDS = {"frame", "joint", "x", "y", "state"}
 RTMW3D_FOCAL = (1145.04940459, 1143.78109572)  # mmpose rtmpose3d 기본 카메라
 _EDIT_STATES = {"manual", "propagated"}
+_SNAPSHOT_KEYS = {"imageEdits", "poseEdits"}
+_OPTIONAL_SNAPSHOT_KEYS = {"subjectBox"}
 
 
-def _coordinate(value: Any) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError("correction coordinate must be a number")
-    result = float(value)
-    if not math.isfinite(result) or result < 0:
-        raise ValueError("correction coordinate must be finite and non-negative")
-    return result
+@dataclass(frozen=True)
+class CorrectionSnapshot:
+    image_edits: tuple[dict[str, Any], ...]
+    pose_edits: tuple[dict[str, Any], ...]
+
+
+def load_correction_snapshot(edits_json: Path) -> CorrectionSnapshot:
+    """Load the legacy edit array or the versioned combined snapshot."""
+
+    document = json.loads(Path(edits_json).read_text(encoding="utf-8"))
+    if isinstance(document, list):
+        return CorrectionSnapshot(tuple(document), ())
+    if (
+        not isinstance(document, dict)
+        or not _SNAPSHOT_KEYS <= set(document)
+        or not set(document) <= _SNAPSHOT_KEYS | _OPTIONAL_SNAPSHOT_KEYS
+        or not isinstance(document["imageEdits"], list)
+        or not isinstance(document["poseEdits"], list)
+    ):
+        raise ValueError("correction document must be an array or valid snapshot")
+    return CorrectionSnapshot(
+        tuple(document["imageEdits"]),
+        tuple(document["poseEdits"]),
+    )
 
 
 def read_subject_box(edits_json: Path) -> tuple[int, tuple[float, float, float, float]] | None:
@@ -45,28 +65,29 @@ def read_subject_box(edits_json: Path) -> tuple[int, tuple[float, float, float, 
     return frame, coords
 
 
+def _coordinate(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("correction coordinate must be a number")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise ValueError("correction coordinate must be finite and non-negative")
+    return result
+
+
 def apply_tracking_corrections(
     source_json: Path,
-    edits_json: Path,
+    corrections: Sequence[Mapping[str, Any]],
     output_json: Path,
 ) -> Path:
     """Write corrected tracking JSON without modifying the original artifact."""
 
     source = Path(source_json)
-    edits_path = Path(edits_json)
     output = Path(output_json)
     if source.resolve() == output.resolve():
         raise ValueError("corrected output must not overwrite source")
 
     load_rtmw3d(source)
     document = json.loads(source.read_text(encoding="utf-8"))
-    corrections = json.loads(edits_path.read_text(encoding="utf-8"))
-    # 사이트는 `{imageEdits, poseEdits, subjectBox?}` 로 올린다(service.ts). 예전 배열
-    # 꼴도 받는다. poseEdits(3D 자세 편집)는 아직 이 경로에서 쓰지 않는다.
-    if isinstance(corrections, dict):
-        corrections = corrections.get("imageEdits", [])
-    if not isinstance(corrections, list):
-        raise ValueError("correction document must be an array")
 
     frames = document["frames"]
     seen: set[tuple[int, str]] = set()

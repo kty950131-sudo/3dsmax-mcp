@@ -15,13 +15,23 @@ from maxmcp.worker.postprocess_bridge import convert_with_postprocess
 from maxmcp.rtmw3d.runtime import Rtmw3dReadiness, default_readiness
 from maxmcp.worker.api_client import ArtokeApiClient, UploadTarget, WorkerApiError
 from maxmcp.worker.artifacts import (
+    MAX_RETAINED_METADATA_BYTES,
+    MAX_RETAINED_THUMBNAIL_BYTES,
+    MAX_TRACKING_COMPRESSED_BYTES,
+    MAX_TRACKING_DECOMPRESSED_BYTES,
     LocalArtifact,
     build_artifacts,
+    build_artifacts_without_source,
     download_source,
     upload_signed_artifact,
 )
 from maxmcp.worker.motion_pipeline import MotionPipeline, PipelineArtifacts, PipelineCancelled
-from maxmcp.worker.tracking_corrections import apply_tracking_corrections, read_subject_box
+from maxmcp.worker.bvh_pose_corrections import apply_bvh_pose_corrections
+from maxmcp.worker.tracking_corrections import (
+    apply_tracking_corrections,
+    load_correction_snapshot,
+    read_subject_box,
+)
 from maxmcp.worker.workspace import JobWorkspace, cleanup_stale
 
 
@@ -61,9 +71,12 @@ class ArtokeWorker:
         pipeline_factory: Callable[[Rtmw3dReadiness], Any] = MotionPipeline,
         downloader: Callable[..., Path] = download_source,
         artifact_builder: Callable[..., tuple[LocalArtifact, ...]] = build_artifacts,
+        source_free_artifact_builder: Callable[..., tuple[LocalArtifact, ...]] = build_artifacts_without_source,
         uploader: Callable[[UploadTarget, LocalArtifact], None] = _upload,
-        correction_applier: Callable[[Path, Path, Path], Path] = apply_tracking_corrections,
+        correction_applier: Callable[..., Path] = apply_tracking_corrections,
         converter: Callable[[Path, Path], int] = convert_with_postprocess,
+        pose_applier: Callable[..., Path] = apply_bvh_pose_corrections,
+        snapshot_loader: Callable[..., Any] = load_correction_snapshot,
         heartbeat_interval: float = 20.0,
     ) -> None:
         self._api = api
@@ -72,9 +85,12 @@ class ArtokeWorker:
         self._pipeline_factory = pipeline_factory
         self._downloader = downloader
         self._artifact_builder = artifact_builder
+        self._source_free_artifact_builder = source_free_artifact_builder
         self._uploader = uploader
         self._correction_applier = correction_applier
         self._converter = converter
+        self._pose_applier = pose_applier
+        self._snapshot_loader = snapshot_loader
         self._heartbeat_interval = heartbeat_interval
 
     def run_forever(self, stop_event: threading.Event) -> None:
@@ -155,13 +171,7 @@ class ArtokeWorker:
         try:
             with JobWorkspace.open(self._cache_root, claim.job_id) as workspace:
                 source = workspace.path / claim.source_filename
-                if not claim.download_url:
-                    # 로컬 앱으로 넣은 작업은 서버에 원본이 없을 수 있다. 관절 교정만이면
-                    # 원본 없이도 되지만, 주인공 재추출은 원본이 있어야 한다(08-26 실측:
-                    # downloadUrl=null 인 채로 같은 작업을 5초마다 다시 잡는 고리에 빠졌다).
-                    if claim.edit_revision <= 0:
-                        raise ValueError("claim has no source download url")
-                else:
+                if claim.download_url is not None:
                     self._downloader(claim.download_url, source)
                 if cancelled.is_set():
                     raise PipelineCancelled()
@@ -171,13 +181,18 @@ class ArtokeWorker:
                         raise ValueError("correction claim is incomplete")
                     original_tracking = workspace.path / "original.rtmw3d.json"
                     edits = workspace.path / "tracking.edits.json"
-                    self._downloader(claim.tracking_url, original_tracking)
+                    self._downloader(
+                        claim.tracking_url,
+                        original_tracking,
+                        max_bytes=MAX_TRACKING_COMPRESSED_BYTES,
+                        max_decompressed_json_bytes=MAX_TRACKING_DECOMPRESSED_BYTES,
+                    )
                     self._downloader(claim.edits_url, edits)
                     if cancelled.is_set():
                         raise PipelineCancelled()
 
                     subject = read_subject_box(edits)
-                    if subject is not None and not claim.download_url:
+                    if subject is not None and claim.download_url is None:
                         phase = "source_unavailable"
                         raise ValueError("subject re-extraction needs the source video")
                     if subject is not None:
@@ -196,10 +211,22 @@ class ArtokeWorker:
                     else:
                         phase = "correction_failed"
                         update_stage("converting", 65)
+                        snapshot = self._snapshot_loader(edits)
                         corrected = workspace.path / "corrected.rtmw3d.json"
-                        self._correction_applier(original_tracking, edits, corrected)
+                        self._correction_applier(
+                            original_tracking,
+                            snapshot.image_edits,
+                            corrected,
+                        )
+                        # 관절 교정 → 후처리 변환 → 3D 자세 편집 순서. 후처리 보고는
+                        # 중간 BVH 옆에 남으므로 최종 BVH 이름으로 옮겨 게시에 싣는다.
+                        base_bvh = workspace.path / "corrected.base.bvh"
+                        frame_count = self._converter(corrected, base_bvh)
                         bvh = workspace.path / "corrected.bvh"
-                        frame_count = self._converter(corrected, bvh)
+                        self._pose_applier(base_bvh, snapshot.pose_edits, bvh)
+                        base_report = base_bvh.with_suffix(".postprocess.json")
+                        if base_report.is_file():
+                            base_report.replace(bvh.with_suffix(".postprocess.json"))
                         trace = workspace.path / "corrected.trace.json"
                         trace.write_text(json.dumps({
                             "backend": "OpenMMLab RTMW3D-L",
@@ -235,13 +262,38 @@ class ArtokeWorker:
 
                 phase = "artifact_failed"
                 update_stage("validating", 85)
-                artifacts = self._artifact_builder(
-                    source,
-                    pipeline_result,
-                    workspace.path / "result",
-                    claim.duration_seconds,
-                    edit_revision=claim.edit_revision,
-                )
+                if claim.transport == "local_ephemeral":
+                    thumbnail = workspace.path / "retained.thumbnail.webp"
+                    retained_metadata = workspace.path / "retained.metadata.json"
+                    self._downloader(
+                        claim.thumbnail_url,
+                        thumbnail,
+                        max_bytes=MAX_RETAINED_THUMBNAIL_BYTES,
+                    )
+                    self._downloader(
+                        claim.metadata_url,
+                        retained_metadata,
+                        max_bytes=MAX_RETAINED_METADATA_BYTES,
+                        max_decompressed_json_bytes=MAX_RETAINED_METADATA_BYTES,
+                    )
+                    artifacts = self._source_free_artifact_builder(
+                        pipeline_result,
+                        workspace.path / "result",
+                        claim.duration_seconds,
+                        retained_thumbnail=thumbnail,
+                        retained_metadata=retained_metadata,
+                        edit_revision=claim.edit_revision,
+                        tracking_encoding=claim.tracking_encoding,
+                    )
+                else:
+                    artifacts = self._artifact_builder(
+                        source,
+                        pipeline_result,
+                        workspace.path / "result",
+                        claim.duration_seconds,
+                        edit_revision=claim.edit_revision,
+                        tracking_encoding=claim.tracking_encoding,
+                    )
                 targets = {item.kind: item for item in self._api.authorize_uploads(claim.job_id)}
                 if set(targets) != {item.kind for item in artifacts}:
                     raise ValueError("upload target mismatch")
