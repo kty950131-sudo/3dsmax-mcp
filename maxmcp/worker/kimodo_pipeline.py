@@ -31,6 +31,10 @@ KIMODO_DIR = Path(os.environ.get("ARTOKE_KIMODO_DIR", r"C:\work\Ai\kimodo"))
 PROMPT_SUFFIX = ".kimodo.json"
 
 
+class KimodoInfraUnavailable(RuntimeError):
+    pass
+
+
 def is_prompt_source(filename: str) -> bool:
     return filename.lower().endswith(PROMPT_SUFFIX)
 
@@ -51,6 +55,16 @@ def _bvh_frames(path: Path) -> int:
     if not match:
         raise RuntimeError("Kimodo BVH 에 Frames 가 없습니다")
     return int(match.group(1))
+
+
+def _is_docker_unavailable(stdout: str | None, stderr: str | None) -> bool:
+    output = f"{stderr or ''}\n{stdout or ''}".lower()
+    return (
+        "failed to connect to the docker api" in output
+        or "cannot connect to the docker daemon" in output
+        or ("the system cannot find the file specified" in output and "docker" in output)
+        or ("error during connect" in output and "docker" in output)
+    )
 
 
 class KimodoPipeline:
@@ -155,7 +169,10 @@ class KimodoPipeline:
                 )
             except OSError:
                 pass
-            raise RuntimeError((stderr or stdout or "kimodo_gen failed").strip()[-2000:])
+            message = (stderr or stdout or "kimodo_gen failed").strip()[-2000:]
+            if _is_docker_unavailable(stdout, stderr):
+                raise KimodoInfraUnavailable(message)
+            raise RuntimeError(message)
 
         # 표본 1개면 kimodo_gen 은 폴더가 아니라 **단일 파일**(`output/<tag>.bvh`)로
         # 저장한다 — `<tag>/` 폴더에 `_00` 접미사가 붙는 것은 다표본 때다. 그리고

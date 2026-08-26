@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from maxmcp.worker.kimodo_pipeline import KimodoPipeline, is_prompt_source
+from maxmcp.worker.kimodo_pipeline import KimodoInfraUnavailable, KimodoPipeline, is_prompt_source
 
 
 def spec(tmp_path: Path) -> Path:
@@ -89,6 +89,43 @@ class NoOutput:
     returncode = 0
     def __init__(self, *a, **k): pass
     def communicate(self): return "", ""
+
+
+class FailedProcess:
+    returncode = 1
+
+    def __init__(self, _command, fake_stdout="", fake_stderr="", **_):
+        self._stdout = fake_stdout
+        self._stderr = fake_stderr
+
+    def communicate(self):
+        return self._stdout, self._stderr
+
+
+def test_docker_connection_failure_raises_infra_unavailable(tmp_path):
+    kimodo = tmp_path / "kimodo"; kimodo.mkdir()
+
+    def factory(command, **kw):
+        return FailedProcess(
+            command,
+            fake_stderr="failed to connect to the Docker API at npipe:////./pipe/docker_engine",
+            **kw,
+        )
+
+    pipe = KimodoPipeline(process_factory=factory, kimodo_dir=kimodo)
+    with pytest.raises(KimodoInfraUnavailable):
+        pipe.run(spec(tmp_path), tmp_path / "ws", lambda *_: None, lambda: False)
+
+
+def test_non_docker_kimodo_failure_stays_runtime_error(tmp_path):
+    kimodo = tmp_path / "kimodo"; kimodo.mkdir()
+
+    def factory(command, **kw):
+        return FailedProcess(command, fake_stderr="kimodo model weights missing", **kw)
+
+    pipe = KimodoPipeline(process_factory=factory, kimodo_dir=kimodo)
+    with pytest.raises(RuntimeError, match="kimodo model weights missing"):
+        pipe.run(spec(tmp_path), tmp_path / "ws", lambda *_: None, lambda: False)
 
 
 def test_falls_back_to_docker_cp_when_host_mount_is_stale(tmp_path, monkeypatch):
