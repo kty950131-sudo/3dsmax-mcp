@@ -79,6 +79,22 @@ An initial claim has `editRevision: 0` and null tracking/edit URLs. A correction
 
 Metadata and the publication manifest carry the claimed revision. Corrected artifacts upload beneath `result/revisions/<revision>/`; ARTOKE rejects any claimed, requested, manifest, or path revision mismatch. Original JSON and BVH remain at their fixed `result/` paths.
 
+### Source-free rebuilds for locally processed jobs
+
+Jobs created by the local motion companion (`source.transport: "local_ephemeral"`) never stored a source video on the server. Their correction claims carry a positive revision, null `objectPath`/`downloadUrl`, and signed `thumbnailUrl`/`metadataUrl` for the retained revision-0 artifacts. The worker skips the source download entirely, downloads the retained thumbnail (bounded to 5 MiB, WebP-verified) and metadata (bounded to 1 MiB, strict JSON), and rebuilds the corrected artifact set from the tracking JSON alone. The corrected metadata copies the original `sha256.source` verbatim — provenance is never recomputed or fabricated; malformed retained metadata fails the job. Any other mixed claim shape (a local claim at revision 0, a local claim with source fields, a private claim with retained URLs) is rejected as an invalid claim response.
+
+## Local motion companion (`artoke-motion://`)
+
+The companion is separate from the cloud worker: it processes a member's own video entirely on their PC and uploads only the results. The website's one-button flow opens it through the `artoke-motion://ingest?token=…` custom protocol.
+
+Register the protocol for the current user only (no elevation, `HKCU:\Software\Classes\artoke-motion`):
+
+```powershell
+.\scripts\register_artoke_motion_protocol.ps1 -PythonPath "C:\path\to\python.exe"
+```
+
+The interpreter path is required (no PATH lookup) and is refused if it contains quotes or control characters. Remove the registration with `.\scripts\unregister_artoke_motion_protocol.ps1`; a missing key succeeds. The CLI (`artoke-motion ingest <URI>`, or `python -m maxmcp.local_ingest ingest <URI>`) strictly validates the launch URI, holds a per-user one-instance lock, exchanges the single-use handoff token, sweeps stale workspaces, and opens a native Windows file-open dialog (mp4/mov/avi filter) for the member to pick the source video — no local web page or browser window is involved. Cancelling the dialog exits silently; a chosen file streams into the fresh session workspace and processing starts immediately, with progress and cancellation handled on the ARTOKE tracking page. Distinct exit codes separate invalid URI (2), already running (3), exchange failure (4), file dialog failure (5), and internal failure (6).
+
 ## Operational recovery
 
 - HTTP `409` during heartbeat or publication means the lease or revision is no longer valid. Stop and allow normal cleanup/reclaim.

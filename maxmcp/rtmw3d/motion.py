@@ -202,6 +202,38 @@ def _points(frame: Rtmw3dFrame) -> dict[str, Vector]:
     return points
 
 
+def _stabilize_root_positions(
+    poses: list[dict[str, Vector]], alpha: float = 0.65
+) -> list[Vector]:
+    roots = [pose["pelvis"] for pose in poses]
+    if len(roots) < 3:
+        return roots
+
+    # Camera-depth failures move every joint together. Reject an isolated
+    # whole-body jump before the bidirectional pass, while steady travel and
+    # multi-frame jumps remain present in the root track.
+    stable = roots.copy()
+    for index in range(1, len(roots) - 1):
+        stable[index] = tuple(
+            sorted((roots[index - 1][axis], roots[index][axis], roots[index + 1][axis]))[1]
+            for axis in range(3)
+        )
+
+    forward = stable.copy()
+    backward = stable.copy()
+    for index in range(1, len(stable)):
+        forward[index] = _add(
+            _scale(forward[index - 1], 1.0 - alpha),
+            _scale(stable[index], alpha),
+        )
+    for index in range(len(stable) - 2, -1, -1):
+        backward[index] = _add(
+            _scale(backward[index + 1], 1.0 - alpha),
+            _scale(stable[index], alpha),
+        )
+    return [_scale(_add(a, b), 0.5) for a, b in zip(forward, backward)]
+
+
 def _hierarchy(first: dict[str, Vector]) -> BvhJoint:
     cm = lambda value: value * 100.0
     distance = lambda a, b: cm(_length(_sub(first[a], first[b])))
@@ -243,14 +275,22 @@ _DIRECTION = {
 
 
 def rtmw3d_to_bvh(motion: Rtmw3dMotion) -> str:
-    first = _points(motion.frames[0])
+    poses = [_points(frame) for frame in motion.frames]
+    first = poses[0]
     root = _hierarchy(first)
-    origin = first["pelvis"]
+    root_positions = _stabilize_root_positions(poses)
+    origin = root_positions[0]
     rows: list[list[float]] = []
 
-    def visit(joint: BvhJoint, points: dict[str, Vector], parent_world: Quaternion, row: list[float]) -> None:
+    def visit(
+        joint: BvhJoint,
+        points: dict[str, Vector],
+        root_position: Vector,
+        parent_world: Quaternion,
+        row: list[float],
+    ) -> None:
         if joint.name == "Hips":
-            row.extend(value * 100.0 for value in _sub(points["pelvis"], origin))
+            row.extend(value * 100.0 for value in _sub(root_position, origin))
         direction = _DIRECTION.get(joint.name)
         if direction is None:
             local = (0.0, 0.0, 0.0, 1.0)
@@ -262,11 +302,11 @@ def rtmw3d_to_bvh(motion: Rtmw3dMotion) -> str:
         row.extend(_to_zxy(local))
         world = _q_mul(parent_world, local)
         for child in joint.children:
-            visit(child, points, world, row)
+            visit(child, points, root_position, world, row)
 
-    for frame in motion.frames:
+    for points, root_position in zip(poses, root_positions):
         row: list[float] = []
-        visit(root, _points(frame), (0.0, 0.0, 0.0, 1.0), row)
+        visit(root, points, root_position, (0.0, 0.0, 0.0, 1.0), row)
         rows.append(row)
     for column in range(3, len(rows[0])):
         values = unwrap_angles([row[column] for row in rows])

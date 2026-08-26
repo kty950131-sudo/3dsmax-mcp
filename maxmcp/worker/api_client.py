@@ -29,8 +29,12 @@ class ClaimedJob:
     download_url: str | None
     duration_seconds: float
     edit_revision: int = 0
+    tracking_encoding: str = "identity"
     tracking_url: str | None = None
     edits_url: str | None = None
+    transport: str = "private_storage"
+    thumbnail_url: str | None = None
+    metadata_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -104,30 +108,51 @@ class ArtokeApiClient:
             required_strings = (job.get("id"), job.get("sourceFilename"))
             if any(not isinstance(value, str) or not value for value in required_strings):
                 raise TypeError
-            edit_revision = job.get("editRevision", 0)
-            object_path = source.get("objectPath")
-            download_url = source.get("downloadUrl")
-            for value in (object_path, download_url):
-                if value is not None and (not isinstance(value, str) or not value):
-                    raise TypeError
-            # 새 추출(revision 0)은 원본이 반드시 있어야 한다. 예전엔 로컬 작업의 재빌드
-            # (objectPath=null)까지 여기서 버려서, RPC 가 잡아 둔 lease 만 남고 일은 안 하는
-            # 고리를 90초마다 반복했다(08-26 실측).
-            if edit_revision == 0 and (object_path is None or download_url is None):
+            transport = source.get("transport", "private_storage")
+            if transport not in {"private_storage", "local_ephemeral"}:
                 raise TypeError
+            edit_revision = job.get("editRevision", 0)
+            tracking_encoding = source.get("trackingEncoding", "identity")
             tracking_url = source.get("trackingUrl")
             edits_url = source.get("editsUrl")
+            object_path = source.get("objectPath")
+            download_url = source.get("downloadUrl")
+            thumbnail_url = source.get("thumbnailUrl")
+            metadata_url = source.get("metadataUrl")
             if (
                 not isinstance(edit_revision, int)
                 or isinstance(edit_revision, bool)
                 or edit_revision < 0
+                or tracking_encoding not in {"identity", "gzip_v1"}
             ):
                 raise TypeError
             if any(
                 value is not None and (not isinstance(value, str) or not value)
-                for value in (tracking_url, edits_url)
+                for value in (
+                    tracking_url,
+                    edits_url,
+                    object_path,
+                    download_url,
+                    thumbnail_url,
+                    metadata_url,
+                )
             ):
                 raise TypeError
+            if transport == "private_storage":
+                if object_path is None or download_url is None:
+                    raise TypeError
+                if thumbnail_url is not None or metadata_url is not None:
+                    raise TypeError
+            else:
+                if edit_revision <= 0:
+                    raise TypeError
+                # objectPath 는 없다. downloadUrl 은 주인공 재추출 재빌드에만 온다.
+                # 예전엔 둘 다 없어야만 통과시켜서, 사이트가 미리보기 사본을 채워 주자
+                # 응답을 버리고 lease 만 잡는 고리에 빠졌다(08-26 실측).
+                if object_path is not None:
+                    raise TypeError
+                if thumbnail_url is None or metadata_url is None:
+                    raise TypeError
             if edit_revision > 0 and (tracking_url is None or edits_url is None):
                 raise TypeError
             if edit_revision == 0 and (tracking_url is not None or edits_url is not None):
@@ -143,8 +168,12 @@ class ArtokeApiClient:
                 object_path=object_path, download_url=download_url,
                 duration_seconds=duration_seconds,
                 edit_revision=edit_revision,
+                tracking_encoding=tracking_encoding,
                 tracking_url=tracking_url,
                 edits_url=edits_url,
+                transport=transport,
+                thumbnail_url=thumbnail_url,
+                metadata_url=metadata_url,
             )
         except (KeyError, TypeError, ValueError, OverflowError):
             raise WorkerApiError("ARTOKE claim response is invalid") from None

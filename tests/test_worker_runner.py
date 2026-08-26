@@ -13,7 +13,11 @@ from maxmcp.worker.api_client import (
     UploadTarget,
     WorkerApiError,
 )
-from maxmcp.worker.artifacts import LocalArtifact
+from maxmcp.worker.artifacts import (
+    MAX_TRACKING_COMPRESSED_BYTES,
+    MAX_TRACKING_DECOMPRESSED_BYTES,
+    LocalArtifact,
+)
 from maxmcp.worker.motion_pipeline import PipelineArtifacts, PipelineCancelled
 from maxmcp.worker.runner import ArtokeWorker, RunResult
 
@@ -66,11 +70,18 @@ class Api:
 def dependencies(tmp_path: Path):
     artifacts: list[LocalArtifact] = []
 
-    def download(_url, destination):
+    def download(_url, destination, **_kwargs):
         destination.write_bytes(b"video")
         return destination
 
-    def build(_video, _pipeline, output, duration_seconds, edit_revision=0):
+    def build(
+        _video,
+        _pipeline,
+        output,
+        duration_seconds,
+        edit_revision=0,
+        tracking_encoding="gzip_v1",
+    ):
         for kind, name in [
             ("bvh", "motion.bvh"),
             ("rtmw3d_json", "motion.rtmw3d.json"),
@@ -111,10 +122,17 @@ def test_success_heartbeats_uploads_and_publishes(tmp_path: Path) -> None:
         def cancel(self):
             pass
 
+    built_encoding = None
+
+    def encoding_builder(*args, tracking_encoding, **kwargs):
+        nonlocal built_encoding
+        built_encoding = tracking_encoding
+        return build(*args, tracking_encoding=tracking_encoding, **kwargs)
+
     worker = ArtokeWorker(
         api, lambda: readiness(tmp_path), tmp_path / "cache",
         pipeline_factory=lambda _report: Pipeline(),
-        downloader=download, artifact_builder=build, uploader=upload,
+        downloader=download, artifact_builder=encoding_builder, uploader=upload,
         heartbeat_interval=0.01,
     )
 
@@ -123,6 +141,49 @@ def test_success_heartbeats_uploads_and_publishes(tmp_path: Path) -> None:
     assert uploads == [(kind, kind) for kind in ("bvh", "rtmw3d_json", "thumbnail", "metadata")]
     assert api.published and api.published[0] == JOB_ID
     assert len(api.published[1]) == 4
+    assert built_encoding == "identity"
+
+
+def test_initial_gzip_job_forwards_server_encoding_to_artifact_builder(tmp_path: Path) -> None:
+    api = Api()
+    initial = api.claim()
+    api.claim = lambda: ClaimedJob(
+        initial.job_id,
+        initial.source_filename,
+        initial.object_path,
+        initial.download_url,
+        initial.duration_seconds,
+        tracking_encoding="gzip_v1",
+    )
+    download, build, upload, _uploads = dependencies(tmp_path)
+    built_encoding = None
+
+    class Pipeline:
+        def run(self, _video, workspace, *_args):
+            path = workspace / "internal"
+            path.write_text("x", encoding="utf-8")
+            return PipelineArtifacts(path, path, path, 1)
+
+        def cancel(self):
+            pass
+
+    def encoding_builder(*args, tracking_encoding, **kwargs):
+        nonlocal built_encoding
+        built_encoding = tracking_encoding
+        return build(*args, tracking_encoding=tracking_encoding, **kwargs)
+
+    worker = ArtokeWorker(
+        api,
+        lambda: readiness(tmp_path),
+        tmp_path / "cache",
+        pipeline_factory=lambda _report: Pipeline(),
+        downloader=download,
+        artifact_builder=encoding_builder,
+        uploader=upload,
+    )
+
+    assert worker.run_once() is RunResult.COMPLETED
+    assert built_encoding == "gzip_v1"
 
 
 @pytest.mark.parametrize("boundary", ["authorize", "publish"])
@@ -144,7 +205,11 @@ def test_publication_409_is_lease_lost_without_terminal_failure(tmp_path: Path, 
     assert api.failed is None
 
 
-def test_correction_rebuild_skips_inference_and_publishes_exact_revision(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tracking_encoding", ["identity", "gzip_v1"])
+def test_correction_rebuild_skips_inference_and_publishes_exact_revision(
+    tmp_path: Path,
+    tracking_encoding: str,
+) -> None:
     api = Api()
     api.claim = lambda: ClaimedJob(
         JOB_ID,
@@ -153,10 +218,11 @@ def test_correction_rebuild_skips_inference_and_publishes_exact_revision(tmp_pat
         "https://signed/video",
         4.0,
         edit_revision=3,
+        tracking_encoding=tracking_encoding,
         tracking_url="https://signed/tracking",
         edits_url="https://signed/edits",
     )
-    downloaded: list[str] = []
+    downloaded: list[tuple[str, dict[str, int]]] = []
     source_payload = {
         "schema": "artoke.rtmw3d.v1",
         "source_video": "walk.mp4",
@@ -177,20 +243,27 @@ def test_correction_rebuild_skips_inference_and_publishes_exact_revision(tmp_pat
         }],
     }
 
-    def download(url, destination):
-        downloaded.append(url)
+    def download(url, destination, **kwargs):
+        downloaded.append((url, kwargs))
         if url.endswith("/video"):
             destination.write_bytes(b"video")
         elif url.endswith("/tracking"):
             destination.write_text(json.dumps(source_payload), encoding="utf-8")
         else:
-            destination.write_text(json.dumps([{
-                "frame": 0,
-                "joint": "left_wrist",
-                "x": 310.5,
-                "y": 205.0,
-                "state": "manual",
-            }]), encoding="utf-8")
+            destination.write_text(json.dumps({
+                "imageEdits": [{
+                    "frame": 0,
+                    "joint": "left_wrist",
+                    "x": 310.5,
+                    "y": 205.0,
+                    "state": "manual",
+                }],
+                "poseEdits": [{
+                    "frame": 0,
+                    "joint": "left_elbow",
+                    "rotation": [0.0, 0.0, 0.0, 1.0],
+                }],
+            }), encoding="utf-8")
         return destination
 
     def convert(source, output):
@@ -208,13 +281,42 @@ def test_correction_rebuild_skips_inference_and_publishes_exact_revision(tmp_pat
         )
         return 1
 
+    pose_calls: list[tuple[Path, object, Path]] = []
+
+    def apply_pose(source, pose_edits, output):
+        pose_calls.append((source, pose_edits, output))
+        assert source.name == "corrected.base.bvh"
+        assert pose_edits == ({
+            "frame": 0,
+            "joint": "left_elbow",
+            "rotation": [0.0, 0.0, 0.0, 1.0],
+        },)
+        output.write_text("FINAL BVH", encoding="utf-8")
+        return output
+
     built_revision = None
+    built_encoding = None
     _download, _build, upload, uploads = dependencies(tmp_path)
 
-    def build(video, pipeline, output, duration_seconds, edit_revision=0):
-        nonlocal built_revision
+    def build(
+        video,
+        pipeline,
+        output,
+        duration_seconds,
+        edit_revision=0,
+        tracking_encoding="gzip_v1",
+    ):
+        nonlocal built_revision, built_encoding
         built_revision = edit_revision
-        return _build(video, pipeline, output, duration_seconds, edit_revision)
+        built_encoding = tracking_encoding
+        return _build(
+            video,
+            pipeline,
+            output,
+            duration_seconds,
+            edit_revision,
+            tracking_encoding=tracking_encoding,
+        )
 
     worker = ArtokeWorker(
         api,
@@ -227,17 +329,144 @@ def test_correction_rebuild_skips_inference_and_publishes_exact_revision(tmp_pat
         artifact_builder=build,
         uploader=upload,
         converter=convert,
+        pose_applier=apply_pose,
     )
 
     assert worker.run_once() is RunResult.COMPLETED
     assert downloaded == [
-        "https://signed/video",
-        "https://signed/tracking",
-        "https://signed/edits",
+        ("https://signed/video", {}),
+        ("https://signed/tracking", {
+            "max_bytes": MAX_TRACKING_COMPRESSED_BYTES,
+            "max_decompressed_json_bytes": MAX_TRACKING_DECOMPRESSED_BYTES,
+        }),
+        ("https://signed/edits", {}),
     ]
     assert built_revision == 3
+    assert built_encoding == tracking_encoding
+    assert len(pose_calls) == 1
     assert len(uploads) == 4
     assert api.published and api.published[2] == 3
+
+
+def test_local_correction_rebuild_runs_without_a_source_download(tmp_path: Path) -> None:
+    api = Api()
+    api.claim = lambda: ClaimedJob(
+        JOB_ID,
+        "walk.mp4",
+        None,
+        None,
+        4.0,
+        edit_revision=3,
+        tracking_encoding="gzip_v1",
+        tracking_url="https://signed/tracking",
+        edits_url="https://signed/edits",
+        transport="local_ephemeral",
+        thumbnail_url="https://signed/thumbnail",
+        metadata_url="https://signed/metadata",
+    )
+    downloaded: list[tuple[str, dict[str, int]]] = []
+    source_payload = {
+        "schema": "artoke.rtmw3d.v1",
+        "source_video": "walk.mp4",
+        "fps": 30,
+        "image_size": {"width": 1920, "height": 1080},
+        "frames": [{
+            "index": 0,
+            "keypoints": {
+                joint: [float(index), float(index + 1), float(index + 2)]
+                for index, joint in enumerate(BODY23_NAMES)
+            },
+            "image_keypoints": {
+                joint: [float(index * 10), float(index * 5)]
+                for index, joint in enumerate(BODY23_NAMES)
+            },
+            "scores": {joint: 0.9 for joint in BODY23_NAMES},
+        }],
+    }
+
+    def download(url, destination, **kwargs):
+        downloaded.append((url, kwargs))
+        if url.endswith("/tracking"):
+            destination.write_text(json.dumps(source_payload), encoding="utf-8")
+        elif url.endswith("/edits"):
+            destination.write_text("[]", encoding="utf-8")
+        elif url.endswith("/thumbnail"):
+            destination.write_bytes(b"RIFF\x04\x00\x00\x00WEBP")
+        else:
+            destination.write_text(
+                json.dumps({"sha256": {"source": "e" * 64}}),
+                encoding="utf-8",
+            )
+        return destination
+
+    def convert(_source, output):
+        output.write_text(
+            "HIERARCHY\nROOT Pelvis\nMOTION\nFrames: 1\nFrame Time: 0.0333333333\n",
+            encoding="utf-8",
+        )
+        return 1
+
+    def apply_pose(source, pose_edits, output):
+        assert pose_edits == ()
+        output.write_bytes(source.read_bytes())
+        return output
+
+    _download, build, upload, uploads = dependencies(tmp_path)
+    source_free_calls: list[dict[str, object]] = []
+
+    def source_free_build(
+        pipeline,
+        output,
+        duration_seconds,
+        *,
+        retained_thumbnail,
+        retained_metadata,
+        edit_revision,
+        tracking_encoding="gzip_v1",
+    ):
+        source_free_calls.append({
+            "thumbnail_bytes": retained_thumbnail.read_bytes(),
+            "metadata": retained_metadata,
+            "edit_revision": edit_revision,
+            "tracking_encoding": tracking_encoding,
+        })
+        return build(None, pipeline, output, duration_seconds, edit_revision, tracking_encoding=tracking_encoding)
+
+    worker = ArtokeWorker(
+        api,
+        lambda: readiness(tmp_path),
+        tmp_path / "cache",
+        pipeline_factory=lambda _report: (_ for _ in ()).throw(
+            AssertionError("local rebuild must not start RTMW3D inference")
+        ),
+        downloader=download,
+        artifact_builder=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local rebuild must not build artifacts from a source video")
+        ),
+        source_free_artifact_builder=source_free_build,
+        uploader=upload,
+        converter=convert,
+        pose_applier=apply_pose,
+    )
+
+    assert worker.run_once() is RunResult.COMPLETED
+    assert [url for url, _ in downloaded] == [
+        "https://signed/tracking",
+        "https://signed/edits",
+        "https://signed/thumbnail",
+        "https://signed/metadata",
+    ]
+    thumbnail_bounds = downloaded[2][1]
+    metadata_bounds = downloaded[3][1]
+    assert thumbnail_bounds["max_bytes"] == 5 * 1024 * 1024
+    assert metadata_bounds["max_bytes"] == 1024 * 1024
+    assert len(source_free_calls) == 1
+    assert source_free_calls[0]["edit_revision"] == 3
+    assert source_free_calls[0]["tracking_encoding"] == "gzip_v1"
+    assert source_free_calls[0]["thumbnail_bytes"].startswith(b"RIFF")
+    assert len(uploads) == 4
+    assert api.published and api.published[2] == 3
+    assert api.failed is None
 
 
 def test_server_cancellation_terminates_pipeline(tmp_path: Path) -> None:

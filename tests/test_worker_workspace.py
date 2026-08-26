@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from maxmcp.worker.workspace import JobWorkspace, cleanup_stale
+from maxmcp.worker.workspace import JobWorkspace, WorkspaceProcessLock, cleanup_stale
 
 
 JOB_ID = "00000000-0000-4000-8000-000000000001"
@@ -54,3 +54,75 @@ def test_stale_cleanup_only_removes_old_job_directories(tmp_path: Path) -> None:
     assert not stale.exists()
     assert fresh.exists()
     assert foreign.exists()
+
+
+def test_stale_cleanup_skips_live_recent_and_reparse_workspaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cache"
+    live = JobWorkspace.open(root, JOB_ID)
+    live.acquire()
+    old = time.time() - 90_000
+    os.utime(live.path.parent, (old, old))
+
+    assert cleanup_stale(root) == []
+    assert live.path.exists()
+
+    live.release()
+    (live.path / ".lease").write_text("crashed")
+    os.utime(live.path / ".lease", (old, old))
+    os.utime(live.path, (old, old))
+    os.utime(live.path.parent, (old, old))
+    assert cleanup_stale(root) == [live.path.parent.resolve()]
+
+
+def test_stale_cleanup_skips_job_tree_containing_link(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    job = root / JOB_ID
+    attempt = job / "00000000-0000-4000-8000-000000000099"
+    outside = tmp_path / "outside"
+    attempt.mkdir(parents=True)
+    outside.mkdir()
+    try:
+        (attempt / "unsafe").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    old = time.time() - 90_000
+    os.utime(attempt, (old, old)); os.utime(job, (old, old))
+
+    assert cleanup_stale(root) == []
+    assert job.exists()
+
+
+def test_os_advisory_lock_rejects_second_holder(tmp_path: Path) -> None:
+    first = WorkspaceProcessLock(tmp_path / "cache")
+    second = WorkspaceProcessLock(tmp_path / "cache")
+    assert first.acquire() is True
+    assert second.acquire() is False
+    first.release()
+    assert second.acquire() is True
+    second.release()
+
+
+def test_stale_cleanup_skips_all_jobs_while_process_lock_is_held(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    stale = root / JOB_ID; stale.mkdir(parents=True)
+    old = time.time() - 90_000; os.utime(stale, (old, old))
+    lock = WorkspaceProcessLock(root); assert lock.acquire()
+    try:
+        assert cleanup_stale(root) == []
+        assert stale.exists()
+    finally:
+        lock.release()
+
+
+def test_stale_cleanup_uses_freshest_safe_retained_entry_not_old_parent(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    job = root / JOB_ID; attempt = job / "00000000-0000-4000-8000-000000000099"
+    attempt.mkdir(parents=True)
+    retry = attempt / "retry.json"; retry.write_text("{}")
+    old = time.time() - 90_000
+    os.utime(attempt, (old, old)); os.utime(job, (old, old))
+
+    assert cleanup_stale(root) == []
+    assert retry.exists()

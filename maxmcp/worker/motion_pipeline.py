@@ -118,13 +118,8 @@ class MotionPipeline:
         on_stage("validating", 85)
         trace = {
             "backend": "OpenMMLab RTMW3D-L",
-            "source_video": str(video_path),
-            "rtmw3d_json": str(body_path),
-            "bvh": str(bvh_path),
             "frame_count": frame_count,
-            "command": command,
             "sha256": {
-                "video": _sha256(video_path),
                 "rtmw3d": _sha256(body_path),
                 "bvh": _sha256(bvh_path),
             },

@@ -73,3 +73,4 @@ packages = ["maxmcp"]
 [project.scripts]
 3dsmax-mcp = "maxmcp.server:main"
 3dsmax-mcp-install = "maxmcp.installer:main"
+artoke-motion = "maxmcp.local_ingest.__main__:main"

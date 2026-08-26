@@ -57,6 +57,30 @@ def test_identity_pose_exports_biped_bvh(tmp_path: Path) -> None:
     assert parsed.frames[1][0] == pytest.approx(10.0)
 
 
+def test_bvh_export_rejects_a_single_frame_root_jump_without_losing_travel(tmp_path: Path) -> None:
+    payload = _payload()
+    base = _pose()
+    centers = (0.0, 0.1, 4.0, 0.3, 0.4)
+    payload["frames"] = [
+        {
+            "index": index,
+            "keypoints": {
+                name: [point[0] + center, point[1], point[2]]
+                for name, point in base.items()
+            },
+            "scores": {name: 1.0 for name in BODY23_NAMES},
+        }
+        for index, center in enumerate(centers)
+    ]
+    source = tmp_path / "root-jump.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    parsed = parse_bvh(rtmw3d_to_bvh(load_rtmw3d(source)))
+
+    assert parsed.frames[2][0] < 100.0
+    assert parsed.frames[-1][0] - parsed.frames[0][0] > 25.0
+
+
 def test_converter_writes_valid_bvh(tmp_path: Path) -> None:
     source = tmp_path / "motion.json"
     output = tmp_path / "motion_rtmw3d_tpose.bvh"

@@ -61,6 +61,13 @@ def test_pipeline_generates_json_bvh_and_trace_in_stage_order(tmp_path: Path) ->
     assert result.bvh.is_file()
     assert result.trace.is_file()
     assert result.frame_count == 12
+    trace = json.loads(result.trace.read_text(encoding="utf-8"))
+    rendered = json.dumps(trace)
+    assert str(video) not in rendered
+    assert str(result.rtmw3d_json) not in rendered
+    assert "command" not in trace
+    assert "source_video" not in trace
+    assert "video" not in trace.get("sha256", {})
 
 
 def test_pipeline_stops_before_start_when_cancelled(tmp_path: Path) -> None:
