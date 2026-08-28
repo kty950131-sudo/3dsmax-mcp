@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 import tempfile
@@ -10,7 +11,10 @@ from typing import Any, Mapping, Sequence
 from maxmcp.helpers.bvh import BvhFile, BvhJoint, parse_bvh, serialize_bvh
 
 
-CANONICAL_TO_BVH = {
+# 스켈레톤이 둘이다. 후처리(pose-prior)를 거치면 SOMA 18관절·ZYX 가 나오고, 후처리를
+# 건너뛴 폴백 변환기는 Biped 호환 19관절·ZXY 를 낸다. 한쪽만 알면 다른 쪽에서
+# "관절이 없다 / 채널 순서가 다르다" 로 통째로 터진다(2026-08-28 진단).
+CANONICAL_TO_FALLBACK = {
     "root": "Hips",
     "chest": "Chest",
     "neck": "Neck",
@@ -30,9 +34,31 @@ CANONICAL_TO_BVH = {
     "right_toe": "RightToe",
 }
 
+# SOMA 18관절에는 목과 발가락이 없다. 그 자리에 키를 찍으면 얹을 곳이 없으므로
+# 건너뛰고 옆에 기록을 남긴다 — 통째로 실패시키면 나머지 교정까지 버려진다.
+CANONICAL_TO_SOMA = {
+    "root": "Hips",
+    "chest": "Chest",
+    "left_shoulder": "LeftArm",
+    "left_elbow": "LeftForeArm",
+    "left_wrist": "LeftHand",
+    "right_shoulder": "RightArm",
+    "right_elbow": "RightForeArm",
+    "right_wrist": "RightHand",
+    "left_hip": "LeftLeg",
+    "left_knee": "LeftShin",
+    "left_ankle": "LeftFoot",
+    "right_hip": "RightLeg",
+    "right_knee": "RightShin",
+    "right_ankle": "RightFoot",
+}
+
+# 옛 이름을 쓰는 곳이 있어 남겨 둔다(폴백이 기본이었다).
+CANONICAL_TO_BVH = CANONICAL_TO_FALLBACK
+
 _POSE_FIELDS = {"frame", "joint", "rotation"}
 _POSE_FIELDS_WITH_TRANSLATION = _POSE_FIELDS | {"translation"}
-_ROTATION_CHANNELS = ["Zrotation", "Xrotation", "Yrotation"]
+_SUPPORTED_ORDERS = ("ZXY", "ZYX")
 
 Quaternion = tuple[float, float, float, float]
 
@@ -78,31 +104,47 @@ def _axis_quaternion(axis: str, degrees: float) -> Quaternion:
     return (0.0, 0.0, sine, cosine)
 
 
-def _zxy_to_quaternion(z: float, x: float, y: float) -> Quaternion:
+def _euler_to_quaternion(order: str, values: Sequence[float]) -> Quaternion:
+    """채널에 적힌 순서대로 축 회전을 곱한다. BVH 는 왼쪽부터 차례로 적용한다."""
     result: Quaternion = (0.0, 0.0, 0.0, 1.0)
-    for axis, degrees in (("Z", z), ("X", x), ("Y", y)):
+    for axis, degrees in zip(order, values, strict=True):
         result = _multiply(result, _axis_quaternion(axis, degrees))
     return _quaternion(result)
 
 
-def _quaternion_to_zxy(value: Quaternion) -> tuple[float, float, float]:
+def _matrix(value: Quaternion) -> list[list[float]]:
     x, y, z, w = _quaternion(value)
-    m11 = 1.0 - 2.0 * (y * y + z * z)
-    m12 = 2.0 * (x * y - z * w)
-    m21 = 2.0 * (x * y + z * w)
-    m22 = 1.0 - 2.0 * (x * x + z * z)
-    m31 = 2.0 * (x * z - y * w)
-    m32 = 2.0 * (y * z + x * w)
-    m33 = 1.0 - 2.0 * (x * x + y * y)
+    return [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+    ]
 
-    x_angle = math.asin(max(-1.0, min(1.0, m32)))
-    if abs(m32) < 0.9999999:
-        y_angle = math.atan2(-m31, m33)
-        z_angle = math.atan2(-m12, m22)
-    else:
-        y_angle = 0.0
-        z_angle = math.atan2(m21, m11)
-    return tuple(math.degrees(angle) for angle in (z_angle, x_angle, y_angle))
+
+def _quaternion_to_euler(order: str, value: Quaternion) -> tuple[float, float, float]:
+    """`order` 순서의 각도로 되뽑는다. 짐벌(가운데 축 ±90°)에서는 첫 축으로 몰아준다."""
+    m = _matrix(value)
+    if order == "ZXY":
+        x_angle = math.asin(max(-1.0, min(1.0, m[2][1])))
+        if abs(m[2][1]) < 0.9999999:
+            y_angle = math.atan2(-m[2][0], m[2][2])
+            z_angle = math.atan2(-m[0][1], m[1][1])
+        else:
+            y_angle = 0.0
+            z_angle = math.atan2(m[1][0], m[0][0])
+        radians = (z_angle, x_angle, y_angle)
+    elif order == "ZYX":
+        y_angle = math.asin(max(-1.0, min(1.0, -m[2][0])))
+        if abs(m[2][0]) < 0.9999999:
+            x_angle = math.atan2(m[2][1], m[2][2])
+            z_angle = math.atan2(m[1][0], m[0][0])
+        else:
+            x_angle = 0.0
+            z_angle = math.atan2(-m[0][1], m[1][1])
+        radians = (z_angle, y_angle, x_angle)
+    else:  # pragma: no cover - 위에서 이미 걸러진다
+        raise ValueError(f"unsupported rotation order: {order}")
+    return tuple(math.degrees(angle) for angle in radians)
 
 
 def _joint_columns(root: BvhJoint) -> dict[str, tuple[BvhJoint, int]]:
@@ -157,23 +199,39 @@ def _validate_edit(
     return frame, joint, rotation, translation
 
 
+def choose_mapping(columns: Mapping[str, Any]) -> dict[str, str]:
+    """BVH 에 있는 이름을 보고 어느 스켈레톤인지 가린다."""
+    if "LeftUpArm" in columns:
+        return CANONICAL_TO_FALLBACK
+    if "LeftForeArm" in columns:
+        return CANONICAL_TO_SOMA
+    raise ValueError(
+        "unknown BVH skeleton: expected LeftUpArm(폴백) 또는 LeftForeArm(SOMA)"
+    )
+
+
 def _apply_edit(
     bvh: BvhFile,
     columns: dict[str, tuple[BvhJoint, int]],
+    mapping: Mapping[str, str],
     frame: int,
     canonical_joint: str,
     delta: Quaternion,
     translation: tuple[float, float, float] | None,
-) -> None:
-    bvh_name = CANONICAL_TO_BVH[canonical_joint]
+) -> str | None:
+    """얹었으면 None, 이 스켈레톤에 없는 관절이면 그 이유를 돌려준다."""
+    bvh_name = mapping.get(canonical_joint)
+    if bvh_name is None:
+        return f"{canonical_joint}: 이 스켈레톤에 대응 관절이 없다"
     entry = columns.get(bvh_name)
     if entry is None:
-        raise ValueError(f"pose edit joint is absent from BVH: {canonical_joint}")
+        return f"{canonical_joint}: BVH 에 {bvh_name} 가 없다"
     joint, first_column = entry
     rotation_channels = [
         channel for channel in joint.channels if channel.endswith("rotation")
     ]
-    if rotation_channels != _ROTATION_CHANNELS:
+    order = "".join(channel[0] for channel in rotation_channels)
+    if order not in _SUPPORTED_ORDERS:
         raise ValueError(
             f"unsupported BVH rotation channel order for {bvh_name}: "
             f"{' '.join(rotation_channels)}"
@@ -181,14 +239,14 @@ def _apply_edit(
 
     rotation_columns = [
         first_column + joint.channels.index(channel)
-        for channel in _ROTATION_CHANNELS
+        for channel in rotation_channels
     ]
     row = bvh.frames[frame]
-    base = _zxy_to_quaternion(*(row[column] for column in rotation_columns))
+    base = _euler_to_quaternion(order, [row[column] for column in rotation_columns])
     composed = _multiply(base, delta)
     for column, degrees in zip(
         rotation_columns,
-        _quaternion_to_zxy(composed),
+        _quaternion_to_euler(order, composed),
         strict=True,
     ):
         row[column] = degrees
@@ -198,6 +256,7 @@ def _apply_edit(
             if channel not in joint.channels:
                 raise ValueError(f"root BVH channel is missing: {channel}")
             row[first_column + joint.channels.index(channel)] += translation[axis] * 100.0
+    return None
 
 
 def apply_bvh_pose_corrections(
@@ -214,6 +273,9 @@ def apply_bvh_pose_corrections(
 
     bvh = parse_bvh(source.read_text(encoding="utf-8"))
     columns = _joint_columns(bvh.root)
+    mapping = choose_mapping(columns)
+    skipped: list[str] = []
+    applied = 0
     seen: set[tuple[int, str]] = set()
     for raw_edit in pose_edits:
         frame, joint, rotation, translation = _validate_edit(
@@ -224,7 +286,13 @@ def apply_bvh_pose_corrections(
         if key in seen:
             raise ValueError("duplicate pose edit")
         seen.add(key)
-        _apply_edit(bvh, columns, frame, joint, rotation, translation)
+        reason = _apply_edit(
+            bvh, columns, mapping, frame, joint, rotation, translation,
+        )
+        if reason is None:
+            applied += 1
+        elif reason not in skipped:
+            skipped.append(reason)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
@@ -244,4 +312,14 @@ def apply_bvh_pose_corrections(
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+    # 무엇을 얹고 무엇을 건너뛰었는지 옆에 남긴다. 건너뛴 것을 조용히 삼키면
+    # 사람이 찍은 키가 사라진 줄도 모른다(2026-08-28).
+    report = {
+        "skeleton": "fallback" if mapping is CANONICAL_TO_FALLBACK else "soma",
+        "applied": applied,
+        "skipped": skipped,
+    }
+    output.with_suffix(".pose_corrections.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return output
