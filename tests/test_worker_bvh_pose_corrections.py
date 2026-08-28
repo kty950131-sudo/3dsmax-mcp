@@ -44,7 +44,7 @@ def write_bvh(tmp_path: Path) -> tuple[Path, Path]:
     return source, tmp_path / "corrected.bvh"
 
 
-def test_changes_only_the_keyed_joint_and_frame(tmp_path: Path) -> None:
+def test_changes_only_the_keyed_joint(tmp_path: Path) -> None:
     source, output = write_bvh(tmp_path)
     original = parse_bvh(source.read_text(encoding="utf-8"))
 
@@ -55,7 +55,8 @@ def test_changes_only_the_keyed_joint_and_frame(tmp_path: Path) -> None:
     }], output)
 
     corrected = parse_bvh(result.read_text(encoding="utf-8"))
-    assert corrected.frames[0] == original.frames[0]
+    # 다른 관절과 루트는 그대로다. 앞 프레임의 그 관절만 창 안이라 일부 얹힌다.
+    assert corrected.frames[0][:9] == original.frames[0][:9]
     assert corrected.frames[1][:9] == original.frames[1][:9]
     assert corrected.frames[1][9] == pytest.approx(0.0, abs=1e-6)
     assert corrected.frames[1][10] == pytest.approx(90.0, abs=1e-6)
@@ -75,7 +76,8 @@ def test_converts_root_translation_from_meters_to_centimeters(tmp_path: Path) ->
 
     corrected = parse_bvh(output.read_text(encoding="utf-8"))
     assert corrected.frames[1][:3] == [110.0, 20.0, 30.0]
-    assert corrected.frames[0][:3] == [0.0, 0.0, 0.0]
+    # 앞 프레임은 창 안이라 일부만 얹힌다 — 예전처럼 한 프레임에서 통째로 튀지 않는다
+    assert 0.0 < corrected.frames[0][0] < 100.0
 
 
 def test_composes_quaternions_across_the_180_degree_boundary(tmp_path: Path) -> None:
@@ -182,7 +184,7 @@ def test_applies_to_soma_skeleton_with_zyx_channels(tmp_path: Path) -> None:
     bvh = parse_bvh(out.read_text(encoding="utf-8"))
     # LeftForeArm 의 Zrotation 은 루트 6 + LeftArm 3 = 9번째 열부터다.
     assert bvh.frames[1][9] == pytest.approx(90.0, abs=1e-6)
-    assert bvh.frames[0][9] == pytest.approx(0.0, abs=1e-9)
+    assert 0.0 < bvh.frames[0][9] < 90.0
 
 
 def test_soma_skeleton_skips_joints_it_does_not_have(tmp_path: Path) -> None:
@@ -231,3 +233,36 @@ def test_rejects_a_skeleton_it_does_not_know(tmp_path: Path) -> None:
             [{"frame": 1, "joint": "left_elbow", "rotation": _quarter_turn_z()}],
             tmp_path / "corrected.bvh",
         )
+
+
+def test_key_ramps_in_and_leaves_far_frames_untouched(tmp_path: Path) -> None:
+    """키 하나가 앞뒤 창에 걸쳐 스며들고, 창 밖 프레임은 원본 그대로여야 한다.
+
+    예전에는 키를 그 한 프레임에만 얹어서, 사람이 자세를 고칠 때마다 1프레임짜리
+    튐이 하나씩 생겼다(2026-08-28 실측)."""
+    from maxmcp.helpers.bvh import serialize_bvh
+
+    parsed = parse_bvh(BVH)
+    row = list(parsed.frames[0])
+    parsed.frames = [list(row) for _ in range(20)]
+    source = tmp_path / "long.bvh"
+    source.write_text(serialize_bvh(parsed), encoding="utf-8")
+    output = tmp_path / "long-corrected.bvh"
+
+    apply_bvh_pose_corrections(source, [{
+        "frame": 10,
+        "joint": "left_elbow",
+        "rotation": [0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)],
+    }], output)
+
+    corrected = parse_bvh(output.read_text(encoding="utf-8"))
+    zrot = [frame[9] for frame in corrected.frames]
+    assert zrot[10] == pytest.approx(90.0, abs=1e-6)
+    # 창 밖은 손대지 않는다
+    assert zrot[5] == pytest.approx(0.0, abs=1e-9)
+    assert zrot[15] == pytest.approx(0.0, abs=1e-9)
+    # 창 안은 단조롭게 올랐다가 내려간다
+    assert zrot[6] < zrot[7] < zrot[8] < zrot[9] < zrot[10]
+    assert zrot[10] > zrot[11] > zrot[12] > zrot[13] > zrot[14]
+    # 한 프레임 사이의 변화가 90도 전체가 아니다
+    assert max(abs(b - a) for a, b in zip(zrot, zrot[1:])) < 45.0

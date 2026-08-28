@@ -210,6 +210,78 @@ def choose_mapping(columns: Mapping[str, Any]) -> dict[str, str]:
     )
 
 
+POSE_EDIT_WINDOW = 5
+"""키 하나가 앞뒤로 몇 프레임에 걸쳐 스며들지. 브라우저 미리보기와 같은 값이어야 한다
+(src/lib/motion-pose-edits.ts 의 POSE_EDIT_WINDOW)."""
+
+_IDENTITY: Quaternion = (0.0, 0.0, 0.0, 1.0)
+
+
+def _slerp(a: Quaternion, b: Quaternion, t: float) -> Quaternion:
+    dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+    end = b
+    if dot < 0.0:
+        end = (-b[0], -b[1], -b[2], -b[3])
+        dot = -dot
+    if dot > 0.9995:
+        out = [a[i] + (end[i] - a[i]) * t for i in range(4)]
+        norm = math.sqrt(sum(v * v for v in out)) or 1.0
+        return (out[0] / norm, out[1] / norm, out[2] / norm, out[3] / norm)
+    theta = math.acos(dot)
+    sin = math.sin(theta)
+    wa = math.sin((1.0 - t) * theta) / sin
+    wb = math.sin(t * theta) / sin
+    return (
+        a[0] * wa + end[0] * wb,
+        a[1] * wa + end[1] * wb,
+        a[2] * wa + end[2] * wb,
+        a[3] * wa + end[3] * wb,
+    )
+
+
+def _lerp_translation(
+    a: tuple[float, float, float] | None,
+    b: tuple[float, float, float] | None,
+    t: float,
+) -> tuple[float, float, float] | None:
+    if a is None and b is None:
+        return None
+    start = a or (0.0, 0.0, 0.0)
+    end = b or (0.0, 0.0, 0.0)
+    return tuple(start[i] + (end[i] - start[i]) * t for i in range(3))  # type: ignore[return-value]
+
+
+def sample_pose_track(
+    track: Sequence[tuple[int, Quaternion, tuple[float, float, float] | None]],
+    frame: int,
+    window: int = POSE_EDIT_WINDOW,
+) -> tuple[Quaternion, tuple[float, float, float] | None] | None:
+    """그 프레임에 얹을 값. 영향 밖이면 None.
+
+    키를 **그 한 프레임에만** 얹던 예전 방식은 사람이 자세를 고칠 때마다 1프레임짜리
+    튐을 하나씩 만들었다(작업 8b84816b 에서 사람이 찍은 키 12건과 튐 12개가 관절·프레임
+    까지 일치, 2026-08-28). 키 사이는 잇고 바깥은 창 안에서 원래 자세로 되돌린다."""
+    if not track:
+        return None
+    first_frame, first_rot, first_tr = track[0]
+    last_frame, last_rot, last_tr = track[-1]
+    if frame <= first_frame - window or frame >= last_frame + window:
+        return None
+    if frame < first_frame:
+        t = (frame - (first_frame - window)) / window
+        return _slerp(_IDENTITY, first_rot, t), _lerp_translation(None, first_tr, t)
+    if frame > last_frame:
+        t = (frame - last_frame) / window
+        return _slerp(last_rot, _IDENTITY, t), _lerp_translation(last_tr, None, t)
+    for (frame_a, rot_a, tr_a), (frame_b, rot_b, tr_b) in zip(track, track[1:]):
+        if frame < frame_a or frame > frame_b:
+            continue
+        span = frame_b - frame_a
+        t = 0.0 if span == 0 else (frame - frame_a) / span
+        return _slerp(rot_a, rot_b, t), _lerp_translation(tr_a, tr_b, t)
+    return first_rot, first_tr
+
+
 def _apply_edit(
     bvh: BvhFile,
     columns: dict[str, tuple[BvhJoint, int]],
@@ -277,6 +349,7 @@ def apply_bvh_pose_corrections(
     skipped: list[str] = []
     applied = 0
     seen: set[tuple[int, str]] = set()
+    tracks: dict[str, list[tuple[int, Quaternion, tuple[float, float, float] | None]]] = {}
     for raw_edit in pose_edits:
         frame, joint, rotation, translation = _validate_edit(
             raw_edit,
@@ -286,11 +359,26 @@ def apply_bvh_pose_corrections(
         if key in seen:
             raise ValueError("duplicate pose edit")
         seen.add(key)
-        reason = _apply_edit(
-            bvh, columns, mapping, frame, joint, rotation, translation,
-        )
+        tracks.setdefault(joint, []).append((frame, rotation, translation))
+
+    # 관절마다 키를 프레임 순서로 세우고, 창 안의 프레임에 보간한 값을 얹는다.
+    for joint, track in tracks.items():
+        track.sort(key=lambda item: item[0])
+        low = max(0, track[0][0] - POSE_EDIT_WINDOW + 1)
+        high = min(len(bvh.frames) - 1, track[-1][0] + POSE_EDIT_WINDOW - 1)
+        reason: str | None = None
+        for frame in range(low, high + 1):
+            sampled = sample_pose_track(track, frame)
+            if sampled is None:
+                continue
+            rotation, translation = sampled
+            reason = _apply_edit(
+                bvh, columns, mapping, frame, joint, rotation, translation,
+            )
+            if reason is not None:
+                break
         if reason is None:
-            applied += 1
+            applied += len(track)
         elif reason not in skipped:
             skipped.append(reason)
 
