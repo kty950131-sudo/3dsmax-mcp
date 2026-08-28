@@ -191,7 +191,9 @@ def test_build_artifacts_creates_four_fixed_outputs(tmp_path: Path) -> None:
     assert metadata["duration_seconds"] == 4.0
     assert metadata["editRevision"] == 3
     assert metadata["sha256"]["source"]
-    assert metadata["warnings"] == []
+    # 후처리 보고가 없으면 경고가 붙는다. 영상 갈래는 반드시 다리를 지나야 하는데
+    # 스튜디오 갈래가 원본 변환기를 쓰고 있어 몇 주 동안 조용히 빠져 있었다(08-28).
+    assert metadata["warnings"] == ["postprocess_missing"]
 
 
 def test_build_artifacts_preserves_valid_legacy_identity_tracking(tmp_path: Path) -> None:
@@ -477,3 +479,58 @@ def test_source_free_build_rejects_invalid_retained_thumbnails(
             retained_metadata=_retained_metadata(tmp_path),
             edit_revision=3,
         )
+
+
+def _rtmw3d_inputs(tmp_path: Path, backend: str = "OpenMMLab RTMW3D-L"):
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    body = tmp_path / "walk_rtmw3d.json"
+    body.write_text('{"schema":"artoke.rtmw3d.v1"}', encoding="utf-8")
+    bvh = tmp_path / "walk.bvh"
+    bvh.write_text(
+        "HIERARCHY\nROOT Pelvis\nMOTION\nFrames: 12\nFrame Time: 0.0333333333\n",
+        encoding="utf-8",
+    )
+    trace = tmp_path / "trace.json"
+    trace.write_text(json.dumps({"backend": backend}), encoding="utf-8")
+    return video, PipelineArtifacts(body, bvh, trace, 12)
+
+
+def _ffmpeg_stub(command, **kwargs):
+    Path(command[-1]).write_bytes(b"webp")
+    return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+
+def _metadata_for(tmp_path: Path, report: dict | None, backend: str = "OpenMMLab RTMW3D-L") -> dict:
+    video, pipeline = _rtmw3d_inputs(tmp_path, backend)
+    if report is not None:
+        pipeline.bvh.with_suffix(".postprocess.json").write_text(
+            json.dumps(report), encoding="utf-8"
+        )
+    build_artifacts(
+        video,
+        pipeline,
+        tmp_path / "result",
+        duration_seconds=4.0,
+        edit_revision=0,
+        process_runner=_ffmpeg_stub,
+    )
+    return json.loads((tmp_path / "result" / "metadata.json").read_text(encoding="utf-8"))
+
+
+def test_metadata_carries_the_postprocess_report_without_warning(tmp_path: Path) -> None:
+    metadata = _metadata_for(tmp_path, {"applied": True, "metrics": {"jitter": 1.2}})
+    assert metadata["postprocess"]["applied"] is True
+    assert metadata["warnings"] == []
+
+
+def test_metadata_warns_when_the_postprocess_fell_back(tmp_path: Path) -> None:
+    metadata = _metadata_for(tmp_path, {"applied": False, "error": "ImportError: numpy"})
+    assert metadata["warnings"] == ["postprocess_failed"]
+    assert metadata["postprocess"]["error"].startswith("ImportError")
+
+
+def test_metadata_does_not_warn_for_generated_motion(tmp_path: Path) -> None:
+    """키모도(문장) 갈래는 추출기를 지나지 않으므로 보고가 없는 것이 정상이다."""
+    metadata = _metadata_for(tmp_path, None, backend="NVIDIA Kimodo-SOMA-RP-v1.1")
+    assert metadata["warnings"] == []

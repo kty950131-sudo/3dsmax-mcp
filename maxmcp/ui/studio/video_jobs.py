@@ -8,7 +8,7 @@ import threading
 import uuid
 from typing import Any, Callable
 
-from maxmcp.rtmw3d.motion import convert_rtmw3d_file
+from maxmcp.worker.postprocess_bridge import convert_with_postprocess
 from maxmcp.rtmw3d.runtime import Rtmw3dReadiness, default_readiness
 from maxmcp.worker.motion_pipeline import MotionPipeline, PipelineCancelled
 
@@ -23,7 +23,10 @@ class VideoJobController:
         self,
         readiness: Callable[[], Rtmw3dReadiness] = default_readiness,
         process_factory: Callable[..., Any] = subprocess.Popen,
-        converter: Callable[[Path, Path], int] = convert_rtmw3d_file,
+        # 기본은 후처리 판이다. 여기만 원본 변환기로 남아 있어 스튜디오로 만든
+        # 결과에는 IK 재추정이 걸리지 않았다(2026-08-28 진단). 파이프라인 기본값과
+        # 같은 것을 쓴다 — 실패하면 다리가 알아서 원본 변환기로 물러난다.
+        converter: Callable[[Path, Path], int] = convert_with_postprocess,
     ) -> None:
         self._readiness = readiness
         self._process_factory = process_factory
