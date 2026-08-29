@@ -28,12 +28,18 @@ from pathlib import Path
 import subprocess
 from typing import Callable, Sequence
 
+# ⚠️ 서버가 받는 단계 이름은 닫힌 목록이다(script-market 의 schemas.ts,
+# workerHeartbeatSchema). 모르는 이름을 보내면 400 이 오고, runner.py 의
+# heartbeat_loop 은 409 가 아닌 오류에서 pipeline.cancel() 을 부른다. 즉 이름
+# 하나 잘못 보내면 작업 전체가 죽는다. 그래서 이 네 단계는 사람에게 "변환 중"
+# 하나로 보이게 두고, 진행률만 올린다 — 사장님도 오래 걸릴 때는 로딩 표시면
+# 된다고 하셨다(2026-08-29). 무슨 단계였는지는 보고 파일에 이름으로 남는다.
 # 진행률은 추출(15) 과 변환(65) 사이를 쓴다.
 _STAGE_PROGRESS = {
-    "isolating": 25,
-    "unreal-tracking": 35,
-    "unreal-export": 55,
-    "merging": 60,
+    "isolating": ("converting", 25),
+    "unreal-tracking": ("converting", 35),
+    "unreal-export": ("converting", 55),
+    "merging": ("converting", 60),
 }
 
 Runner = Callable[..., tuple[int, str, str]]
@@ -210,7 +216,7 @@ def apply_ue_hybrid(
     for stage, label, command, env in steps:
         if cancelled():
             return None
-        on_stage(stage, _STAGE_PROGRESS[stage])
+        on_stage(*_STAGE_PROGRESS[stage])
         try:
             code, out, err = runner(
                 command, env=env, cwd=str(readiness.market), timeout=deadline

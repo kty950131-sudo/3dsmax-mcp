@@ -327,3 +327,54 @@ def test_ingest_name_is_stable_for_the_same_job(tmp_path: Path) -> None:
         return runner.envs[1]["ARTOKE_UE_INGEST_NAME"]
 
     assert once() == once()
+
+
+# 서버가 받는 단계 이름은 닫힌 목록이다
+# (script-market 의 src/lib/motions/schemas.ts, workerHeartbeatSchema).
+ALLOWED_STAGES = {"downloading", "extracting", "converting", "validating", "uploading"}
+
+
+def test_reported_stages_are_names_the_server_accepts(tmp_path: Path) -> None:
+    """모르는 이름을 보내면 서버가 400 을 주고, 하트비트가 깨지면 작업이 취소된다.
+
+    runner.py 의 heartbeat_loop 는 409 가 아닌 오류에서 heartbeat_failed 를 세우고
+    pipeline.cancel() 을 부른다. 즉 이름 하나 잘못 보내면 작업 전체가 죽는다.
+    """
+    readiness = _installed(tmp_path)
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"v")
+    body = _tracking(tmp_path / "walk_rtmw3d.json", frames=189)
+    workspace = tmp_path / "job"
+    workspace.mkdir()
+    runner = Recorder(writes={2: str(workspace / "walk_performance.json"),
+                              3: str(workspace / "walk_ue_hybrid.json")})
+    seen: list[tuple[str, int]] = []
+
+    apply_ue_hybrid(video, body, workspace, readiness,
+                    lambda stage, progress: seen.append((stage, progress)),
+                    lambda: False, runner=runner)
+
+    assert seen, "오래 걸리는 작업이므로 진행을 알려야 한다"
+    unknown = {stage for stage, _ in seen} - ALLOWED_STAGES
+    assert unknown == set(), f"서버가 모르는 단계 이름: {unknown}"
+
+
+def test_reported_progress_only_moves_forward(tmp_path: Path) -> None:
+    """되돌아가는 진행률은 멈춘 것처럼 보인다. 추출 15 와 변환 65 사이에 들어야 한다."""
+    readiness = _installed(tmp_path)
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"v")
+    body = _tracking(tmp_path / "walk_rtmw3d.json", frames=189)
+    workspace = tmp_path / "job"
+    workspace.mkdir()
+    runner = Recorder(writes={2: str(workspace / "walk_performance.json"),
+                              3: str(workspace / "walk_ue_hybrid.json")})
+    seen: list[tuple[str, int]] = []
+
+    apply_ue_hybrid(video, body, workspace, readiness,
+                    lambda stage, progress: seen.append((stage, progress)),
+                    lambda: False, runner=runner)
+
+    values = [progress for _, progress in seen]
+    assert values == sorted(values)
+    assert min(values) > 15 and max(values) < 65
