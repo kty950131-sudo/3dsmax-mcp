@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -150,7 +151,14 @@ def apply_ue_hybrid(
     crop = workspace / f"{stem}_subject.mp4"
     performance = workspace / f"{stem}_performance.json"
     hybrid = workspace / f"{stem}_ue_hybrid.json"
-    ingest_name = "".join(ch for ch in stem.title() if ch.isalnum()) or "Subject"
+    # ue-process-footage.py 는 같은 이름의 캡처 데이터가 있으면 재사용한다. 이름이
+    # 영상 내용과 무관하면 다른 영상을 넣고도 낡은 푸티지를 쓰게 된다. 그래서 이름에
+    # 지문을 붙인다 — 같은 작업이면 같고, 영상이 바뀌면 달라진다.
+    label = "".join(ch for ch in stem.title() if ch.isalnum()) or "Subject"
+    fingerprint = hashlib.sha256(
+        f"{video.resolve()}|{frame_count}|{fps}".encode("utf-8")
+    ).hexdigest()[:8]
+    ingest_name = f"{label}{fingerprint}"
 
     # 언리얼 커맨드릿은 부모 환경을 물려받는다. 스크립트가 상수 대신 이 값들을 읽는다.
     unreal_env = {

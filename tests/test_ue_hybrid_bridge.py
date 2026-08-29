@@ -283,3 +283,47 @@ def test_a_timed_out_step_falls_back_instead_of_hanging(tmp_path: Path) -> None:
     report = json.loads((workspace / "walk_ue_hybrid.report.json").read_text(encoding="utf-8"))
     assert report["applied"] is False
     assert "시간" in report["reason"]
+
+
+def test_ingest_name_changes_when_the_footage_changes(tmp_path: Path) -> None:
+    """ue-process-footage.py 는 같은 이름의 캡처 데이터가 있으면 재사용한다.
+
+    이름이 영상 내용과 무관하면, 다른 영상을 넣고도 낡은 푸티지를 쓴다.
+    """
+    readiness = _installed(tmp_path)
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"v")
+    workspace = tmp_path / "job"
+    workspace.mkdir()
+
+    def name_for(frames: int) -> str:
+        body = _tracking(tmp_path / "walk_rtmw3d.json", frames=frames)
+        runner = Recorder(writes={2: str(workspace / "walk_performance.json"),
+                                  3: str(workspace / "walk_ue_hybrid.json")})
+        apply_ue_hybrid(video, body, workspace, readiness,
+                        lambda *_: None, lambda: False, runner=runner)
+        return runner.envs[1]["ARTOKE_UE_INGEST_NAME"]
+
+    first, second = name_for(10), name_for(11)
+    assert first != second
+    # 언리얼 애셋 이름이라 영문·숫자만 쓴다
+    assert first.isalnum()
+
+
+def test_ingest_name_is_stable_for_the_same_job(tmp_path: Path) -> None:
+    """같은 작업을 다시 돌리면 이름이 같아야 한다 — 재사용이 그때는 이득이다."""
+    readiness = _installed(tmp_path)
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"v")
+    workspace = tmp_path / "job"
+    workspace.mkdir()
+    body = _tracking(tmp_path / "walk_rtmw3d.json", frames=10)
+
+    def once() -> str:
+        runner = Recorder(writes={2: str(workspace / "walk_performance.json"),
+                                  3: str(workspace / "walk_ue_hybrid.json")})
+        apply_ue_hybrid(video, body, workspace, readiness,
+                        lambda *_: None, lambda: False, runner=runner)
+        return runner.envs[1]["ARTOKE_UE_INGEST_NAME"]
+
+    assert once() == once()
