@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -229,3 +230,56 @@ def test_stops_between_steps_when_cancelled(tmp_path: Path) -> None:
 
     assert result is None
     assert runner.calls == []
+
+
+def test_unreal_steps_carry_a_generous_deadline(tmp_path: Path) -> None:
+    """언리얼이 멈추면 워커가 영영 붙잡힌다. 실행 중에는 취소도 못 본다.
+
+    제한은 넉넉해야 한다 — 10분으로 감쌌다가 처리 도중에 끊긴 적이 있다
+    (2026-08-21). 실측이 프레임당 3.3초이므로 그 열 배를 준다.
+    """
+    readiness = _installed(tmp_path)
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"v")
+    body = _tracking(tmp_path / "walk_rtmw3d.json", frames=189, fps=30.0)
+    workspace = tmp_path / "job"
+    workspace.mkdir()
+    timeouts: list[float | None] = []
+
+    def runner(command, env=None, timeout=None, **_options):
+        timeouts.append(timeout)
+        index = len(timeouts) - 1
+        if index == 2:
+            (workspace / "walk_performance.json").write_text("{}", encoding="utf-8")
+        if index == 3:
+            (workspace / "walk_ue_hybrid.json").write_text("{}", encoding="utf-8")
+        return 0, "", ""
+
+    apply_ue_hybrid(video, body, workspace, readiness,
+                    lambda *_: None, lambda: False, runner=runner)
+
+    assert all(t and t > 0 for t in timeouts)
+    # 189프레임 x 3.3초 x 10 = 6237초. 그보다 짧으면 정상 처리를 끊는다
+    assert timeouts[1] >= 189 * 33
+    # 아무리 짧은 영상이어도 최소 한 시간은 준다 (기동만 4~11분이다)
+    assert min(timeouts) >= 3600
+
+
+def test_a_timed_out_step_falls_back_instead_of_hanging(tmp_path: Path) -> None:
+    readiness = _installed(tmp_path)
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"v")
+    body = _tracking(tmp_path / "walk_rtmw3d.json")
+    workspace = tmp_path / "job"
+    workspace.mkdir()
+
+    def runner(command, env=None, timeout=None, **_options):
+        raise subprocess.TimeoutExpired(list(command), timeout or 0)
+
+    result = apply_ue_hybrid(video, body, workspace, readiness,
+                             lambda *_: None, lambda: False, runner=runner)
+
+    assert result is None
+    report = json.loads((workspace / "walk_ue_hybrid.report.json").read_text(encoding="utf-8"))
+    assert report["applied"] is False
+    assert "시간" in report["reason"]

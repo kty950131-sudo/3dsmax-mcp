@@ -37,6 +37,12 @@ _STAGE_PROGRESS = {
 
 Runner = Callable[..., tuple[int, str, str]]
 
+# 실측이 프레임당 3.3초다(193프레임 629초, 2026-08-21). 열 배를 준다.
+# 짧은 영상이라도 기동에만 4~11분이 드니 바닥을 한 시간으로 둔다.
+# ⚠️ 10분으로 감쌌다가 처리 도중에 끊긴 적이 있다. 넉넉해야 한다.
+_SECONDS_PER_FRAME = 33.0
+_MIN_DEADLINE_SECONDS = 3600.0
+
 
 @dataclass(frozen=True)
 class UeHybridReadiness:
@@ -88,7 +94,7 @@ def default_ue_readiness(project_root: Path | None = None) -> UeHybridReadiness:
     )
 
 
-def _run(command: Sequence[str], env=None, **_options) -> tuple[int, str, str]:
+def _run(command: Sequence[str], env=None, timeout=None, **_options) -> tuple[int, str, str]:
     finished = subprocess.run(
         list(command),
         capture_output=True,
@@ -96,6 +102,7 @@ def _run(command: Sequence[str], env=None, **_options) -> tuple[int, str, str]:
         encoding="utf-8",
         errors="replace",
         env=env,
+        timeout=timeout,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return finished.returncode, finished.stdout or "", finished.stderr or ""
@@ -157,6 +164,8 @@ def apply_ue_hybrid(
         "ARTOKE_UE_PERFORMANCE": f"/Game/Artoke/PF_{ingest_name}",
         "ARTOKE_UE_OUT": str(performance),
     }
+    # 언리얼이 멈추면 워커가 영영 붙잡힌다. 실행 중에는 취소도 못 본다.
+    deadline = max(_MIN_DEADLINE_SECONDS, frame_count * _SECONDS_PER_FRAME)
     editor_base = [str(readiness.editor), str(readiness.project), "-run=pythonscript"]
     common = ["-unattended", "-nosplash", "-stdout"]
 
@@ -194,7 +203,13 @@ def apply_ue_hybrid(
         if cancelled():
             return None
         on_stage(stage, _STAGE_PROGRESS[stage])
-        code, out, err = runner(command, env=env, cwd=str(readiness.market))
+        try:
+            code, out, err = runner(
+                command, env=env, cwd=str(readiness.market), timeout=deadline
+            )
+        except subprocess.TimeoutExpired:
+            give_up(label, f"{label} 가 제한 시간 {int(deadline)}초를 넘겼습니다")
+            return None
         if code != 0:
             give_up(label, err or out or f"{label} 가 {code} 로 끝났습니다")
             return None
