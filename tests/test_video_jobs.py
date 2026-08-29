@@ -112,3 +112,17 @@ def test_second_running_job_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="실행 중"):
         controller.start(payload)
     controller.cancel(controller.current_id)
+
+
+def test_studio_defaults_to_the_postprocess_converter() -> None:
+    """후처리를 건너뛰는 변환기를 기본값으로 두면 IK 재추정이 통째로 빠진다.
+
+    실제로 2026-08-11 부터 08-28 까지 그 상태였다 — 08-24 에 다리를 배선하면서
+    `MotionPipeline` 기본값만 바꾸고, 그 값을 덮어쓰는 이 갈래를 놓쳤다.
+    """
+    import inspect
+
+    from maxmcp.ui.studio.video_jobs import VideoJobController
+
+    default = inspect.signature(VideoJobController.__init__).parameters["converter"].default
+    assert default.__name__ == "convert_with_postprocess"

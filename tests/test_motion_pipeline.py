@@ -155,3 +155,125 @@ def test_communicate_failure_terminates_and_waits_before_release(tmp_path: Path)
     with pytest.raises(OSError):
         pipeline.run(video, tmp_path / "job", lambda *_: None, lambda: False)
     assert calls == ["terminate", "wait"]
+
+
+def test_pipeline_uses_the_unreal_pose_when_the_bridge_succeeds(tmp_path: Path) -> None:
+    """언리얼이 있으면 변환기는 합친 파일을 읽어야 한다 — 그래야 뼈 길이가 산다."""
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"video")
+    hybrid = tmp_path / "job" / "walk_ue_hybrid.json"
+    seen: list[Path] = []
+
+    class Process:
+        returncode = 0
+
+        def communicate(self):
+            Path(command[-1]).write_text(
+                json.dumps({"schema": "artoke.rtmw3d.v1", "fps": 30, "frames": []}),
+                encoding="utf-8",
+            )
+            return "", ""
+
+    command: list[str] = []
+
+    def process_factory(args, **_kwargs):
+        command[:] = args
+        return Process()
+
+    def converter(source: Path, target: Path) -> int:
+        seen.append(source)
+        target.write_text("HIERARCHY\nMOTION\n", encoding="utf-8")
+        return 7
+
+    def hybrid_bridge(_video, _body, workspace, _on_stage, _cancelled):
+        workspace.mkdir(parents=True, exist_ok=True)
+        hybrid.write_text("{}", encoding="utf-8")
+        return hybrid
+
+    pipeline = MotionPipeline(
+        _readiness(tmp_path),
+        process_factory=process_factory,
+        converter=converter,
+        hybrid=hybrid_bridge,
+    )
+    result = pipeline.run(video, tmp_path / "job", lambda *_: None, lambda: False)
+
+    assert seen == [hybrid]
+    trace = json.loads(result.trace.read_text(encoding="utf-8"))
+    assert trace["pose_source"] == "unreal-hybrid"
+
+
+def test_pipeline_falls_back_to_rtmw3d_when_the_bridge_declines(tmp_path: Path) -> None:
+    """언리얼이 없거나 깨져도 워커는 끝까지 간다."""
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"video")
+    seen: list[Path] = []
+
+    class Process:
+        returncode = 0
+
+        def communicate(self):
+            Path(command[-1]).write_text(
+                json.dumps({"schema": "artoke.rtmw3d.v1", "fps": 30, "frames": []}),
+                encoding="utf-8",
+            )
+            return "", ""
+
+    command: list[str] = []
+
+    def process_factory(args, **_kwargs):
+        command[:] = args
+        return Process()
+
+    def converter(source: Path, target: Path) -> int:
+        seen.append(source)
+        target.write_text("HIERARCHY\nMOTION\n", encoding="utf-8")
+        return 7
+
+    pipeline = MotionPipeline(
+        _readiness(tmp_path),
+        process_factory=process_factory,
+        converter=converter,
+        hybrid=lambda *_args: None,
+    )
+    result = pipeline.run(video, tmp_path / "job", lambda *_: None, lambda: False)
+
+    assert seen == [result.rtmw3d_json]
+    trace = json.loads(result.trace.read_text(encoding="utf-8"))
+    assert trace["pose_source"] == "rtmw3d"
+
+
+def test_pipeline_survives_a_bridge_that_raises(tmp_path: Path) -> None:
+    """다리가 터져도 파이프라인이 같이 죽으면 안 된다."""
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"video")
+
+    class Process:
+        returncode = 0
+
+        def communicate(self):
+            Path(command[-1]).write_text(
+                json.dumps({"schema": "artoke.rtmw3d.v1", "fps": 30, "frames": []}),
+                encoding="utf-8",
+            )
+            return "", ""
+
+    command: list[str] = []
+
+    def process_factory(args, **_kwargs):
+        command[:] = args
+        return Process()
+
+    def boom(*_args):
+        raise RuntimeError("언리얼이 터졌다")
+
+    pipeline = MotionPipeline(
+        _readiness(tmp_path),
+        process_factory=process_factory,
+        converter=lambda _s, t: (t.write_text("HIERARCHY\n", encoding="utf-8"), 3)[1],
+        hybrid=boom,
+    )
+    result = pipeline.run(video, tmp_path / "job", lambda *_: None, lambda: False)
+
+    trace = json.loads(result.trace.read_text(encoding="utf-8"))
+    assert trace["pose_source"] == "rtmw3d"

@@ -243,6 +243,13 @@ def _write_metadata(
         metadata["postprocess"] = report
         if report.get("target_switch_frames"):
             warnings.append("target_switch_detected")
+        if not report.get("applied"):
+            warnings.append("postprocess_failed")
+    elif "RTMW3D" in str(trace.get("backend", "")):
+        # 영상 갈래는 반드시 후처리 다리를 지난다. 다리는 실패해도 보고를 남기므로
+        # 보고가 아예 없다는 것은 **다리를 안 지났다**는 뜻이다. 그것을 조용히 넘겨
+        # 몇 주 동안 원본이 그대로 나갔다(2026-08-28 진단). 이제는 눈에 띄게 한다.
+        warnings.append("postprocess_missing")
     metadata_path.write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2),
         encoding="utf-8",

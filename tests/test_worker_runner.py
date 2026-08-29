@@ -18,6 +18,7 @@ from maxmcp.worker.artifacts import (
     MAX_TRACKING_DECOMPRESSED_BYTES,
     LocalArtifact,
 )
+from maxmcp.worker.kimodo_pipeline import KimodoInfraUnavailable
 from maxmcp.worker.motion_pipeline import PipelineArtifacts, PipelineCancelled
 from maxmcp.worker.runner import ArtokeWorker, RunResult
 
@@ -508,6 +509,62 @@ def test_pipeline_failure_is_reported_with_safe_code(tmp_path: Path) -> None:
     worker = ArtokeWorker(
         api, lambda: readiness(tmp_path), tmp_path / "cache",
         pipeline_factory=lambda _report: Pipeline(),
+        downloader=download, artifact_builder=build, uploader=upload,
+    )
+
+    assert worker.run_once() is RunResult.FAILED
+    assert api.failed == (JOB_ID, "pipeline_failed")
+
+
+def test_kimodo_infra_unavailable_requeues_without_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    api = Api()
+    api.claim = lambda: ClaimedJob(
+        JOB_ID, "prompt.kimodo.json", "owner/job/source/prompt.kimodo.json", "https://signed", 3.0,
+    )
+    download, build, upload, _ = dependencies(tmp_path)
+
+    class FakeKimodo:
+        def run(self, *_args):
+            raise KimodoInfraUnavailable("docker unavailable")
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr("maxmcp.worker.runner.KimodoPipeline", FakeKimodo)
+    worker = ArtokeWorker(
+        api, lambda: readiness(tmp_path), tmp_path / "cache",
+        downloader=download, artifact_builder=build, uploader=upload,
+    )
+
+    assert worker.run_once() is RunResult.BLOCKED
+    assert api.failed is None
+    assert capsys.readouterr().err == f"Kimodo infra unavailable, requeueing job {JOB_ID}\n"
+
+
+def test_kimodo_runtime_error_is_reported_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = Api()
+    api.claim = lambda: ClaimedJob(
+        JOB_ID, "prompt.kimodo.json", "owner/job/source/prompt.kimodo.json", "https://signed", 3.0,
+    )
+    download, build, upload, _ = dependencies(tmp_path)
+
+    class FakeKimodo:
+        def run(self, *_args):
+            raise RuntimeError("kimodo failed")
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr("maxmcp.worker.runner.KimodoPipeline", FakeKimodo)
+    worker = ArtokeWorker(
+        api, lambda: readiness(tmp_path), tmp_path / "cache",
         downloader=download, artifact_builder=build, uploader=upload,
     )
 

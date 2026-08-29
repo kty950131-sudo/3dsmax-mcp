@@ -10,7 +10,7 @@ import threading
 import traceback
 from typing import Any, Callable
 
-from maxmcp.worker.kimodo_pipeline import KimodoPipeline, is_prompt_source
+from maxmcp.worker.kimodo_pipeline import KimodoInfraUnavailable, KimodoPipeline, is_prompt_source
 from maxmcp.worker.postprocess_bridge import convert_with_postprocess
 from maxmcp.rtmw3d.runtime import Rtmw3dReadiness, default_readiness
 from maxmcp.worker.api_client import ArtokeApiClient, UploadTarget, WorkerApiError
@@ -330,6 +330,9 @@ class ArtokeWorker:
             print(f"[artoke-worker] job {claim.job_id} failed at {phase}: {exc}", file=sys.stderr)
             self._api.finish_failed(claim.job_id, phase)
             return RunResult.FAILED
+        except KimodoInfraUnavailable:
+            print(f"Kimodo infra unavailable, requeueing job {claim.job_id}", file=sys.stderr)
+            return RunResult.BLOCKED
         except Exception:
             if lease_lost.is_set():
                 return RunResult.LEASE_LOST
