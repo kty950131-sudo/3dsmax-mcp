@@ -11,6 +11,7 @@ import threading
 from typing import Any, Callable
 
 from maxmcp.worker.postprocess_bridge import convert_with_postprocess
+from maxmcp.worker.ue_hybrid_bridge import apply_ue_hybrid, default_ue_readiness
 from maxmcp.rtmw3d.runtime import Rtmw3dReadiness, build_rtmw3d_command
 
 
@@ -24,6 +25,14 @@ class PipelineArtifacts:
     bvh: Path
     trace: Path
     frame_count: int
+    pose_source: str = "rtmw3d"
+
+
+def _default_hybrid(video, body, workspace, on_stage, cancelled):
+    """언리얼이 깔려 있으면 자세를 언리얼 것으로 바꾼다. 없으면 그냥 물러난다."""
+    return apply_ue_hybrid(
+        video, body, workspace, default_ue_readiness(), on_stage, cancelled
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -43,10 +52,13 @@ class MotionPipeline:
         process_factory: Callable[..., Any] = subprocess.Popen,
         # 기본은 후처리 판. 실패하면 다리가 원래 변환기로 물러난다.
         converter: Callable[[Path, Path], int] = convert_with_postprocess,
+        # 언리얼 자세를 얹는 다리. None 을 돌려주면 RTMW3D 결과를 그대로 쓴다.
+        hybrid: Callable[..., Path | None] = _default_hybrid,
     ) -> None:
         self._readiness = readiness
         self._process_factory = process_factory
         self._converter = converter
+        self._hybrid = hybrid
         self._lock = threading.Lock()
         self._process: Any = None
         self._cancelled = threading.Event()
@@ -108,8 +120,21 @@ class MotionPipeline:
         if not body_path.is_file():
             raise RuntimeError("RTMW3D 추출기가 관절 JSON을 만들지 않았습니다")
 
+        # 언리얼 자세를 얹어 본다. 뼈 길이 흔들림을 없애는 것이 목적이고, 안 되면
+        # RTMW3D 결과를 그대로 쓴다 — 이 단계는 품질을 올리는 것이지 없으면 안 되는
+        # 것이 아니다. 다리가 터져도 파이프라인은 끝까지 간다.
+        pose_path, pose_source = body_path, "rtmw3d"
+        try:
+            merged = self._hybrid(video_path, body_path, workspace, on_stage, cancelled)
+        except Exception:
+            merged = None
+        if merged is not None and Path(merged).is_file():
+            pose_path, pose_source = Path(merged), "unreal-hybrid"
+        if self._cancelled.is_set() or cancelled():
+            raise PipelineCancelled()
+
         on_stage("converting", 65)
-        frame_count = self._converter(body_path, bvh_path)
+        frame_count = self._converter(pose_path, bvh_path)
         if self._cancelled.is_set() or cancelled():
             raise PipelineCancelled()
         if not bvh_path.is_file():
@@ -119,6 +144,7 @@ class MotionPipeline:
         trace = {
             "backend": "OpenMMLab RTMW3D-L",
             "frame_count": frame_count,
+            "pose_source": pose_source,
             "sha256": {
                 "rtmw3d": _sha256(body_path),
                 "bvh": _sha256(bvh_path),
@@ -128,4 +154,4 @@ class MotionPipeline:
             json.dumps(trace, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        return PipelineArtifacts(body_path, bvh_path, trace_path, frame_count)
+        return PipelineArtifacts(body_path, bvh_path, trace_path, frame_count, pose_source)
