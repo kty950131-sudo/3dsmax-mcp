@@ -157,6 +157,12 @@ def apply_ue_hybrid(
     crop = workspace / f"{stem}_subject.mp4"
     performance = workspace / f"{stem}_performance.json"
     hybrid = workspace / f"{stem}_ue_hybrid.json"
+    # 언리얼 커맨드릿은 일을 다 하고도 0 이 아닌 코드를 낸다(2026-08-29 실측: 189프레임을
+    # 끝까지 처리하고 정상 종료했는데 코드가 더러웠다 — 엔진 기본 콘텐츠의 셰이더
+    # 컴파일 오류가 섞인다). 그래서 코드가 아니라 남긴 결과물로 판정한다.
+    done_marker = workspace / f"{stem}_ue_done.json"
+    done_marker.unlink(missing_ok=True)
+    performance.unlink(missing_ok=True)
     # ue-process-footage.py 는 같은 이름의 캡처 데이터가 있으면 재사용한다. 이름이
     # 영상 내용과 무관하면 다른 영상을 넣고도 낡은 푸티지를 쓰게 된다. 그래서 이름에
     # 지문을 붙인다 — 같은 작업이면 같고, 영상이 바뀌면 달라진다.
@@ -177,13 +183,31 @@ def apply_ue_hybrid(
         "ARTOKE_UE_FRAME_COUNT": str(frame_count),
         "ARTOKE_UE_PERFORMANCE": f"/Game/Artoke/PF_{ingest_name}",
         "ARTOKE_UE_OUT": str(performance),
+        "ARTOKE_UE_DONE": str(done_marker),
     }
     # 언리얼이 멈추면 워커가 영영 붙잡힌다. 실행 중에는 취소도 못 본다.
     deadline = max(_MIN_DEADLINE_SECONDS, frame_count * _SECONDS_PER_FRAME)
     editor_base = [str(readiness.editor), str(readiness.project), "-run=pythonscript"]
     common = ["-unattended", "-nosplash", "-stdout"]
 
-    steps: list[tuple[str, str, list[str], dict | None]] = [
+    def body_tracked() -> tuple[bool, str]:
+        if not done_marker.is_file():
+            return False, "언리얼이 처리 표시를 남기지 않았습니다"
+        try:
+            done = json.loads(done_marker.read_text(encoding="utf-8"))
+        except ValueError:
+            return False, "언리얼 처리 표시를 읽지 못했습니다"
+        if not done.get("body") or int(done.get("frames") or 0) <= 0:
+            return False, "언리얼이 몸 데이터를 내놓지 않았습니다"
+        return True, ""
+
+    def exported() -> tuple[bool, str]:
+        if not performance.is_file():
+            return False, "언리얼이 자세 JSON 을 내보내지 않았습니다"
+        return True, ""
+
+    # (단계, 이름, 명령, 환경, 결과물 확인). 확인이 있으면 종료 코드를 보지 않는다.
+    steps: list[tuple[str, str, list[str], dict | None, Callable[[], tuple[bool, str]] | None]] = [
         # 언리얼은 화면에 사람이 여럿이면 누구를 따라갈지 고를 수단이 없다. 그래서
         # 주인공만 남긴 영상을 만들어 넣는다. cv2 의 mp4v 는 Capture Manager 가
         # 거부하므로 crop-subject.py 가 H.264 로 다시 굽는다.
@@ -193,27 +217,27 @@ def apply_ue_hybrid(
             "--input", str(video),
             "--output", str(crop),
             "--mode", "follow", "--isolate",
-        ], None),
+        ], None, None),
         # 처리에는 D3D12 가 필요하다. 커맨드릿은 기본으로 렌더링을 끄고 돌아서
         # GDynamicRHI 가 없고, 그러면 can_process 가 False 로 떨어진다.
         ("unreal-tracking", "ue-process-footage.py", [
             *editor_base,
             f"-script={readiness.scripts / 'ue-process-footage.py'}",
             *common, "-AllowCommandletRendering", "-dx12",
-        ], unreal_env),
+        ], unreal_env, body_tracked),
         # 내보내기는 저장된 결과를 읽기만 하므로 -nullrhi 로 충분하고 그만큼 빠르다.
         ("unreal-export", "ue-export-performance.py", [
             *editor_base,
             f"-script={readiness.scripts / 'ue-export-performance.py'}",
             *common, "-nullrhi",
-        ], unreal_env),
+        ], unreal_env, exported),
         ("merging", "ue-hybrid-merge.mts", [
             "npx", "tsx", str(readiness.scripts / "ue-hybrid-merge.mts"),
             str(performance), str(rtmw3d_json), str(hybrid),
-        ], {**os.environ, "npm_config_yes": "true"}),
+        ], {**os.environ, "npm_config_yes": "true"}, None),
     ]
 
-    for stage, label, command, env in steps:
+    for stage, label, command, env, produced in steps:
         if cancelled():
             return None
         on_stage(*_STAGE_PROGRESS[stage])
@@ -224,8 +248,14 @@ def apply_ue_hybrid(
         except subprocess.TimeoutExpired:
             give_up(label, f"{label} 가 제한 시간 {int(deadline)}초를 넘겼습니다")
             return None
-        if code != 0:
-            give_up(label, err or out or f"{label} 가 {code} 로 끝났습니다")
+        if produced is None:
+            if code != 0:
+                give_up(label, err or out or f"{label} 가 {code} 로 끝났습니다")
+                return None
+            continue
+        ok, why = produced()
+        if not ok:
+            give_up(label, f"{why} (종료 코드 {code}) " + (err or out or "").strip()[:400])
             return None
 
     # 반환 코드가 0 이어도 파일이 없으면 성공이 아니다. 언리얼 커맨드릿은 실패해도

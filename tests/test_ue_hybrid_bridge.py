@@ -60,6 +60,11 @@ class Recorder:
         index = len(self.calls)
         self.calls.append(list(command))
         self.envs.append(dict(env or {}))
+        # 언리얼 처리 단계는 종료 코드가 아니라 이 표시 파일로 판정된다
+        if "ue-process-footage.py" in " ".join(command) and index != self._fail_at:
+            Path(env["ARTOKE_UE_DONE"]).write_text(
+                json.dumps({"body": True, "frames": 189}), encoding="utf-8"
+            )
         target = self._writes.get(index)
         if target:
             Path(target).write_text("{}", encoding="utf-8")
@@ -378,3 +383,79 @@ def test_reported_progress_only_moves_forward(tmp_path: Path) -> None:
     values = [progress for _, progress in seen]
     assert values == sorted(values)
     assert min(values) > 15 and max(values) < 65
+
+
+def test_unreal_success_is_judged_by_the_work_product_not_the_exit_code(tmp_path: Path) -> None:
+    """언리얼 커맨드릿은 일을 다 하고도 0 이 아닌 코드를 낸다(2026-08-29 실측).
+
+    189프레임을 끝까지 처리하고 'LogExit: Exiting.' 으로 정상 종료했는데도 코드가
+    0 이 아니었다. 엔진 기본 콘텐츠의 셰이더 컴파일 오류가 코드를 오염시킨다.
+    그래서 언리얼 두 단계는 코드가 아니라 남긴 결과물로 판정한다.
+    """
+    readiness = _installed(tmp_path)
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"v")
+    body = _tracking(tmp_path / "walk_rtmw3d.json", frames=189)
+    workspace = tmp_path / "job"
+    workspace.mkdir()
+
+    def runner(command, env=None, timeout=None, **_options):
+        text = " ".join(command)
+        if "ue-process-footage.py" in text:
+            Path(env["ARTOKE_UE_DONE"]).write_text(
+                json.dumps({"body": True, "frames": 189}), encoding="utf-8"
+            )
+            return 3, "", "shader warnings"     # 일은 했는데 코드가 더럽다
+        if "ue-export-performance.py" in text:
+            (workspace / "walk_performance.json").write_text("{}", encoding="utf-8")
+            return 1, "", "shader warnings"
+        if "ue-hybrid-merge.mts" in text:
+            (workspace / "walk_ue_hybrid.json").write_text("{}", encoding="utf-8")
+        return 0, "", ""
+
+    result = apply_ue_hybrid(video, body, workspace, readiness,
+                             lambda *_: None, lambda: False, runner=runner)
+
+    assert result == workspace / "walk_ue_hybrid.json"
+
+
+def test_unreal_failure_is_caught_when_it_leaves_nothing(tmp_path: Path) -> None:
+    """코드를 안 보는 대신, 결과물이 없으면 확실히 실패로 본다."""
+    readiness = _installed(tmp_path)
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"v")
+    body = _tracking(tmp_path / "walk_rtmw3d.json")
+    workspace = tmp_path / "job"
+    workspace.mkdir()
+
+    def runner(command, env=None, timeout=None, **_options):
+        return 0, "", ""      # 코드는 0 인데 아무것도 안 남겼다
+
+    result = apply_ue_hybrid(video, body, workspace, readiness,
+                             lambda *_: None, lambda: False, runner=runner)
+
+    assert result is None
+    report = json.loads((workspace / "walk_ue_hybrid.report.json").read_text(encoding="utf-8"))
+    assert "ue-process-footage" in report["failed_step"]
+
+
+def test_unreal_reports_when_the_body_track_came_back_empty(tmp_path: Path) -> None:
+    """표시 파일이 있어도 몸 데이터가 없으면 얹을 자세가 없다."""
+    readiness = _installed(tmp_path)
+    video = tmp_path / "walk.mp4"
+    video.write_bytes(b"v")
+    body = _tracking(tmp_path / "walk_rtmw3d.json")
+    workspace = tmp_path / "job"
+    workspace.mkdir()
+
+    def runner(command, env=None, timeout=None, **_options):
+        if "ue-process-footage.py" in " ".join(command):
+            Path(env["ARTOKE_UE_DONE"]).write_text(
+                json.dumps({"body": False, "frames": 0}), encoding="utf-8"
+            )
+        return 0, "", ""
+
+    assert apply_ue_hybrid(video, body, workspace, readiness,
+                           lambda *_: None, lambda: False, runner=runner) is None
+    report = json.loads((workspace / "walk_ue_hybrid.report.json").read_text(encoding="utf-8"))
+    assert "몸" in report["reason"]
