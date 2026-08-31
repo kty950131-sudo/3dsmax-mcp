@@ -138,7 +138,7 @@ def _polished_names(directory: str) -> set:
 
 
 def scan(folder: str) -> list[Clip]:
-    """폴더와 그 하위의 .bvh 를 모두 훑는다. ``*_biped.bvh`` 는 변환 산출물이라 제외한다.
+    """폴더와 그 하위의 .bvh 와 .fbx 를 모두 훑는다. ``*_biped.bvh`` 는 변환 산출물이라 제외한다.
 
     **하위 폴더를 따라 들어가고, 정션(바로가기)도 따라간다.** 라이브러리를 한
     루트 아래에 정션으로 모아 두는 구성(ani_ / ani_2)에서는 루트에 .bvh 가 한
@@ -157,10 +157,20 @@ def scan(folder: str) -> list[Clip]:
         polished = _polished_names(dirpath)
         relative = os.path.relpath(dirpath, root_abs)
         source = "" if relative == "." else relative.split(os.sep)[0]
+        lowered = {n.lower() for n in filenames}
         for name in sorted(filenames):
-            if not name.lower().endswith(".bvh"):
+            lower = name.lower()
+            if lower.endswith(".bvh"):
+                stem = name[: -len(".bvh")]
+            elif lower.endswith(".fbx"):
+                # FBX 도 카드로 세운다(2026-08-30). 같은 이름의 .bvh 가 곁에 있으면
+                # 변환이 끝난 것이라 그 카드 하나로 충분하다 — 둘 다 세우면 같은
+                # 클립이 두 장 뜬다. 열 때 fbx_import 가 곁에 .bvh 를 만든다.
+                stem = name[: -len(".fbx")]
+                if (stem + ".bvh").lower() in lowered:
+                    continue
+            else:
                 continue
-            stem = name[: -len(".bvh")]
             if stem.lower().endswith("_biped"):
                 continue
             path = os.path.join(dirpath, name)

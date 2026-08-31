@@ -479,7 +479,7 @@ label.check { display: inline-flex; align-items: center; gap: 5px; cursor: point
       <h2>임포트</h2>
       <div class="row"><label>대상</label><select data-field="target"><option value="">새 바이패드 생성</option></select></div>
       <div class="row"><label>이름</label><input type="text" data-field="name" value="" placeholder="비우면 Bip001"></div>
-      <div class="row"><label>배치 간격</label><input type="number" data-field="spacing" value="120" min="0" max="2000" step="10"></div>
+      <div class="row"><label>배치 간격</label><input type="number" data-field="spacing" value="0" min="0" max="2000" step="10"></div>
       <div class="row">
         <label class="check"><input type="checkbox" data-field="convert" checked> kimodo 변환</label>
         <label class="check"><input type="checkbox" data-field="mirror"> 미러</label>
@@ -1142,7 +1142,7 @@ function loadClipsFromBridge(selectPath) {
       // 경로를 고쳐야 하는 경우와 파일을 넣어야 하는 경우는 할 일이 다르다.
       setStatus("그런 폴더가 없습니다: " + folder, "error");
     } else {
-      setStatus("폴더에 .bvh 가 없습니다: " + folder, "error");
+      setStatus("폴더에 .bvh/.fbx 가 없습니다: " + folder, "error");
     }
   });
 }

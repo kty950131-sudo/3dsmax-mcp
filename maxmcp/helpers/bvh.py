@@ -349,6 +349,83 @@ def _write_axis_values(joint: BvhJoint, row: list, start: int, suffix: str, valu
             row[start + index] = axes[channel[0].upper()]
 
 
+def zup_to_yup(bvh: BvhFile) -> BvhFile:
+    """Z-up 골격을 Y-up 으로 돌린다. 이미 Y-up 이면 그대로 둔다.
+
+    Max Biped 를 Blender 로 내보내면 뼈가 Z 축을 따라 눕는다 — 척추가 위(+Y)가
+    아니라 옆(+Z)으로 간다(실측 2026-08-30: Female Start Walking 의 Chest 오프셋이
+    (0.89, 0, 3.94) 로 Z-major). Character Studio 는 Y-up 을 전제하므로 그대로
+    실으면 자세가 틀어진다.
+
+    변환은 좌표계를 통째로 돌리는 것이다. 위(Z)를 Y 로 보내고 오른손계를 지키려면
+    앞(Y)을 -Z 로 보낸다: (x, y, z) -> (x, z, -y). 이것은 X 축 +90도 기저 회전으로,
+    biped_export 의 `_max_to_bvh_xyz` 가 Max Z-up 을 내보낼 때 쓰는 것과 같은 대응이다.
+
+    - 오프셋(rest 골격): 벡터에 P 를 적용한다.
+    - 루트 위치 채널(프레임마다): 같은 P 를 적용한다.
+    - 회전 채널: 로컬 회전 R 을 기저 이동으로 옮긴다 = P R P^T. 사원수로 하면
+      P·(축) 을 축으로, 각은 그대로다. Y-major 판정은 척추 오프셋으로 한다.
+    """
+    if has_upright_spine(serialize_bvh(bvh)):
+        return bvh
+
+    def p_vec(v):
+        x, y, z = v
+        return (x, z, -y)
+
+    # X 축 +90도 사원수: (x,y,z)->(x,z,-y) 를 재현한다.
+    P = euler_to_quat(90.0, 0.0, 0.0)
+    Pinv = (-P[0], -P[1], -P[2], P[3])
+
+    def convert_joint(joint: BvhJoint) -> BvhJoint:
+        return BvhJoint(
+            name=joint.name,
+            offset=p_vec(joint.offset),
+            channels=list(joint.channels),
+            children=[convert_joint(c) for c in joint.children],
+        )
+
+    new_root = convert_joint(bvh.root)
+
+    # 각 관절의 열 구간을 미리 잡아 둔다.
+    spans: dict[int, tuple[BvhJoint, int]] = {}
+    order: list[BvhJoint] = []
+
+    def index(joint: BvhJoint, start: int) -> int:
+        spans[id(joint)] = (joint, start)
+        order.append(joint)
+        col = start + _channel_count_flat(joint)
+        for child in joint.children:
+            col = index(child, col)
+        return col
+
+    index(bvh.root, 0)
+
+    new_frames: list[list[float]] = []
+    for row in bvh.frames:
+        out = list(row)
+        for joint in order:
+            _, start = spans[id(joint)]
+            # 위치 채널: P 적용
+            if any(c.endswith("position") for c in joint.channels):
+                px, py, pz = _axis_values(joint, row, start, "position")
+                _write_axis_values(joint, out, start, "position", p_vec((px, py, pz)))
+            # 회전 채널: P R P^T
+            if any(c.endswith("rotation") for c in joint.channels):
+                rx, ry, rz = _axis_values(joint, row, start, "rotation")
+                q = euler_to_quat(rx, ry, rz)
+                rotated = quat_mul(quat_mul(P, q), Pinv)
+                nx, ny, nz = quat_to_euler(rotated)
+                _write_axis_values(joint, out, start, "rotation", (nx, ny, nz))
+        new_frames.append(out)
+
+    return BvhFile(root=new_root, frame_time=bvh.frame_time, frames=new_frames)
+
+
+def _channel_count_flat(joint: BvhJoint) -> int:
+    return len(joint.channels)
+
+
 def wrap_static_root(bvh: BvhFile, name: str = "Root") -> BvhFile:
     """원점에 고정 루트를 하나 씌운다. 이미 있으면 그대로 둔다.
 
@@ -544,7 +621,11 @@ def has_upright_spine(text: str) -> bool:
         spine = bvh.root.children[0]
     if spine is None:
         return True
-    return abs(spine.offset[1]) >= abs(spine.offset[0])
+    # Y 가 세 축 중 가장 크면 위를 향한 것이다. 예전에는 X 하고만 견줘서(``>= x``)
+    # **Z-major 골격을 못 잡았다** — Max Biped 를 Blender 로 내보내면 척추가 +Z 로
+    # 눕는데(실측 2026-08-30), y=x=0, z=8 이면 ``0>=0`` 이 True 라 upright 로 오판했다.
+    ox, oy, oz = (abs(v) for v in spine.offset)
+    return oy >= ox and oy >= oz
 
 
 def recenter_ground(bvh: BvhFile) -> BvhFile:
