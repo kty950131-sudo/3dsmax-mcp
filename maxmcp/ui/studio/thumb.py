@@ -177,6 +177,9 @@ def build_pose_data(clip_path: str) -> dict[str, Any]:
 
 def load_pose_data(clip_path: str, cache_dir: str) -> dict[str, Any]:
     """캐시가 유효하면 재사용하고, 아니면 다시 계산해 저장한다."""
+    # FBX 카드도 같은 미리보기를 쓴다. 곁에 BVH 를 만들어 두고 그 파일을 읽는다.
+    from maxmcp.ui.studio.fbx_import import resolve_clip_path
+    clip_path = resolve_clip_path(clip_path)
     path = cache_path(clip_path, cache_dir)
     try:
         with open(path, encoding="utf-8") as handle:

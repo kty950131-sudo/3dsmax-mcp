@@ -10,6 +10,7 @@ import tempfile
 from typing import Optional, Sequence
 
 from maxmcp.helpers.bvh import DEFAULT_BIPED_PRUNE, has_upright_spine, prepare_for_biped
+from maxmcp.ui.studio.fbx_import import resolve_clip_path
 
 
 def _rt():
@@ -174,6 +175,11 @@ def import_clip(
     """바이패드를 만들고 클립을 올린다."""
     if not os.path.isfile(src_path):
         return f"ERROR: file not found: {src_path}"
+    # FBX 는 곁에 BVH 를 만들어 두고 그 길을 탄다. loadMocapFile 은 BVH 만 받는다.
+    try:
+        src_path = resolve_clip_path(src_path)
+    except Exception as exc:
+        return f"ERROR: {exc}"
 
     load_path = src_path
     upright = True
@@ -251,6 +257,11 @@ def retarget_clip(
     """
     if not os.path.isfile(src_path):
         return f"ERROR: file not found: {src_path}"
+    # FBX 는 곁에 BVH 를 만들어 두고 그 길을 탄다. loadMocapFile 은 BVH 만 받는다.
+    try:
+        src_path = resolve_clip_path(src_path)
+    except Exception as exc:
+        return f"ERROR: {exc}"
 
     rt = _rt()
     bip = rt.getNodeByName(bip_name)

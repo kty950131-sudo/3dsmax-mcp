@@ -38,7 +38,7 @@ import bpy
 # Blender 의 파이썬에는 이 저장소가 없다. maxmcp.helpers 는 표준 라이브러리만 쓰므로
 # 경로만 넣어 주면 그대로 import 된다.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from maxmcp.helpers.bvh import merge_into_parent, parse_bvh, serialize_bvh  # noqa: E402
+from maxmcp.helpers.bvh import has_upright_spine, merge_into_parent, parse_bvh, serialize_bvh, zup_to_yup  # noqa: E402
 
 # Max Biped -> 공백 없는 표준 이름. 여기 없는 본은 내보내기 전에 지운다.
 RENAME = {
@@ -95,6 +95,32 @@ def pick_armature():
     return None
 
 
+def pick_any_armature():
+    """Bip001 이 아닌 일반 FBX(Mixamo·UE 등)용 — 본이 가장 많은 아마추어.
+
+    같은 파일에 1본짜리 껍데기 아마추어가 딸려 오는 일이 있어(실측: `Armature`
+    안에 `Bone009` 하나) 첫 번째를 집으면 그것을 잡는다. 본 수로 고른다.
+    """
+    arms = [o for o in bpy.data.objects if o.type == "ARMATURE"]
+    if not arms:
+        return None
+    return max(arms, key=lambda a: len(a.data.bones))
+
+
+def sanitize_generic(arm) -> int:
+    """일반 FBX 의 본 이름을 BVH 파서가 읽을 수 있게 고친다.
+
+    파서는 `JOINT` 다음 토큰 하나를 이름으로 읽으므로 공백이 있으면 잘린다.
+    `mixamorig:Hips` 같은 이름공간은 콜론이 성가시니 벗긴다. 본은 지우지 않는다 —
+    어떤 뼈가 필수인지 일반 골격에서는 알 수 없다.
+    """
+    for bone in arm.data.bones:
+        name = bone.name.split(":")[-1].replace(" ", "_")
+        if name != bone.name:
+            bone.name = name
+    return len(arm.data.bones)
+
+
 def action_range(arm) -> tuple[int, int]:
     """액션의 실제 길이. 액션이 없으면 씬 범위로 물러선다."""
     anim = arm.animation_data
@@ -121,16 +147,23 @@ def strip_and_rename(arm, keep: dict) -> int:
     return len(arm.data.bones)
 
 
-def convert(src: str, dst: str, keep: dict) -> dict:
+def convert(src: str, dst: str, keep: dict, generic_ok: bool = False) -> dict:
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.ops.import_scene.fbx(filepath=src)
 
     arm = pick_armature()
+    generic = False
     if arm is None:
-        return {"skipped": "Bip001 체인이 없습니다"}
+        if not generic_ok:
+            return {"skipped": "Bip001 체인이 없습니다"}
+        # Biped 가 아닌 일반 FBX. 이름만 정리하고 본은 그대로 둔다.
+        arm = pick_any_armature()
+        if arm is None:
+            return {"skipped": "아마추어가 없습니다"}
+        generic = True
 
     start, end = action_range(arm)
-    bones = strip_and_rename(arm, keep)
+    bones = sanitize_generic(arm) if generic else strip_and_rename(arm, keep)
 
     bpy.ops.object.select_all(action="DESELECT")
     arm.select_set(True)
@@ -147,22 +180,41 @@ def convert(src: str, dst: str, keep: dict) -> dict:
     # 하나다. 둘로 둔 채 넘기면 Character Studio 가 모르는 이름이 필수 체인 중간에
     # 끼어 ``loadMocapFile`` 이 파일 전체를 조용히 거부한다. 합성은 무손실이다.
     with open(dst, encoding="utf-8") as handle:
-        merged = merge_into_parent(parse_bvh(handle.read()), "Pelvis")
+        tree = parse_bvh(handle.read())
+    merged_pelvis = False
+    if not generic:
+        # 엘렌 묶음은 COM(Bip001->Hips)이 루트이고 그 아래 Pelvis 가 있어 합쳤다.
+        # 그런데 Max 에서 바로 내보낸 Biped FBX 는 **골반이 루트**다(실측 2026-08-30:
+        # Breathing Idle · Female Start Walking · Standing Melee 세 파일 모두
+        # 루트가 `Bip001 Pelvis`, COM 본 없음). 그때 merge_into_parent 는 "루트는
+        # 부모가 없다" 며 예외를 던진다. 루트면 이름만 Hips 로 바꾼다 — Character
+        # Studio 가 아는 이름이면 되고, 합칠 짝이 없으니 잃는 동작도 없다.
+        if tree.root.name == "Pelvis":
+            tree.root.name = "Hips"
+        else:
+            tree = merge_into_parent(tree, "Pelvis")
+            merged_pelvis = True
+    # Max Biped 를 Blender 로 내보내면 뼈가 Z 축을 따라 눕는다(척추가 옆으로).
+    # Character Studio 는 Y-up 을 전제하므로 세워 준다. 이미 Y-up 이면 그대로 둔다.
+    tree = zup_to_yup(tree)
     with open(dst, "w", encoding="utf-8") as handle:
-        handle.write(serialize_bvh(merged))
+        handle.write(serialize_bvh(tree))
 
     return {
         "frames": end - start + 1,
-        "bones": bones - 1,  # Pelvis 를 Hips 에 합쳤다
+        "bones": bones - (1 if merged_pelvis else 0),
         "fps": bpy.context.scene.render.fps,
+        "generic": generic,
     }
 
 
 def main() -> int:
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--src", help="FBX 폴더 (일괄)")
+    ap.add_argument("--out", help="BVH 출력 폴더 (일괄)")
+    ap.add_argument("--file", help="FBX 파일 하나 (스튜디오가 부른다)")
+    ap.add_argument("--dst", help="그 파일의 BVH 출력 경로")
     ap.add_argument("--drop-prefix", default="Ellen_")
     ap.add_argument("--keep-fingers", action="store_true")
     args = ap.parse_args(argv)
@@ -170,6 +222,30 @@ def main() -> int:
     keep = dict(RENAME)
     if args.keep_fingers:
         keep.update(FINGERS)
+
+    # 단일 파일 모드. 스튜디오가 카드 하나를 열 때 부른다. Biped 가 아니어도
+    # 일반 골격으로 내보낸다 — 무엇이 들어올지 모르는 입구이기 때문이다.
+    if args.file:
+        if not args.dst:
+            ap.error("--file 에는 --dst 가 필요합니다")
+        base = os.path.basename(args.file)
+        try:
+            info = convert(args.file, args.dst, keep, generic_ok=True)
+        except Exception as exc:
+            print("RESULT\t1/1\t" + base + "\tFAIL\t" + str(exc))
+            return 1
+        if "skipped" in info:
+            print("RESULT\t1/1\t" + base + "\tSKIP\t" + info["skipped"])
+            return 1
+        print(
+            "RESULT\t1/1\t" + base + "\tOK\t" + os.path.basename(args.dst)
+            + "\tframes=%d\tbones=%d\tfps=%s\tgeneric=%s"
+            % (info["frames"], info["bones"], info["fps"], info["generic"])
+        )
+        return 0
+
+    if not args.src or not args.out:
+        ap.error("--src 와 --out (일괄) 또는 --file 과 --dst (단일) 을 주십시오")
 
     os.makedirs(args.out, exist_ok=True)
     names = sorted(n for n in os.listdir(args.src) if n.lower().endswith(".fbx"))
